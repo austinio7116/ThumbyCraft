@@ -2,6 +2,8 @@ build_host/
 build_device/
 build_*/
 *.uf2
+# …but DO ship the release firmware so anyone can clone + flash.
+!firmware_thumbycraft.uf2
 *.elf
 *.bin
 *.dis

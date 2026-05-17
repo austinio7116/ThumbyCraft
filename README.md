@@ -18,11 +18,15 @@ proc audio synth  ·  flash-backed buildings  ·  280 MHz dual-core M33
 
 ## Quick start
 
-1. Build the firmware: `cmake -S device -B build_device -DPICO_SDK_PATH=$HOME/pico-sdk && cmake --build build_device -j8`
-2. Hold **D-pad DOWN** while powering on the Thumby Color to enter
+A **prebuilt firmware** ships with the repo at the root —
+`firmware_thumbycraft.uf2`. To play:
+
+1. Hold **D-pad DOWN** while powering on the Thumby Color to enter
    BOOTSEL mode — it appears as a USB drive `RPI-RP2350`
-3. Drag `build_device/thumbycraft.uf2` onto the drive
-4. Power-cycle. You're playing.
+2. Drag `firmware_thumbycraft.uf2` onto the drive
+3. Power-cycle. You're playing.
+
+To build from source, see [Build](#build) below.
 
 For fast iteration on a desktop, see **[Host build](#host-build)** below.
 
