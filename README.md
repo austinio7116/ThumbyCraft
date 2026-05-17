@@ -1,7 +1,7 @@
 # ThumbyCraft
 
 A bare-metal Minecraft-style voxel game for the
-[Thumby Color](https://thumby.us/) — a credit-card-sized handheld with a
+[Thumby Color](https://thumby.us/) — a tiny handheld with a
 128×128 RGB565 screen, dual-core ARM Cortex-M33, **no GPU**, and 512 KB
 of SRAM. Everything you see is rendered by per-pixel CPU raycasting in
 real time, with full survival mechanics, mobs, music, and persistent
