@@ -1,0 +1,13 @@
+build_host/
+build_device/
+build_*/
+*.uf2
+*.elf
+*.bin
+*.dis
+*.sav
+
+# IDE
+.vscode/
+.idea/
+*.swp
