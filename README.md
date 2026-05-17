@@ -83,9 +83,9 @@ hole you dug is still there.
   through highlands
 - **Wooden huts** — rare 5×5 plank cabins you'll occasionally stumble
   on. Step through the doorway and shelter in one.
-- **Voxel clouds** — blocky white cloud cells (Minecraft-style) at a
-  fixed altitude, drifting slowly east during the day, turning orange
-  at sunrise and sunset
+- **Drifting clouds** — soft procedural cloud layer scrolling slowly
+  east across the sky during the day, turning orange at sunrise and
+  sunset
 - **Coal & iron ore** — denser in mountains; mineable with the right
   pickaxe tier
 
@@ -501,22 +501,15 @@ the 12-bit PWM DAC's range).
 
 ## Sky effects (`craft_render.c`)
 
-### Voxel clouds
-Minecraft-style blocky clouds at `y=58`, above any terrain. The cloud
-layer is a 2D grid of `CLOUD_CELL`-wide cells (4 world units each).
-For each upward sky-ray pixel, the renderer finds where the ray
-crosses the cloud plane, snaps to the cell containing that (wx, wz),
-and looks up the cell with two hashes (a primary cell-fill check and
-a coarser 4×4 super-cell clump check). The two-hash rule gives
-contiguous cloud BLOBS rather than speckled isolated voxels — typical
-coverage ~15 %.
-
-No interpolation: cell edges are sharp pixelated steps when projected
-to screen, exactly like vanilla MC clouds viewed from below. Drift
-is just `world_time * 0.5` added to the X sample so clouds scroll
-east. Twilight tints push cloud colour toward orange when
-`|sun_y| < 0.3`. Per-pixel cost ~12-15 cycles — about 1 % of one
-core at typical outdoor view.
+### Procedural clouds
+Sky-plane clouds at `y=58`, above any terrain. For each upward sky-ray
+pixel, the renderer finds where the ray crosses the cloud plane,
+samples two octaves of cheap bilinear value-noise at that (wx, wz),
+thresholds for cloudy-vs-clear, and alpha-blends white into the sky
+colour with a distance fade. Drift is `world_time * 0.5` added to the
+X sample so clouds scroll east. Twilight tints push cloud colour
+toward orange when `|sun_y| < 0.3`. Per-pixel cost ~25-30 cycles —
+about 1-2 % of one core at typical outdoor view.
 
 ### Sun, moon, stars
 Sun + moon are billboards anchored on the celestial sphere. Stars are

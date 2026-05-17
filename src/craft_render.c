@@ -341,48 +341,44 @@ void craft_render_begin(const CraftCamera *cam) {
 }
 
 CRAFT_HOT
-/* --- Voxel cloud overlay ----------------------------------------
+/* --- Procedural cloud overlay -----------------------------------
  *
- * Minecraft-style voxel clouds at a fixed altitude. The cloud layer
- * is a 2D grid of cells at CLOUD_CELL world units across. Each cell
- * is either "cloud" or "clear" — a single hash + threshold per cell.
- * No interpolation: edges are sharp pixelated steps when projected
- * to screen, exactly like vanilla MC clouds viewed from below.
+ * Sky-plane clouds at a fixed altitude. For each sky pixel whose ray
+ * points up and originates below the cloud layer, find the world
+ * (x, z) where the ray crosses CLOUD_Y, sample two octaves of cheap
+ * bilinear noise + threshold for cloudy-vs-clear, blend white into
+ * the sky colour. Distance fade prevents a hard horizon line.
  *
- * For each upward sky-ray pixel we find the (wx, wz) where the ray
- * crosses CLOUD_Y, snap to the cell containing it (after applying
- * east-drift), and look up the cell.
- *
- * Cost is ~12-15 cycles per sky pixel that survives the gating —
- * cheaper than the smooth version because there's no bilinear lerp.
+ * Cost is ~25-30 cycles per sky pixel that passes the upward + day
+ * filter — roughly 1-2% of one core at typical outdoor view.
  */
 #define CLOUD_Y           58.0f
-#define CLOUD_CELL        4.0f        /* world units per cloud "block" */
-#define CLOUD_DENSITY_BIT 0x40        /* hash mask: bit set → cloud */
+#define CLOUD_SCALE_BASE  0.035f
+#define CLOUD_SCALE_DET   0.090f
+#define CLOUD_THRESHOLD   0.55f
 
 INLINE_HOT uint32_t cloud_hash(int x, int z) {
     uint32_t h = (uint32_t)x * 374761393u ^ (uint32_t)z * 668265263u;
     h = (h ^ (h >> 13)) * 1274126177u;
     return h ^ (h >> 16);
 }
-
-/* Two-cell rule: a cell is cloud iff BOTH its primary hash bit AND
- * a coarser-grid clump bit are set. The coarser grid (cells of 4)
- * gives larger contiguous cloud blobs instead of single isolated
- * voxels speckled across the sky. Result is recognisable cloud
- * shapes with sharp blocky edges. */
-INLINE_HOT bool cloud_cell(int cx, int cz) {
-    uint32_t h1 = cloud_hash(cx, cz);
-    /* primary fill — ~50 % of cells pass this */
-    if (!(h1 & 0x80)) return false;
-    /* clumping pass: 4×4 super-cell must also be active for ~30 %
-     * of super-cells. Net coverage roughly 50 % × 30 % ≈ 15 %. */
-    uint32_t h2 = cloud_hash(cx >> 2, cz >> 2);
-    return (h2 & 0x40) != 0;
+INLINE_HOT float cloud_noise(float x, float z) {
+    int ix = (int)floorf(x), iz = (int)floorf(z);
+    float fx = x - ix, fz = z - iz;
+    fx = fx * fx * (3.0f - 2.0f * fx);
+    fz = fz * fz * (3.0f - 2.0f * fz);
+    float v00 = (cloud_hash(ix,     iz)     & 0xFFFF) * (1.0f / 65535.0f);
+    float v10 = (cloud_hash(ix + 1, iz)     & 0xFFFF) * (1.0f / 65535.0f);
+    float v01 = (cloud_hash(ix,     iz + 1) & 0xFFFF) * (1.0f / 65535.0f);
+    float v11 = (cloud_hash(ix + 1, iz + 1) & 0xFFFF) * (1.0f / 65535.0f);
+    float a = v00 * (1.0f - fx) + v10 * fx;
+    float b = v01 * (1.0f - fx) + v11 * fx;
+    return a * (1.0f - fz) + b * fz;
 }
 
 INLINE_HOT uint16_t cloud_overlay(uint16_t sky_c, Vec3 origin, Vec3 dir) {
-    /* Skip cheap-and-early when the ray can't possibly hit the layer. */
+    /* Skip cheap-and-early when the ray can't possibly hit the
+     * cloud plane. */
     if (dir.y <= 0.01f) return sky_c;
     if (origin.y >= CLOUD_Y - 0.5f) return sky_c;
     if (s_sun_y < -0.30f) return sky_c;       /* invisible at deep night */
@@ -393,33 +389,29 @@ INLINE_HOT uint16_t cloud_overlay(uint16_t sky_c, Vec3 origin, Vec3 dir) {
     float wx = origin.x + dir.x * t + s_cloud_drift;
     float wz = origin.z + dir.z * t;
 
-    /* Snap to cloud cell. floorf handles negative coords correctly. */
-    int cx = (int)floorf(wx / CLOUD_CELL);
-    int cz = (int)floorf(wz / CLOUD_CELL);
-    if (!cloud_cell(cx, cz)) return sky_c;
+    float n1 = cloud_noise(wx * CLOUD_SCALE_BASE, wz * CLOUD_SCALE_BASE);
+    float n2 = cloud_noise(wx * CLOUD_SCALE_DET,  wz * CLOUD_SCALE_DET);
+    float density = n1 * 0.7f + n2 * 0.3f;
+    if (density < CLOUD_THRESHOLD) return sky_c;
 
-    /* Solid cloud — pick a tint. Twilight pushes toward orange. */
-    int cr = 235, cg = 235, cb = 245;
+    float strength = (density - CLOUD_THRESHOLD) / (1.0f - CLOUD_THRESHOLD);
+    if (strength > 1.0f) strength = 1.0f;
+    /* Distance fade so the horizon-line of clouds is soft. */
+    float dist_fade = 1.0f - (t / 220.0f);
+    if (dist_fade < 0.0f) dist_fade = 0.0f;
+    strength *= dist_fade;
+    /* Twilight tint — clouds turn orange at sunrise/sunset. */
+    int cr = 230, cg = 230, cb = 245;
     if (s_sun_y < 0.3f && s_sun_y > -0.3f) {
         float glow = 1.0f - fabsf(s_sun_y) / 0.3f;
         cr = (int)(cr + (255 - cr) * glow);
-        cg = (int)(cg + (155 - cg) * glow);
-        cb = (int)(cb + ( 80 - cb) * glow);
-    }
-    /* At very far distance, fade INTO the sky so the cloud strip
-     * doesn't paint a hard horizon line. Fade is per-pixel but
-     * since it's based on `t` (ray-distance to plane) it's smooth
-     * across the screen, not within a cell — preserves the voxel
-     * look. */
-    int alpha = 255;
-    if (t > 140.0f) {
-        float fade = 1.0f - (t - 140.0f) / 80.0f;
-        if (fade <= 0.0f) return sky_c;
-        alpha = (int)(fade * 255.0f);
+        cg = (int)(cg + (140 - cg) * glow);
+        cb = (int)(cb + ( 70 - cb) * glow);
     }
     int sr = (sky_c >> 11) & 0x1F;
     int sg = (sky_c >>  5) & 0x3F;
     int sb =  sky_c        & 0x1F;
+    int alpha = (int)(strength * 256.0f);
     int r = sr + (((cr >> 3) - sr) * alpha) / 256;
     int g = sg + (((cg >> 2) - sg) * alpha) / 256;
     int b = sb + (((cb >> 3) - sb) * alpha) / 256;
