@@ -33,6 +33,8 @@
 #include "craft_audio.h"
 #include "craft_mobs.h"
 #include "craft_torches.h"
+#include "craft_furnace.h"
+#include "craft_chests.h"
 
 #include <string.h>
 
@@ -360,17 +362,40 @@ void craft_player_tick(CraftPlayer *p, const CraftInput *in, float dt) {
                     goto break_handled;
                 }
                 craft_world_set(h.bx, h.by, h.bz, BLK_AIR);
+                if (was == BLK_FURNACE) {
+                    /* Free the furnace's state slot. Any items still
+                     * in input/fuel/output are lost — same as vanilla. */
+                    craft_furnace_remove(h.bx, h.by, h.bz);
+                }
+                if (was == BLK_CHEST) {
+                    craft_chest_remove(h.bx, h.by, h.bz);
+                }
                 p->broke_block = true;
                 p->last_block_touched = was;
                 p->last_action_x = h.bx;
                 p->last_action_y = h.by;
                 p->last_action_z = h.bz;
                 if (was != BLK_AIR) {
+                    /* Mining-drop table — matches vanilla Minecraft:
+                     *   STONE → COBBLE (silk-touch would give stone,
+                     *                   we don't have enchants yet)
+                     *   GRASS → DIRT   (grass is a surface state,
+                     *                   block underneath is dirt)
+                     *   everything else → drops itself
+                     * Without this, mining stone gave you stone and
+                     * the furnace recipe (needs cobble) was unobtainable. */
+                    BlockId dropped = was;
+                    if      (was == BLK_STONE) dropped = BLK_COBBLE;
+                    else if (was == BLK_GRASS) dropped = BLK_DIRT;
                     /* Track inventory counts in BOTH modes — creative
                      * needs them so the crafting picker can know what
                      * the player has mined. Creative just never
                      * decrements on place. */
-                    p->inventory[was]++;
+                    p->inventory[dropped]++;
+                    /* Recipe matcher + hotbar still key off the
+                     * dropped item, so update `was` for the rest of
+                     * this block of code. */
+                    was = dropped;
                     /* Both modes: auto-add to hotbar if not present.
                      * In creative, slots only appear as the player
                      * mines a block type for the first time. */
@@ -399,6 +424,28 @@ break_handled: ;
 skip_attack: ;
         if (in->b_pressed) {
             CraftRayHit h = craft_render_pick(&p->cam);
+            /* Interact: if the targeted block is a furnace or chest,
+             * open the appropriate UI instead of placing on the
+             * adjacent face. Routed via a player request flag so the
+             * menu-open call lives in craft_main where the platform-
+             * level menu lifecycle is. */
+            if (h.hit && h.distance < 5.0f) {
+                BlockId hit_blk = craft_world_get(h.bx, h.by, h.bz);
+                if (hit_blk == BLK_FURNACE) {
+                    p->request_furnace_open = true;
+                    p->furnace_open_x = h.bx;
+                    p->furnace_open_y = h.by;
+                    p->furnace_open_z = h.bz;
+                    goto place_done;
+                }
+                if (hit_blk == BLK_CHEST) {
+                    p->request_chest_open = true;
+                    p->chest_open_x = h.bx;
+                    p->chest_open_y = h.by;
+                    p->chest_open_z = h.bz;
+                    goto place_done;
+                }
+            }
             if (h.hit && h.distance < 8.0f) {
                 BlockId blk = p->hotbar[p->hotbar_idx];
                 /* Tools (pickaxe) are non-placeable; skip silently. */

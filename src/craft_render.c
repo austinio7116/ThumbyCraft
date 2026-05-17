@@ -29,6 +29,7 @@
 
 static bool  s_fog_enabled = true;
 static float s_sun_y = 1.0f;          /* sin(sun_angle): +1 noon, -1 midnight */
+static float s_cloud_drift = 0.0f;    /* world units of east drift since boot */
 static int   s_brightness_q8 = 256;   /* 0..256, applied to face_shade */
 static int   s_sky_top_r, s_sky_top_g, s_sky_top_b;       /* RGB565 components */
 static int   s_sky_horizon_r, s_sky_horizon_g, s_sky_horizon_b;
@@ -40,6 +41,9 @@ float craft_render_sun_y(void) { return s_sun_y; }
  * Called once per frame from render_begin. */
 void craft_render_set_time(float world_time) {
     const float DAY_LENGTH = 240.0f;
+    /* Cloud drift — slow east scroll, ~0.5 world blocks per second.
+     * Wraps every 16384 units which is way beyond a play session. */
+    s_cloud_drift = world_time * 0.5f;
     float t = world_time / DAY_LENGTH;
     t -= (float)((int)t);
     if (t < 0) t += 1.0f;
@@ -337,6 +341,94 @@ void craft_render_begin(const CraftCamera *cam) {
 }
 
 CRAFT_HOT
+/* --- Voxel cloud overlay ----------------------------------------
+ *
+ * Minecraft-style voxel clouds at a fixed altitude. The cloud layer
+ * is a 2D grid of cells at CLOUD_CELL world units across. Each cell
+ * is either "cloud" or "clear" — a single hash + threshold per cell.
+ * No interpolation: edges are sharp pixelated steps when projected
+ * to screen, exactly like vanilla MC clouds viewed from below.
+ *
+ * For each upward sky-ray pixel we find the (wx, wz) where the ray
+ * crosses CLOUD_Y, snap to the cell containing it (after applying
+ * east-drift), and look up the cell.
+ *
+ * Cost is ~12-15 cycles per sky pixel that survives the gating —
+ * cheaper than the smooth version because there's no bilinear lerp.
+ */
+#define CLOUD_Y           58.0f
+#define CLOUD_CELL        4.0f        /* world units per cloud "block" */
+#define CLOUD_DENSITY_BIT 0x40        /* hash mask: bit set → cloud */
+
+INLINE_HOT uint32_t cloud_hash(int x, int z) {
+    uint32_t h = (uint32_t)x * 374761393u ^ (uint32_t)z * 668265263u;
+    h = (h ^ (h >> 13)) * 1274126177u;
+    return h ^ (h >> 16);
+}
+
+/* Two-cell rule: a cell is cloud iff BOTH its primary hash bit AND
+ * a coarser-grid clump bit are set. The coarser grid (cells of 4)
+ * gives larger contiguous cloud blobs instead of single isolated
+ * voxels speckled across the sky. Result is recognisable cloud
+ * shapes with sharp blocky edges. */
+INLINE_HOT bool cloud_cell(int cx, int cz) {
+    uint32_t h1 = cloud_hash(cx, cz);
+    /* primary fill — ~50 % of cells pass this */
+    if (!(h1 & 0x80)) return false;
+    /* clumping pass: 4×4 super-cell must also be active for ~30 %
+     * of super-cells. Net coverage roughly 50 % × 30 % ≈ 15 %. */
+    uint32_t h2 = cloud_hash(cx >> 2, cz >> 2);
+    return (h2 & 0x40) != 0;
+}
+
+INLINE_HOT uint16_t cloud_overlay(uint16_t sky_c, Vec3 origin, Vec3 dir) {
+    /* Skip cheap-and-early when the ray can't possibly hit the layer. */
+    if (dir.y <= 0.01f) return sky_c;
+    if (origin.y >= CLOUD_Y - 0.5f) return sky_c;
+    if (s_sun_y < -0.30f) return sky_c;       /* invisible at deep night */
+
+    float t = (CLOUD_Y - origin.y) / dir.y;
+    if (t > 220.0f) return sky_c;             /* over the fog horizon */
+
+    float wx = origin.x + dir.x * t + s_cloud_drift;
+    float wz = origin.z + dir.z * t;
+
+    /* Snap to cloud cell. floorf handles negative coords correctly. */
+    int cx = (int)floorf(wx / CLOUD_CELL);
+    int cz = (int)floorf(wz / CLOUD_CELL);
+    if (!cloud_cell(cx, cz)) return sky_c;
+
+    /* Solid cloud — pick a tint. Twilight pushes toward orange. */
+    int cr = 235, cg = 235, cb = 245;
+    if (s_sun_y < 0.3f && s_sun_y > -0.3f) {
+        float glow = 1.0f - fabsf(s_sun_y) / 0.3f;
+        cr = (int)(cr + (255 - cr) * glow);
+        cg = (int)(cg + (155 - cg) * glow);
+        cb = (int)(cb + ( 80 - cb) * glow);
+    }
+    /* At very far distance, fade INTO the sky so the cloud strip
+     * doesn't paint a hard horizon line. Fade is per-pixel but
+     * since it's based on `t` (ray-distance to plane) it's smooth
+     * across the screen, not within a cell — preserves the voxel
+     * look. */
+    int alpha = 255;
+    if (t > 140.0f) {
+        float fade = 1.0f - (t - 140.0f) / 80.0f;
+        if (fade <= 0.0f) return sky_c;
+        alpha = (int)(fade * 255.0f);
+    }
+    int sr = (sky_c >> 11) & 0x1F;
+    int sg = (sky_c >>  5) & 0x3F;
+    int sb =  sky_c        & 0x1F;
+    int r = sr + (((cr >> 3) - sr) * alpha) / 256;
+    int g = sg + (((cg >> 2) - sg) * alpha) / 256;
+    int b = sb + (((cb >> 3) - sb) * alpha) / 256;
+    if (r > 31) r = 31;
+    if (g > 63) g = 63;
+    if (b > 31) b = 31;
+    return (uint16_t)((r << 11) | (g << 5) | b);
+}
+
 void craft_render_strip(const CraftCamera *cam, uint16_t *fb,
                         int y_start, int y_end) {
     bool underwater = false;
@@ -371,6 +463,7 @@ void craft_render_strip(const CraftCamera *cam, uint16_t *fb,
             uint8_t z_q = 255;
             if (!h.hit) {
                 out = sky_at(py);
+                out = cloud_overlay(out, cam->pos, dir);
                 /* zbuf sky = far sentinel (255 default). */
             } else {
                 const uint16_t *tex = craft_block_texture(h.blk, h.face);
@@ -701,7 +794,11 @@ void craft_render_pick_outline(const CraftCamera *cam, uint16_t *fb) {
     };
     if ((unsigned)h.face < 6) {
         const uint8_t *fc = face_corners[h.face];
-        uint16_t place_col = rgb565(240, 240, 200);   /* warm white */
+        /* Light grey — still noticeably brighter than the dark-grey
+         * break-edges (30,30,30) so the face reads as "active for
+         * placement", but no longer the eye-grabbing near-white that
+         * the earlier 240,240,200 was. */
+        uint16_t place_col = rgb565(140, 140, 150);
         for (int e = 0; e < 4; e++) {
             int a = fc[e];
             int b = fc[(e + 1) & 3];

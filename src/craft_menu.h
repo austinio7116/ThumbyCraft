@@ -42,6 +42,16 @@ typedef enum {
 void              craft_menu_open(const CraftInput *in);
 void              craft_menu_close(void);
 bool              craft_menu_is_open(void);
+
+/* Open the menu directly on the FURNACE page bound to a specific
+ * world coord. Called from the B-press handler when the player
+ * right-clicks an in-world furnace block. */
+void              craft_menu_open_furnace(const CraftInput *in,
+                                          int wx, int wy, int wz);
+
+/* Same for chests — opens PAGE_CHEST bound to the chest at (x,y,z). */
+void              craft_menu_open_chest(const CraftInput *in,
+                                        int wx, int wy, int wz);
 CraftMenuResult   craft_menu_tick(const CraftInput *in,
                                   const CraftPlayer *p);
 void              craft_menu_draw(uint16_t *fb,

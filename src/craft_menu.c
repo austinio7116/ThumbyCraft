@@ -11,6 +11,8 @@
 #include "craft_blocks.h"
 #include "craft_audio.h"
 #include "craft_hud.h"
+#include "craft_furnace.h"
+#include "craft_chests.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -46,6 +48,8 @@ typedef enum {
     PAGE_CRAFT     = 2,
     PAGE_RECIPES   = 3,
     PAGE_CONTROLS  = 4,
+    PAGE_FURNACE   = 5,
+    PAGE_CHEST     = 6,
 } MenuPage;
 static MenuPage s_page;
 static bool  s_open;
@@ -60,6 +64,23 @@ static int   s_controls_scroll; /* first visible line on controls page */
 static BlockId s_craft_grid[9];     /* row-major 3×3 grid */
 static int     s_craft_sel;         /* 0..8 = grid, 9 = output */
 static int     s_craft_last_row;    /* row to return to from output */
+
+/* Furnace page state — the page is bound to a specific world block
+ * when craft_menu_open_furnace is called. s_furnace_sel selects the
+ * slot: 0 = input, 1 = fuel, 2 = output. */
+static int s_furnace_wx, s_furnace_wy, s_furnace_wz;
+static int s_furnace_sel;
+/* The B press that OPENS the page is detected in the player tick;
+ * by the time the menu sees input, B is either still held or has
+ * just been released. Without this flag the first release would
+ * immediately close the page — eat it and require a fresh press. */
+static bool s_furnace_first_release_eaten;
+
+/* Chest page — same pattern as furnace. Bound to a coord; sel is
+ * 0..15 for the 4×4 slot grid. */
+static int s_chest_wx, s_chest_wy, s_chest_wz;
+static int s_chest_sel;
+static bool s_chest_first_release_eaten;
 static bool  s_input_prev_a;        /* edge filter so first A press
                                        doesn't confirm immediately on
                                        menu open */
@@ -88,6 +109,38 @@ void craft_menu_open(const CraftInput *in) {
 void craft_menu_close(void) { s_open = false; }
 bool craft_menu_is_open(void) { return s_open; }
 
+void craft_menu_open_furnace(const CraftInput *in,
+                             int wx, int wy, int wz) {
+    s_open = true;
+    s_page = PAGE_FURNACE;
+    s_furnace_wx = wx;
+    s_furnace_wy = wy;
+    s_furnace_wz = wz;
+    s_furnace_sel = 0;
+    s_furnace_first_release_eaten = false;
+    s_input_prev_a    = in ? in->a    : false;
+    s_input_prev_b    = in ? in->b    : false;
+    s_input_prev_menu = in ? in->menu : false;
+    s_dpad_was_pressed = in ?
+        (in->up || in->down || in->left || in->right) : false;
+}
+
+void craft_menu_open_chest(const CraftInput *in,
+                           int wx, int wy, int wz) {
+    s_open = true;
+    s_page = PAGE_CHEST;
+    s_chest_wx = wx;
+    s_chest_wy = wy;
+    s_chest_wz = wz;
+    s_chest_sel = 0;
+    s_chest_first_release_eaten = false;
+    s_input_prev_a    = in ? in->a    : false;
+    s_input_prev_b    = in ? in->b    : false;
+    s_input_prev_menu = in ? in->menu : false;
+    s_dpad_was_pressed = in ?
+        (in->up || in->down || in->left || in->right) : false;
+}
+
 /* D-pad U/D move repeats — slow auto-repeat. */
 #define DPAD_INITIAL_DELAY 0.30f
 #define DPAD_REPEAT       0.12f
@@ -109,8 +162,8 @@ bool craft_menu_is_open(void) { return s_open; }
 #define INV_MAX_ENTRIES BLK_COUNT     /* upper bound — one row per id */
 
 /* Snapshot of "what the player has" — rebuilt every frame the
- * inventory page draws. Cheap (BLK_COUNT ≤ 32 ish). */
-static BlockId s_inv_visible[INV_MAX_ENTRIES];
+ * inventory page draws. BlockId fits in uint8_t (values <256). */
+static uint8_t s_inv_visible[INV_MAX_ENTRIES];
 static int     s_inv_visible_count;
 static int     s_inv_scroll;          /* topmost row index */
 
@@ -352,6 +405,16 @@ static const CraftRecipe RECIPES[] = {
     { { BLK_COAL_ORE, BLK_AIR, BLK_AIR,
         BLK_STICK,    BLK_AIR, BLK_AIR,
         BLK_AIR,      BLK_AIR, BLK_AIR }, BLK_TORCH, 4, "Torches" },
+
+    /* --- Furnace (8 cobble in a hollow ring; vanilla shape) --- */
+    { { BLK_COBBLE, BLK_COBBLE, BLK_COBBLE,
+        BLK_COBBLE, BLK_AIR,    BLK_COBBLE,
+        BLK_COBBLE, BLK_COBBLE, BLK_COBBLE }, BLK_FURNACE, 1, "Furnace" },
+
+    /* --- Chest (8 planks in a hollow ring; vanilla shape) --- */
+    { { BLK_PLANK, BLK_PLANK, BLK_PLANK,
+        BLK_PLANK, BLK_AIR,   BLK_PLANK,
+        BLK_PLANK, BLK_PLANK, BLK_PLANK }, BLK_CHEST, 1, "Chest" },
 };
 #define RECIPE_COUNT ((int)(sizeof(RECIPES)/sizeof(RECIPES[0])))
 
@@ -589,6 +652,227 @@ static CraftMenuResult tick_controls_page(const CraftInput *in) {
     return CRAFT_MENU_RESULT_NONE;
 }
 
+/* --- Furnace page ----------------------------------------------- */
+
+/* Move some quantity of `blk` between the player inventory and the
+ * furnace slot. n positive = into slot, n negative = out of slot. */
+static void furnace_transfer_to_slot(CraftPlayer *p, CraftFurnace *f,
+                                     int slot, BlockId blk, int delta) {
+    uint8_t *slot_blk;
+    uint8_t *slot_n;
+    switch (slot) {
+        case 0: slot_blk = &f->input_blk;  slot_n = &f->input_n;  break;
+        case 1: slot_blk = &f->fuel_blk;   slot_n = &f->fuel_n;   break;
+        default: slot_blk = &f->output_blk; slot_n = &f->output_n; break;
+    }
+    if (delta > 0) {
+        if (p->inventory[blk] <= 0) return;
+        if (*slot_n > 0 && (BlockId)*slot_blk != blk) return;
+        if (*slot_n >= 64) return;
+        int amount = delta;
+        if (amount > p->inventory[blk]) amount = p->inventory[blk];
+        if (*slot_n + amount > 64) amount = 64 - *slot_n;
+        if (amount <= 0) return;
+        *slot_blk = (uint8_t)blk;
+        *slot_n  = (uint8_t)(*slot_n + amount);
+        p->inventory[blk] -= amount;
+    } else if (delta < 0) {
+        if (*slot_n <= 0) return;
+        int amount = -delta;
+        if (amount > *slot_n) amount = *slot_n;
+        p->inventory[*slot_blk] += amount;
+        *slot_n = (uint8_t)(*slot_n - amount);
+        if (*slot_n == 0) *slot_blk = (uint8_t)BLK_AIR;
+    }
+}
+
+static CraftMenuResult tick_furnace_page(const CraftInput *in,
+                                         CraftPlayer *pmut) {
+    CraftFurnace *f = craft_furnace_at(s_furnace_wx, s_furnace_wy, s_furnace_wz);
+
+    /* D-pad — left/right cycle the three slot positions. */
+    bool dpad_now = in->up || in->down || in->left || in->right;
+    if (dpad_now && !s_dpad_was_pressed) {
+        if (in->left  && s_furnace_sel > 0) s_furnace_sel--;
+        if (in->right && s_furnace_sel < 2) s_furnace_sel++;
+        s_dpad_repeat_t = DPAD_INITIAL_DELAY;
+    } else if (dpad_now) {
+        s_dpad_repeat_t -= 1.0f / 30.0f;
+        if (s_dpad_repeat_t <= 0.0f) {
+            if (in->left  && s_furnace_sel > 0) s_furnace_sel--;
+            if (in->right && s_furnace_sel < 2) s_furnace_sel++;
+            s_dpad_repeat_t = DPAD_REPEAT;
+        }
+    }
+    s_dpad_was_pressed = dpad_now;
+
+    /* LB/RB cycle the player's active hotbar slot — same convention
+     * as the inventory page. The visible hotbar at the bottom shows
+     * which slot will be the source/destination on A. */
+    if (in->lb_pressed) {
+        pmut->hotbar_idx = (pmut->hotbar_idx + CRAFT_HOTBAR_SLOTS - 1)
+                            % CRAFT_HOTBAR_SLOTS;
+    }
+    if (in->rb_pressed) {
+        pmut->hotbar_idx = (pmut->hotbar_idx + 1) % CRAFT_HOTBAR_SLOTS;
+    }
+
+    bool b_just_released    = !in->b    && s_input_prev_b;
+    bool menu_just_released = !in->menu && s_input_prev_menu;
+    s_input_prev_a    = in->a;
+    s_input_prev_b    = in->b;
+    s_input_prev_menu = in->menu;
+
+    /* Eat the release that belongs to the SAME B press that opened
+     * the page — otherwise opening immediately closes. */
+    if (b_just_released && !s_furnace_first_release_eaten) {
+        s_furnace_first_release_eaten = true;
+        b_just_released = false;
+    }
+
+    if (menu_just_released || b_just_released) {
+        s_open = false;
+        return CRAFT_MENU_RESULT_RESUME;
+    }
+
+    if (f && in->a_pressed) {
+        BlockId held = pmut->hotbar[pmut->hotbar_idx];
+        if (s_furnace_sel == 2) {
+            /* Output slot: A takes the smelted result back to inventory. */
+            if (f->output_n > 0) {
+                pmut->inventory[f->output_blk] += f->output_n;
+                /* Auto-hotbar the taken item if no slot has it yet. */
+                bool present = false;
+                for (int s = 0; s < CRAFT_HOTBAR_SLOTS; s++)
+                    if (pmut->hotbar[s] == f->output_blk) { present = true; break; }
+                if (!present) {
+                    for (int s = 0; s < CRAFT_HOTBAR_SLOTS; s++) {
+                        if (pmut->hotbar[s] == BLK_AIR) {
+                            pmut->hotbar[s] = f->output_blk; break;
+                        }
+                    }
+                }
+                f->output_n = 0;
+                f->output_blk = BLK_AIR;
+            }
+        } else {
+            /* Input or fuel slot. A inserts a stack (up to 8) of the
+             * held block. Validates against the slot type implicitly. */
+            if (held != BLK_AIR && pmut->inventory[held] > 0) {
+                furnace_transfer_to_slot(pmut, f, s_furnace_sel, held, 8);
+            }
+        }
+    }
+    /* B (held, not just released): pull one back out of the focused
+     * slot. Useful if the player loaded the wrong block. */
+    if (f && in->b && !s_input_prev_b && !b_just_released) {
+        BlockId slot_blk;
+        switch (s_furnace_sel) {
+            case 0: slot_blk = f->input_blk; break;
+            case 1: slot_blk = f->fuel_blk;  break;
+            default: slot_blk = f->output_blk; break;
+        }
+        if (slot_blk != BLK_AIR) {
+            furnace_transfer_to_slot(pmut, f, s_furnace_sel, slot_blk, -1);
+        }
+    }
+
+    return CRAFT_MENU_RESULT_NONE;
+}
+
+/* --- Chest page ------------------------------------------------- */
+
+#define CHEST_COLS 4
+#define CHEST_ROWS 4
+
+static CraftMenuResult tick_chest_page(const CraftInput *in,
+                                       CraftPlayer *pmut) {
+    CraftChest *c = craft_chest_at(s_chest_wx, s_chest_wy, s_chest_wz);
+
+    bool dpad_now = in->up || in->down || in->left || in->right;
+    if (dpad_now && !s_dpad_was_pressed) {
+        if (in->left  && (s_chest_sel % CHEST_COLS) > 0) s_chest_sel--;
+        if (in->right && (s_chest_sel % CHEST_COLS) < CHEST_COLS - 1) s_chest_sel++;
+        if (in->up    && s_chest_sel >= CHEST_COLS) s_chest_sel -= CHEST_COLS;
+        if (in->down  && s_chest_sel + CHEST_COLS < CHEST_COLS * CHEST_ROWS)
+            s_chest_sel += CHEST_COLS;
+        s_dpad_repeat_t = DPAD_INITIAL_DELAY;
+    } else if (dpad_now) {
+        s_dpad_repeat_t -= 1.0f / 30.0f;
+        if (s_dpad_repeat_t <= 0.0f) {
+            if (in->left  && (s_chest_sel % CHEST_COLS) > 0) s_chest_sel--;
+            if (in->right && (s_chest_sel % CHEST_COLS) < CHEST_COLS - 1) s_chest_sel++;
+            if (in->up    && s_chest_sel >= CHEST_COLS) s_chest_sel -= CHEST_COLS;
+            if (in->down  && s_chest_sel + CHEST_COLS < CHEST_COLS * CHEST_ROWS)
+                s_chest_sel += CHEST_COLS;
+            s_dpad_repeat_t = DPAD_REPEAT;
+        }
+    }
+    s_dpad_was_pressed = dpad_now;
+
+    if (in->lb_pressed) {
+        pmut->hotbar_idx = (pmut->hotbar_idx + CRAFT_HOTBAR_SLOTS - 1)
+                            % CRAFT_HOTBAR_SLOTS;
+    }
+    if (in->rb_pressed) {
+        pmut->hotbar_idx = (pmut->hotbar_idx + 1) % CRAFT_HOTBAR_SLOTS;
+    }
+
+    bool b_just_released    = !in->b    && s_input_prev_b;
+    bool menu_just_released = !in->menu && s_input_prev_menu;
+    s_input_prev_a    = in->a;
+    s_input_prev_b    = in->b;
+    s_input_prev_menu = in->menu;
+
+    if (b_just_released && !s_chest_first_release_eaten) {
+        s_chest_first_release_eaten = true;
+        b_just_released = false;
+    }
+
+    if (menu_just_released || b_just_released) {
+        s_open = false;
+        return CRAFT_MENU_RESULT_RESUME;
+    }
+
+    /* A — bidirectional transfer.
+     *   slot empty AND held item != AIR → push 8 from inventory (or
+     *     all of held type, whichever is less)
+     *   slot non-empty → take its contents back to inventory
+     */
+    if (c && in->a_pressed) {
+        CraftChestSlot *slot = &c->slots[s_chest_sel];
+        if (slot->n > 0) {
+            /* Take everything from this slot. */
+            pmut->inventory[slot->blk] += slot->n;
+            /* Auto-hotbar if no slot already shows it. */
+            bool present = false;
+            for (int s = 0; s < CRAFT_HOTBAR_SLOTS; s++)
+                if (pmut->hotbar[s] == slot->blk) { present = true; break; }
+            if (!present) {
+                for (int s = 0; s < CRAFT_HOTBAR_SLOTS; s++) {
+                    if (pmut->hotbar[s] == BLK_AIR) {
+                        pmut->hotbar[s] = slot->blk; break;
+                    }
+                }
+            }
+            slot->n = 0;
+            slot->blk = 0;
+        } else {
+            /* Deposit from active hotbar item. */
+            BlockId held = pmut->hotbar[pmut->hotbar_idx];
+            if (held != BLK_AIR && pmut->inventory[held] > 0) {
+                int amount = pmut->inventory[held];
+                if (amount > 64) amount = 64;
+                slot->blk = (uint8_t)held;
+                slot->n   = (uint8_t)amount;
+                pmut->inventory[held] -= amount;
+            }
+        }
+    }
+
+    return CRAFT_MENU_RESULT_NONE;
+}
+
 CraftMenuResult craft_menu_tick(const CraftInput *in, const CraftPlayer *p) {
     if (!s_open) return CRAFT_MENU_RESULT_NONE;
     if (s_page == PAGE_INVENTORY)
@@ -599,6 +883,10 @@ CraftMenuResult craft_menu_tick(const CraftInput *in, const CraftPlayer *p) {
         return tick_recipes_page(in);
     if (s_page == PAGE_CONTROLS)
         return tick_controls_page(in);
+    if (s_page == PAGE_FURNACE)
+        return tick_furnace_page(in, (CraftPlayer *)p);
+    if (s_page == PAGE_CHEST)
+        return tick_chest_page(in, (CraftPlayer *)p);
     return tick_main_page(in, p);
 }
 
@@ -1007,6 +1295,182 @@ static void draw_controls_page(uint16_t *fb, const CraftPlayer *p) {
     }
 }
 
+static void draw_furnace_page(uint16_t *fb, const CraftPlayer *p) {
+    CraftFurnace *f = craft_furnace_find(s_furnace_wx, s_furnace_wy, s_furnace_wz);
+
+    int panel_w = CRAFT_FB_W - 4;
+    int panel_h = CRAFT_FB_H - 22;
+    int x0 = (CRAFT_FB_W - panel_w) / 2;
+    int y0 = 2;
+    rect(fb, x0, y0, panel_w, panel_h, rgb565(30, 30, 40));
+    rect(fb, x0,             y0, panel_w, 1, rgb565(150, 150, 180));
+    rect(fb, x0,             y0 + panel_h - 1, panel_w, 1, rgb565(150, 150, 180));
+    rect(fb, x0,             y0, 1, panel_h, rgb565(150, 150, 180));
+    rect(fb, x0 + panel_w-1, y0, 1, panel_h, rgb565(150, 150, 180));
+
+    const char *title = "Furnace";
+    int tw = craft_font_width(title);
+    craft_font_draw(fb, title, x0 + (panel_w - tw) / 2, y0 + 3, 0xFFFF);
+    rect(fb, x0 + 6, y0 + 10, panel_w - 12, 1, rgb565(80, 80, 100));
+
+    /* Layout: input slot top-left, flame indicator below, arrow →
+     * across the middle, output slot top-right. */
+    int cell = 22;
+    int input_x  = x0 + 12;
+    int input_y  = y0 + 18;
+    int output_x = x0 + panel_w - cell - 12;
+    int output_y = y0 + 18;
+    int fuel_x   = input_x;
+    int fuel_y   = input_y + cell + 12;
+
+    /* --- Slot drawing helper inlined ---  */
+    int slot_xs[3] = { input_x,  fuel_x,  output_x };
+    int slot_ys[3] = { input_y,  fuel_y,  output_y };
+    BlockId slot_blks[3] = {
+        f ? f->input_blk  : BLK_AIR,
+        f ? f->fuel_blk   : BLK_AIR,
+        f ? f->output_blk : BLK_AIR,
+    };
+    int slot_counts[3] = {
+        f ? f->input_n  : 0,
+        f ? f->fuel_n   : 0,
+        f ? f->output_n : 0,
+    };
+    const char *slot_labels[3] = { "input", "fuel", "output" };
+    for (int s = 0; s < 3; s++) {
+        int sx = slot_xs[s], sy = slot_ys[s];
+        rect(fb, sx, sy, cell, cell, rgb565(60, 60, 70));
+        if (slot_blks[s] != BLK_AIR) {
+            block_swatch_at(fb, sx + 1, sy + 1, cell - 2, slot_blks[s]);
+        }
+        if (slot_counts[s] > 0) {
+            char cbuf[6];
+            snprintf(cbuf, sizeof cbuf, "%d", slot_counts[s]);
+            int cw = craft_font_width(cbuf);
+            rect(fb, sx + cell - cw - 2, sy + cell - 6, cw + 1, 6,
+                 rgb565(10, 10, 15));
+            craft_font_draw(fb, cbuf, sx + cell - cw - 1,
+                            sy + cell - 5, 0xFFFF);
+        }
+        if (s == s_furnace_sel) {
+            rect(fb, sx - 1, sy - 1, cell + 2, 1, 0xFFFF);
+            rect(fb, sx - 1, sy + cell, cell + 2, 1, 0xFFFF);
+            rect(fb, sx - 1, sy - 1, 1, cell + 2, 0xFFFF);
+            rect(fb, sx + cell, sy - 1, 1, cell + 2, 0xFFFF);
+        }
+        /* Label below the cell. */
+        int lw = craft_font_width(slot_labels[s]);
+        craft_font_draw(fb, slot_labels[s], sx + (cell - lw) / 2,
+                        sy + cell + 2, rgb565(160, 160, 180));
+    }
+
+    /* Flame indicator between input and fuel cells — filled
+     * proportional to fuel_remaining / fuel_full. */
+    int flame_x = input_x + cell + 2;
+    int flame_y = fuel_y - 6;
+    int flame_w = 8;
+    int flame_h = 10;
+    rect(fb, flame_x, flame_y, flame_w, flame_h, rgb565(20, 20, 25));
+    if (f && f->fuel_remaining_t > 0.0f) {
+        float fuel_full = craft_furnace_fuel_time(f->fuel_blk);
+        if (fuel_full <= 0.0f) fuel_full = 1.0f;
+        float pct = f->fuel_remaining_t / fuel_full;
+        if (pct > 1.0f) pct = 1.0f;
+        int filled = (int)(flame_h * pct);
+        rect(fb, flame_x, flame_y + flame_h - filled,
+             flame_w, filled, rgb565(240, 140, 30));
+    }
+
+    /* Arrow → between input and output, partly filled with smelt
+     * progress. 18 px long, drawn at the midline. */
+    int arrow_x = input_x + cell + 14;
+    int arrow_y = input_y + cell / 2 - 2;
+    int arrow_w = output_x - arrow_x - 4;
+    rect(fb, arrow_x, arrow_y, arrow_w, 4, rgb565(40, 40, 50));
+    float smelt_pct = (f && f->smelt_t > 0.0f)
+                     ? (f->smelt_t / CRAFT_FURNACE_SMELT_TIME) : 0.0f;
+    int filled = (int)(arrow_w * smelt_pct);
+    if (filled > 0) rect(fb, arrow_x, arrow_y, filled, 4,
+                         rgb565(240, 200, 80));
+    /* Arrow tip — small triangle on the right. */
+    for (int i = 0; i < 4; i++) {
+        rect(fb, arrow_x + arrow_w + i, arrow_y - i, 1, 4 + 2 * i,
+             rgb565(80, 80, 100));
+    }
+
+    /* Hint line. */
+    char hint[40];
+    snprintf(hint, sizeof hint, "A:put/take  B:back  LB/RB:slot %d",
+             p->hotbar_idx + 1);
+    int hw = craft_font_width(hint);
+    craft_font_draw(fb, hint, x0 + (panel_w - hw) / 2,
+                    y0 + panel_h - 8, rgb565(180, 180, 200));
+}
+
+static void draw_chest_page(uint16_t *fb, const CraftPlayer *p) {
+    CraftChest *c = craft_chest_find(s_chest_wx, s_chest_wy, s_chest_wz);
+
+    int panel_w = CRAFT_FB_W - 4;
+    int panel_h = CRAFT_FB_H - 22;
+    int x0 = (CRAFT_FB_W - panel_w) / 2;
+    int y0 = 2;
+    rect(fb, x0, y0, panel_w, panel_h, rgb565(30, 30, 40));
+    rect(fb, x0,             y0, panel_w, 1, rgb565(150, 150, 180));
+    rect(fb, x0,             y0 + panel_h - 1, panel_w, 1, rgb565(150, 150, 180));
+    rect(fb, x0,             y0, 1, panel_h, rgb565(150, 150, 180));
+    rect(fb, x0 + panel_w-1, y0, 1, panel_h, rgb565(150, 150, 180));
+
+    const char *title = "Chest";
+    int tw = craft_font_width(title);
+    craft_font_draw(fb, title, x0 + (panel_w - tw) / 2, y0 + 3, 0xFFFF);
+    rect(fb, x0 + 6, y0 + 10, panel_w - 12, 1, rgb565(80, 80, 100));
+
+    /* 4×4 chest grid centred in the panel. */
+    int cell = 20, gap = 2;
+    int grid_w = CHEST_COLS * cell + (CHEST_COLS - 1) * gap;
+    int grid_x = x0 + (panel_w - grid_w) / 2;
+    int grid_y = y0 + 14;
+    for (int r = 0; r < CHEST_ROWS; r++) {
+        for (int col = 0; col < CHEST_COLS; col++) {
+            int idx = r * CHEST_COLS + col;
+            int cx = grid_x + col * (cell + gap);
+            int cy = grid_y + r * (cell + gap);
+            rect(fb, cx, cy, cell, cell, rgb565(60, 60, 70));
+            if (c && c->slots[idx].n > 0) {
+                block_swatch_at(fb, cx + 1, cy + 1, cell - 2,
+                                (BlockId)c->slots[idx].blk);
+                char cbuf[6];
+                snprintf(cbuf, sizeof cbuf, "%d", c->slots[idx].n);
+                int cw = craft_font_width(cbuf);
+                rect(fb, cx + cell - cw - 2, cy + cell - 6, cw + 1, 6,
+                     rgb565(10, 10, 15));
+                craft_font_draw(fb, cbuf, cx + cell - cw - 1,
+                                cy + cell - 5, 0xFFFF);
+            }
+            if (idx == s_chest_sel) {
+                rect(fb, cx - 1, cy - 1, cell + 2, 1, 0xFFFF);
+                rect(fb, cx - 1, cy + cell, cell + 2, 1, 0xFFFF);
+                rect(fb, cx - 1, cy - 1, 1, cell + 2, 0xFFFF);
+                rect(fb, cx + cell, cy - 1, 1, cell + 2, 0xFFFF);
+            }
+        }
+    }
+
+    /* Slot summary + hint at the bottom. */
+    BlockId sel_blk = (c && c->slots[s_chest_sel].n > 0)
+                      ? (BlockId)c->slots[s_chest_sel].blk : BLK_AIR;
+    const char *name = (sel_blk != BLK_AIR) ? craft_block_name(sel_blk) : "empty";
+    int nw = craft_font_width(name);
+    craft_font_draw(fb, name, x0 + (panel_w - nw) / 2,
+                    y0 + panel_h - 16, 0xFFFF);
+    char hint[40];
+    snprintf(hint, sizeof hint, "A:put/take  B:back  LB/RB:slot %d",
+             p->hotbar_idx + 1);
+    int hw = craft_font_width(hint);
+    craft_font_draw(fb, hint, x0 + (panel_w - hw) / 2,
+                    y0 + panel_h - 8, rgb565(180, 180, 200));
+}
+
 void craft_menu_draw(uint16_t *fb, const CraftPlayer *p) {
     if (!s_open) return;
     darken_bg(fb);
@@ -1014,6 +1478,8 @@ void craft_menu_draw(uint16_t *fb, const CraftPlayer *p) {
     else if (s_page == PAGE_CRAFT)     draw_craft_page(fb, p);
     else if (s_page == PAGE_RECIPES)   draw_recipes_page(fb, p);
     else if (s_page == PAGE_CONTROLS)  draw_controls_page(fb, p);
+    else if (s_page == PAGE_FURNACE)   draw_furnace_page(fb, p);
+    else if (s_page == PAGE_CHEST)     draw_chest_page(fb, p);
     else                               draw_main_page(fb, p);
     /* Hotbar always visible at full brightness over the dimmed bg
      * so the active-slot indicator stays legible while the player

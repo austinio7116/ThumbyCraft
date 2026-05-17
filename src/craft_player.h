@@ -62,6 +62,13 @@ typedef struct {
     bool   placed_block;
     bool   request_menu;
     bool   request_fly_toast;
+    /* Player pressed B on an in-world furnace block — main loop
+     * opens the furnace UI bound to (x,y,z) and clears the flag. */
+    bool   request_furnace_open;
+    int    furnace_open_x, furnace_open_y, furnace_open_z;
+    /* Same pattern for chests. */
+    bool   request_chest_open;
+    int    chest_open_x, chest_open_y, chest_open_z;
     BlockId last_block_touched;
     int    last_action_x;
     int    last_action_y;

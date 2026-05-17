@@ -76,6 +76,8 @@ const char *craft_block_name(BlockId blk) {
         case BLK_SWORD_IRON:    return "iron sword";
         case BLK_BOW:           return "bow";
         case BLK_ARROW:         return "arrow";
+        case BLK_FURNACE:       return "furnace";
+        case BLK_CHEST:         return "chest";
         default:                return "?";
     }
 }
@@ -521,6 +523,112 @@ void craft_blocks_build_textures(void) {
                side, sizeof(uint16_t) * CRAFT_TEX_PIXELS);
         memcpy(&craft_textures[(BLK_BOW * 3 + 2) * CRAFT_TEX_PIXELS],
                side, sizeof(uint16_t) * CRAFT_TEX_PIXELS);
+    }
+
+    /* FURNACE — cobble-style sides + top, and a darker face panel
+     * with a glowing mouth on the FRONT (we paint that into the
+     * "side" slot since the renderer uses side for all four
+     * horizontal faces — the mouth shows on every side, which is
+     * fine without a directional facing bit). */
+    {
+        /* Top + bottom: stone-grey speckle, similar to cobble. */
+        uint16_t *top = &craft_textures[(BLK_FURNACE * 3 + 0) * CRAFT_TEX_PIXELS];
+        speckle(top, 0xF00DBEEFu, 120, 120, 130, 40);
+        memcpy(&craft_textures[(BLK_FURNACE * 3 + 2) * CRAFT_TEX_PIXELS],
+               top, sizeof(uint16_t) * CRAFT_TEX_PIXELS);
+
+        /* Side: stone speckle + dark recessed face panel with a
+         * 2-row glow at the bottom of the mouth. */
+        uint16_t *side = &craft_textures[(BLK_FURNACE * 3 + 1) * CRAFT_TEX_PIXELS];
+        speckle(side, 0xF00DCAFEu, 110, 110, 120, 35);
+        /* Iron-frame rectangle around the mouth at rows 3..13, cols 2..13. */
+        uint16_t frame_d = rgb565(60, 60, 70);
+        uint16_t frame   = rgb565(95, 95, 110);
+        for (int x = 2; x < 14; x++) {
+            side[3  * CRAFT_TEX_SIZE + x] = frame;
+            side[13 * CRAFT_TEX_SIZE + x] = frame_d;
+        }
+        for (int y = 3; y < 14; y++) {
+            side[y * CRAFT_TEX_SIZE + 2]  = frame;
+            side[y * CRAFT_TEX_SIZE + 13] = frame_d;
+        }
+        /* Mouth interior — dark void with a warm fire glow at the
+         * bottom 3 rows so it reads as "burning" at a glance. */
+        uint16_t void_c = rgb565(15, 15, 20);
+        uint16_t fire1  = rgb565(220, 100, 30);
+        uint16_t fire2  = rgb565(255, 180, 60);
+        for (int y = 4; y < 13; y++) {
+            for (int x = 3; x < 13; x++) {
+                side[y * CRAFT_TEX_SIZE + x] = void_c;
+            }
+        }
+        for (int x = 3; x < 13; x++) {
+            side[10 * CRAFT_TEX_SIZE + x] = fire1;
+            side[11 * CRAFT_TEX_SIZE + x] = fire2;
+            side[12 * CRAFT_TEX_SIZE + x] = fire1;
+        }
+    }
+
+    /* CHEST — plank body with iron strapping and a small dark keyhole
+     * front-and-centre. Top has a visible lid seam. */
+    {
+        uint16_t *top  = &craft_textures[(BLK_CHEST * 3 + 0) * CRAFT_TEX_PIXELS];
+        uint16_t *side = &craft_textures[(BLK_CHEST * 3 + 1) * CRAFT_TEX_PIXELS];
+        uint16_t plank_a = rgb565(170, 115, 60);
+        uint16_t plank_b = rgb565(140, 90, 45);
+        uint16_t plank_d = rgb565(100, 65, 30);
+        uint16_t iron    = rgb565(95,  95, 110);
+        uint16_t iron_d  = rgb565(60,  60, 70);
+        uint16_t hole    = rgb565(15, 15, 20);
+        /* Top: alternating plank stripes + a central seam where the lid opens. */
+        for (int y = 0; y < CRAFT_TEX_SIZE; y++) {
+            uint16_t base = ((y / 3) & 1) ? plank_a : plank_b;
+            for (int x = 0; x < CRAFT_TEX_SIZE; x++) {
+                top[y * CRAFT_TEX_SIZE + x] = base;
+            }
+            /* Lid seam — horizontal dark line down the middle. */
+            if (y == 7 || y == 8) {
+                for (int x = 1; x < CRAFT_TEX_SIZE - 1; x++)
+                    top[y * CRAFT_TEX_SIZE + x] = plank_d;
+            }
+        }
+        /* Iron corner studs on top. */
+        top[1 * CRAFT_TEX_SIZE + 1] = iron;
+        top[1 * CRAFT_TEX_SIZE + 14] = iron;
+        top[14 * CRAFT_TEX_SIZE + 1] = iron;
+        top[14 * CRAFT_TEX_SIZE + 14] = iron;
+        memcpy(&craft_textures[(BLK_CHEST * 3 + 2) * CRAFT_TEX_PIXELS],
+               top, sizeof(uint16_t) * CRAFT_TEX_PIXELS);
+
+        /* Side: plank stripes + vertical iron bands at the corners
+         * + horizontal iron bar across the top (where the hinges
+         * would be) + a small keyhole rectangle just below centre. */
+        for (int y = 0; y < CRAFT_TEX_SIZE; y++) {
+            uint16_t base = ((y / 3) & 1) ? plank_a : plank_b;
+            for (int x = 0; x < CRAFT_TEX_SIZE; x++) {
+                side[y * CRAFT_TEX_SIZE + x] = base;
+            }
+        }
+        /* Top iron band — hinges. */
+        for (int x = 0; x < CRAFT_TEX_SIZE; x++) {
+            side[1 * CRAFT_TEX_SIZE + x] = iron;
+            side[2 * CRAFT_TEX_SIZE + x] = iron_d;
+        }
+        /* Vertical corner bands. */
+        for (int y = 0; y < CRAFT_TEX_SIZE; y++) {
+            side[y * CRAFT_TEX_SIZE + 0]  = iron_d;
+            side[y * CRAFT_TEX_SIZE + 15] = iron_d;
+        }
+        /* Keyhole — 2×2 dark cluster mid-front. */
+        side[8  * CRAFT_TEX_SIZE + 7] = hole;
+        side[8  * CRAFT_TEX_SIZE + 8] = hole;
+        side[9  * CRAFT_TEX_SIZE + 7] = hole;
+        side[9  * CRAFT_TEX_SIZE + 8] = hole;
+        /* Iron lock-plate around the keyhole. */
+        side[7  * CRAFT_TEX_SIZE + 6] = iron;
+        side[7  * CRAFT_TEX_SIZE + 9] = iron;
+        side[10 * CRAFT_TEX_SIZE + 6] = iron;
+        side[10 * CRAFT_TEX_SIZE + 9] = iron;
     }
 
     /* ARROW — diagonal shaft with white flight + dark tip. */

@@ -1,18 +1,20 @@
 /*
  * ThumbyCraft — held-item cuboid models.
  *
- * Six tools + a bow + an arrow. Each model is a small array of
- * axis-aligned coloured boxes in local space; the held-item renderer
- * walks them per pixel inside a fixed bottom-right viewport, just
- * like craft_mobs_render walks mob parts inside a projected screen
- * bbox.
+ * Each model is rebuilt from the canonical Minecraft 2D inventory
+ * icon, with one cuboid per icon "pixel cluster" so the silhouette
+ * reads correctly from the held-item viewport's idle pose
+ * (yaw +26°, pitch -20° — see craft_render_held_item).
  *
- * Diagonals (pickaxe handle, blade) are approximated by short stacks
- * of small cubes stepped along the X+Y direction — the renderer can't
- * rotate parts so visual diagonals come from staircase silhouettes.
+ * Local frame: +Y up, +X right, model front faces -Z. Total bounding
+ * extent stays inside ~0.5 m so the model fits the virtual frustum.
  *
- * Storage: all part tables are `static const` so they live in flash,
- * not SRAM. The whole module costs ~0 BSS (just the dispatch tables).
+ * Diagonals (pickaxe handle, sword blade, arrow shaft) are
+ * approximated as a staircase of small cuboids stepped along the
+ * X+Y direction since the held-item renderer doesn't rotate parts.
+ *
+ * All part tables are `static const` so they live in flash, not
+ * SRAM. Total BSS cost of this module is zero.
  */
 #include "craft_tool_models.h"
 
@@ -22,97 +24,238 @@
 #define C565(r, g, b)  \
     ((uint16_t)((((r) & 0xF8) << 8) | (((g) & 0xFC) << 3) | ((b) >> 3)))
 
-/* Pre-baked colour constants used across the tool table. */
-#define COL_HANDLE_WOOD  C565(110, 70, 35)
-#define COL_GUARD_GOLD   C565(180, 160, 80)
-#define COL_PICK_WOOD    C565(160, 110, 60)
-#define COL_PICK_STONE   C565(140, 140, 140)
-#define COL_PICK_IRON    C565(220, 220, 230)
-#define COL_BLADE_WOOD   C565(160, 110, 60)
-#define COL_BLADE_STONE  C565(140, 140, 140)
-#define COL_BLADE_IRON   C565(220, 220, 230)
-#define COL_STRING       C565(235, 235, 220)
-#define COL_SHAFT        C565(140, 95, 50)
-#define COL_FLIGHT       C565(230, 60, 60)
-#define COL_TIP          C565(80, 80, 90)
+/* ---- Palette --------------------------------------------------- */
 
-/* --- Pickaxe (head colour varies by tier) ---------------------- *
- * Handle: 5 short brown cubes stepped diagonally from lower-left
- * (-x, -y) to upper-right (+x, +y) so the silhouette reads as a
- * tilted rod despite each part being axis-aligned.
- * Head: chevron / wedge at the top of the handle — central block
- * over the top of the rod, plus two narrower wings angled outward
- * so the silhouette reads as a pickaxe head pointing both ways. */
+/* Pickaxe head tints (light face + darker face / shadow). */
+#define COL_PICK_WOOD_LIGHT   C565(160, 110,  60)
+#define COL_PICK_WOOD_DARK    C565(115,  80,  40)
+#define COL_PICK_STONE_LIGHT  C565(140, 140, 150)
+#define COL_PICK_STONE_DARK   C565( 95,  95, 105)
+#define COL_PICK_IRON_LIGHT   C565(230, 230, 240)
+#define COL_PICK_IRON_DARK    C565(170, 170, 180)
+
+/* Tool handle / haft / grip — always wood, tier-independent. */
+#define COL_HAFT_LIGHT        C565(140,  95,  45)
+#define COL_HAFT_DARK         C565(110,  70,  30)
+
+/* Sword blades reuse the pickaxe palette so tier reads are consistent. */
+#define COL_BLADE_WOOD_LIGHT  COL_PICK_WOOD_LIGHT
+#define COL_BLADE_WOOD_DARK   COL_PICK_WOOD_DARK
+#define COL_BLADE_STONE_LIGHT COL_PICK_STONE_LIGHT
+#define COL_BLADE_STONE_DARK  COL_PICK_STONE_DARK
+#define COL_BLADE_IRON_LIGHT  COL_PICK_IRON_LIGHT
+#define COL_BLADE_IRON_DARK   COL_PICK_IRON_DARK
+
+/* Sword cross-guard / pommel — small dark detail. */
+#define COL_GUARD             C565( 95,  65,  25)
+#define COL_POMMEL            C565( 70,  45,  15)
+
+/* Bow + arrow accents. */
+#define COL_BOW_LIGHT         C565(140,  95,  45)
+#define COL_BOW_DARK          C565(100,  65,  30)
+#define COL_STRING            C565(220, 220, 230)
+#define COL_SHAFT             C565(140,  95,  50)
+#define COL_FLETCH            C565(235, 235, 235)
+#define COL_FLETCH_ACCENT     C565(210,  55,  55)
+#define COL_TIP               C565( 70,  70,  80)
+
+/* ---- Pickaxe (3 tiers) ---------------------------------------- *
+ *
+ * Canonical MC pickaxe icon: a 3-5-3 vertical "diamond" head at the
+ * upper-right, with a one-pixel-thick handle running diagonally
+ * down to the lower-left.
+ *
+ *     . . . . X X X . .   top row    (3 wide)
+ *     . . . X X X X X .   mid row    (5 wide)
+ *     . . . . X X X . .   bot row    (3 wide)
+ *     . . . X . . . . .   handle starts
+ *     . . X . . . . . .
+ *     . X . . . . . . .
+ *     X . . . . . . . .
+ *
+ * Head is 3 stacked horizontal cuboids; handle is a 7-step staircase
+ * along the -X -Y diagonal toward the lower-left of the bounding
+ * box. We tag the top of the head a slightly darker tint so the
+ * tilted idle view picks up a fake "shadow" along the top face. */
+
+#define PICKAXE_HEAD_PARTS(LIGHT, DARK)                              \
+    /* top row, 3 px wide */                                         \
+    {  0.140f,  0.225f,  0.000f,                                     \
+       0.045f,  0.025f,  0.030f, (DARK)  },                          \
+    /* mid row, 5 px wide — sticks out left + right of the top */    \
+    {  0.140f,  0.175f,  0.000f,                                     \
+       0.075f,  0.025f,  0.030f, (LIGHT) },                          \
+    /* bottom row, 3 px wide */                                      \
+    {  0.140f,  0.125f,  0.000f,                                     \
+       0.045f,  0.025f,  0.030f, (LIGHT) }
+
+/* 7-step handle staircase from (0.07, 0.085) to (-0.215, -0.215).
+ * Each cube ~0.025 in X/Y so neighbours overlap slightly and the
+ * silhouette reads as a smooth diagonal. */
 #define PICKAXE_HANDLE_PARTS                                         \
-    { -0.16f, -0.20f, 0.00f, 0.030f, 0.040f, 0.030f, COL_HANDLE_WOOD }, \
-    { -0.08f, -0.10f, 0.00f, 0.030f, 0.040f, 0.030f, COL_HANDLE_WOOD }, \
-    {  0.00f,  0.00f, 0.00f, 0.030f, 0.040f, 0.030f, COL_HANDLE_WOOD }, \
-    {  0.08f,  0.10f, 0.00f, 0.030f, 0.040f, 0.030f, COL_HANDLE_WOOD }, \
-    {  0.16f,  0.20f, 0.00f, 0.030f, 0.040f, 0.030f, COL_HANDLE_WOOD }
-
-#define PICKAXE_HEAD_PARTS(HEAD_COL)                                 \
-    {  0.16f,  0.25f, 0.00f, 0.045f, 0.025f, 0.040f, (HEAD_COL) },   \
-    {  0.06f,  0.30f, 0.00f, 0.055f, 0.022f, 0.040f, (HEAD_COL) },   \
-    {  0.26f,  0.30f, 0.00f, 0.055f, 0.022f, 0.040f, (HEAD_COL) }
+    {  0.070f,  0.085f,  0.000f, 0.028f, 0.028f, 0.022f, COL_HAFT_LIGHT }, \
+    {  0.020f,  0.035f,  0.000f, 0.028f, 0.028f, 0.022f, COL_HAFT_LIGHT }, \
+    { -0.030f, -0.015f,  0.000f, 0.028f, 0.028f, 0.022f, COL_HAFT_LIGHT }, \
+    { -0.080f, -0.065f,  0.000f, 0.028f, 0.028f, 0.022f, COL_HAFT_DARK  }, \
+    { -0.125f, -0.110f,  0.000f, 0.028f, 0.028f, 0.022f, COL_HAFT_DARK  }, \
+    { -0.170f, -0.160f,  0.000f, 0.028f, 0.028f, 0.022f, COL_HAFT_DARK  }, \
+    { -0.215f, -0.215f,  0.000f, 0.028f, 0.028f, 0.022f, COL_HAFT_DARK  }
 
 static const CraftToolPart parts_pick_wood[] = {
+    PICKAXE_HEAD_PARTS(COL_PICK_WOOD_LIGHT, COL_PICK_WOOD_DARK),
     PICKAXE_HANDLE_PARTS,
-    PICKAXE_HEAD_PARTS(COL_PICK_WOOD),
 };
 static const CraftToolPart parts_pick_stone[] = {
+    PICKAXE_HEAD_PARTS(COL_PICK_STONE_LIGHT, COL_PICK_STONE_DARK),
     PICKAXE_HANDLE_PARTS,
-    PICKAXE_HEAD_PARTS(COL_PICK_STONE),
 };
 static const CraftToolPart parts_pick_iron[] = {
+    PICKAXE_HEAD_PARTS(COL_PICK_IRON_LIGHT, COL_PICK_IRON_DARK),
     PICKAXE_HANDLE_PARTS,
-    PICKAXE_HEAD_PARTS(COL_PICK_IRON),
 };
 
-/* --- Sword (blade colour varies by tier) ----------------------- *
- * Grip at bottom-left, cross-guard above, blade in 3 cuboids
- * stacked along the diagonal toward upper-right so the silhouette
- * reads as a single long, tilted blade. */
-#define SWORD_BODY_PARTS                                             \
-    { -0.18f, -0.22f, 0.00f, 0.030f, 0.060f, 0.030f, COL_HANDLE_WOOD }, \
-    { -0.13f, -0.13f, 0.00f, 0.085f, 0.020f, 0.030f, COL_GUARD_GOLD }
+/* ---- Sword (3 tiers) ------------------------------------------ *
+ *
+ * Canonical MC sword icon: a long thin blade running diagonally
+ * from lower-left to upper-right, a short cross-guard kicking out
+ * perpendicular to the blade at the grip end, then a short grip
+ * and a tiny pommel.
+ *
+ *     . . . . . . . . X .   tip
+ *     . . . . . . . X . .
+ *     . . . . . . X . . .
+ *     . . . . . X . . . .   blade staircase
+ *     . . . . X . . . . .
+ *     . . . X . . . . . .
+ *     . . X . . . . . . .
+ *     . X X X . . . . . .   cross-guard (3 px wide perpendicular)
+ *     . . X . . . . . . .   grip
+ *     . . X . . . . . . .
+ *     . . X . . . . . . .   pommel (darker)
+ *
+ * Blade is a 6-step staircase + a slightly smaller pointed tip
+ * cuboid at the top-right. */
 
-#define SWORD_BLADE_PARTS(BLADE_COL)                                 \
-    { -0.05f,  0.00f, 0.00f, 0.035f, 0.060f, 0.020f, (BLADE_COL) },  \
-    {  0.05f,  0.12f, 0.00f, 0.035f, 0.060f, 0.020f, (BLADE_COL) },  \
-    {  0.15f,  0.24f, 0.00f, 0.035f, 0.060f, 0.020f, (BLADE_COL) }
+#define SWORD_BLADE_PARTS(LIGHT, DARK)                                       \
+    /* 6 staircase segments from cross-guard to tip */                       \
+    { -0.050f, -0.030f, 0.000f, 0.028f, 0.028f, 0.018f, (LIGHT) },           \
+    { -0.005f,  0.015f, 0.000f, 0.028f, 0.028f, 0.018f, (LIGHT) },           \
+    {  0.040f,  0.060f, 0.000f, 0.028f, 0.028f, 0.018f, (DARK)  },           \
+    {  0.085f,  0.105f, 0.000f, 0.028f, 0.028f, 0.018f, (LIGHT) },           \
+    {  0.130f,  0.150f, 0.000f, 0.028f, 0.028f, 0.018f, (DARK)  },           \
+    {  0.175f,  0.195f, 0.000f, 0.028f, 0.028f, 0.018f, (LIGHT) },           \
+    /* pointed tip — slightly smaller, in the dark tint so the         */    \
+    /* highlight on the blade really pops                              */    \
+    {  0.215f,  0.235f, 0.000f, 0.020f, 0.020f, 0.014f, (DARK)  }
+
+/* Cross-guard runs perpendicular to the blade — one block on the
+ * blade axis plus two flanking blocks offset along the
+ * perpendicular (-X+Y / +X-Y) so it kicks out either side. */
+#define SWORD_GUARD_PARTS                                                    \
+    /* centre of cross-guard, sitting on the blade base */                   \
+    { -0.090f, -0.070f, 0.000f, 0.028f, 0.028f, 0.022f, COL_GUARD  },        \
+    /* upper-left flange (perpendicular: -along-blade direction) */          \
+    { -0.130f, -0.030f, 0.000f, 0.028f, 0.028f, 0.022f, COL_GUARD  },        \
+    /* lower-right flange */                                                 \
+    { -0.050f, -0.110f, 0.000f, 0.028f, 0.028f, 0.022f, COL_GUARD  }
+
+/* Grip + pommel below the cross-guard, continuing the diagonal. */
+#define SWORD_GRIP_PARTS                                                     \
+    { -0.130f, -0.115f, 0.000f, 0.024f, 0.024f, 0.022f, COL_HAFT_LIGHT },    \
+    { -0.170f, -0.155f, 0.000f, 0.024f, 0.024f, 0.022f, COL_HAFT_DARK  },    \
+    { -0.210f, -0.195f, 0.000f, 0.020f, 0.020f, 0.018f, COL_POMMEL     }
 
 static const CraftToolPart parts_sword_wood[] = {
-    SWORD_BODY_PARTS,
-    SWORD_BLADE_PARTS(COL_BLADE_WOOD),
+    SWORD_BLADE_PARTS(COL_BLADE_WOOD_LIGHT, COL_BLADE_WOOD_DARK),
+    SWORD_GUARD_PARTS,
+    SWORD_GRIP_PARTS,
 };
 static const CraftToolPart parts_sword_stone[] = {
-    SWORD_BODY_PARTS,
-    SWORD_BLADE_PARTS(COL_BLADE_STONE),
+    SWORD_BLADE_PARTS(COL_BLADE_STONE_LIGHT, COL_BLADE_STONE_DARK),
+    SWORD_GUARD_PARTS,
+    SWORD_GRIP_PARTS,
 };
 static const CraftToolPart parts_sword_iron[] = {
-    SWORD_BODY_PARTS,
-    SWORD_BLADE_PARTS(COL_BLADE_IRON),
+    SWORD_BLADE_PARTS(COL_BLADE_IRON_LIGHT, COL_BLADE_IRON_DARK),
+    SWORD_GUARD_PARTS,
+    SWORD_GRIP_PARTS,
 };
 
-/* --- Bow + arrow ----------------------------------------------- *
- * Bow arch opens to the left, like a horizontal C: tips on the
- * upper-left and lower-left, deepest point on the right. String is
- * a single thin vertical bar joining the two tips. */
+/* ---- Bow ------------------------------------------------------ *
+ *
+ * Canonical MC bow icon: a "C" shape opening rightward (toward the
+ * viewer's draw arm) with the limbs curving in to small tips at
+ * the upper-left and lower-left of the icon, plus a thin vertical
+ * string crossing between the two tips on the right side of the
+ * body.
+ *
+ *     . . . . X X . . .   top tip (tucked back to the right)
+ *     . . . X . . . . .
+ *     . . X . . . . . .
+ *     . X . . . . . . .
+ *     . X . . . . . . .   left limb (vertical centre)
+ *     . X . . . . . . .   string vertical at the right side
+ *     . X . . . . . . .
+ *     . X . . . . . . .
+ *     . X . . . . . . .
+ *     . . X . . . . . .
+ *     . . . X . . . . .
+ *     . . . . X X . . .   bottom tip
+ *
+ * 5 wood cuboids (top tip, top arch, vertical centre, bottom
+ * arch, bottom tip) + 2 string cuboids stacked vertically on the
+ * right of the body. */
+
 static const CraftToolPart parts_bow[] = {
-    {  0.05f,  0.22f, 0.00f, 0.025f, 0.030f, 0.030f, COL_HANDLE_WOOD }, /* top tip */
-    {  0.12f,  0.12f, 0.00f, 0.025f, 0.045f, 0.030f, COL_HANDLE_WOOD }, /* upper arch */
-    {  0.16f,  0.00f, 0.00f, 0.025f, 0.060f, 0.030f, COL_HANDLE_WOOD }, /* middle */
-    {  0.12f, -0.12f, 0.00f, 0.025f, 0.045f, 0.030f, COL_HANDLE_WOOD }, /* lower arch */
-    {  0.05f, -0.22f, 0.00f, 0.025f, 0.030f, 0.030f, COL_HANDLE_WOOD }, /* bottom tip */
-    {  0.04f,  0.00f, 0.00f, 0.006f, 0.220f, 0.006f, COL_STRING },      /* bowstring */
+    /* top tip — short horizontal cube at upper-right of bow body */
+    {  0.020f,  0.225f,  0.000f, 0.035f, 0.022f, 0.025f, COL_BOW_DARK  },
+    /* upper arch — diagonal stepping down-left from tip toward body */
+    { -0.060f,  0.140f,  0.000f, 0.025f, 0.045f, 0.025f, COL_BOW_LIGHT },
+    /* vertical centre — tall thin cube forming the bow's belly */
+    { -0.105f,  0.000f,  0.000f, 0.022f, 0.110f, 0.025f, COL_BOW_LIGHT },
+    /* lower arch */
+    { -0.060f, -0.140f,  0.000f, 0.025f, 0.045f, 0.025f, COL_BOW_LIGHT },
+    /* bottom tip */
+    {  0.020f, -0.225f,  0.000f, 0.035f, 0.022f, 0.025f, COL_BOW_DARK  },
+    /* string — two stacked thin vertical cuboids inside the curve.
+     * Placed slightly forward in Z so the string sits in front of
+     * the wood when the model tilts. */
+    {  0.020f,  0.100f, -0.008f, 0.005f, 0.115f, 0.005f, COL_STRING    },
+    {  0.020f, -0.100f, -0.008f, 0.005f, 0.115f, 0.005f, COL_STRING    },
 };
 
-/* Arrow — shaft along X, flight at -X end (red feathers), tip at
- * +X end (dark grey arrowhead). */
+/* ---- Arrow ---------------------------------------------------- *
+ *
+ * Canonical MC arrow icon: a diagonal shaft from upper-right
+ * (tip) to lower-left (fletching). Tip is a dark grey wedge, the
+ * shaft is brown, and the fletching is white with a small red
+ * accent.
+ *
+ *     . . . . . . . X X .   tip
+ *     . . . . . . X X . .
+ *     . . . . . X X . . .   shaft staircase
+ *     . . . . X . . . . .
+ *     . . . X . . . . . .
+ *     . . X . . . . . . .
+ *     . X X . . . . . . .   fletching (white + red accent)
+ *     X X . . . . . . . . */
+
 static const CraftToolPart parts_arrow[] = {
-    {  0.00f,  0.00f, 0.00f, 0.190f, 0.013f, 0.013f, COL_SHAFT  },
-    { -0.20f,  0.00f, 0.00f, 0.030f, 0.035f, 0.025f, COL_FLIGHT },
-    {  0.21f,  0.00f, 0.00f, 0.020f, 0.015f, 0.015f, COL_TIP    },
+    /* dark tip — two small cubes stacked diagonally at the top-right */
+    {  0.220f,  0.225f, 0.000f, 0.022f, 0.022f, 0.018f, COL_TIP    },
+    {  0.180f,  0.185f, 0.000f, 0.022f, 0.022f, 0.018f, COL_TIP    },
+    /* shaft staircase — 4 brown segments stepping down-left */
+    {  0.130f,  0.135f, 0.000f, 0.025f, 0.025f, 0.016f, COL_SHAFT  },
+    {  0.075f,  0.080f, 0.000f, 0.025f, 0.025f, 0.016f, COL_SHAFT  },
+    {  0.020f,  0.025f, 0.000f, 0.025f, 0.025f, 0.016f, COL_SHAFT  },
+    { -0.035f, -0.030f, 0.000f, 0.025f, 0.025f, 0.016f, COL_SHAFT  },
+    /* fletching — white V at the lower-left, with one red accent
+     * cube tucked between the two flights so the colour pops on
+     * the tilted idle view. */
+    { -0.090f, -0.085f, 0.000f, 0.028f, 0.028f, 0.020f, COL_FLETCH         },
+    { -0.135f, -0.135f, 0.000f, 0.030f, 0.030f, 0.022f, COL_FLETCH         },
+    { -0.105f, -0.130f, 0.000f, 0.014f, 0.014f, 0.014f, COL_FLETCH_ACCENT  },
+    { -0.180f, -0.185f, 0.000f, 0.028f, 0.028f, 0.020f, COL_FLETCH         },
 };
 
 #define MODEL(arr)  { sizeof(arr) / sizeof((arr)[0]), (arr) }

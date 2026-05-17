@@ -10,8 +10,8 @@ worlds.
 ![screenshot — drop one in `docs/` when you have it](docs/screenshot.png)
 
 ```
-~30 fps  ·  64³ block window over an infinite world  ·  3 hostile + 3 passive mob types
-proc audio synth  ·  flash-backed buildings  ·  280 MHz dual-core M33
+~30 fps  ·  64³ block window over an infinite world  ·  4 hostile + 3 passive mob types
+furnaces + chests + bow combat  ·  drifting clouds  ·  flash-backed buildings  ·  280 MHz dual-core M33
 ```
 
 ---
@@ -83,6 +83,9 @@ hole you dug is still there.
   through highlands
 - **Wooden huts** — rare 5×5 plank cabins you'll occasionally stumble
   on. Step through the doorway and shelter in one.
+- **Voxel clouds** — blocky white cloud cells (Minecraft-style) at a
+  fixed altitude, drifting slowly east during the day, turning orange
+  at sunrise and sunset
 - **Coal & iron ore** — denser in mountains; mineable with the right
   pickaxe tier
 
@@ -98,11 +101,14 @@ shaded by sunrise.
 
 ### Tier-gated mining
 
-| Block | Requires |
-|---|---|
-| Dirt, sand, wood, leaves | Hands |
-| Stone, cobblestone, coal ore | Wooden pickaxe or better |
-| Iron ore | Stone pickaxe or better |
+| Block | Requires | Drops |
+|---|---|---|
+| Dirt, sand, wood, leaves | Hands | self |
+| **Stone** | Wooden pickaxe or better | **Cobblestone** (vanilla rule) |
+| Cobblestone, coal ore | Wooden pickaxe or better | self |
+| Grass | Hands | **Dirt** (vanilla rule) |
+| Iron ore | Stone pickaxe or better | self (smelt for ingot) |
+| **Furnace, Chest** | Wooden pickaxe or better | self (chest contents are lost) |
 
 Hit a block with **A**. If the active hotbar slot has a sword, its
 tier sets your melee damage too (wood / stone / iron = 2 / 3 / 4 HP
@@ -121,11 +127,40 @@ Recipes match canonical Minecraft Java where applicable:
 | Wood/Stone/Iron pickaxe | 3 head material across top + 2 sticks centre |
 | Wood/Stone/Iron sword | 2 head stacked + 1 stick below |
 | 4 torches | 1 coal + 1 stick |
-| Iron ingot | 1 iron ore + 1 coal (in-grid "smelt") |
-| Glass | 1 sand + 1 coal (in-grid "smelt") |
-| Smooth stone | 4 cobble 2×2 |
+| Smooth stone | 4 cobble 2×2 (Thumby densify — see Furnace for vanilla) |
+| **Furnace** | 8 cobblestone in a hollow 3×3 ring |
+| **Chest** | 8 planks in a hollow 3×3 ring |
 
 The recipe book in **MENU → Recipes** shows them all visually.
+
+### Furnace (smelting)
+
+Place a furnace (B), then aim at it and press **B again** to open the
+smelt UI. Three slots:
+
+- **Input** — the raw material (iron ore / sand / cobble)
+- **Fuel** — coal (80 s burn), wood / plank (15 s), stick (5 s)
+- **Output** — accumulates smelted result
+
+Smelt time is **10 s per item**. The flame indicator on the left
+fills proportional to remaining fuel; the arrow in the middle fills
+with smelt progress. The furnace ticks while open AND closed — set
+it going and come back later.
+
+Smelt outputs:
+- **Iron ore → Iron ingot** (replaces the in-grid "smelt" hack)
+- **Sand → Glass**
+- **Cobblestone → Smooth stone**
+
+### Chest (storage)
+
+Place a chest, B to open. Get a 4×4 = **16-slot inventory** bound to
+that specific chest. Press **A** on an empty slot to deposit your
+held hotbar item; **A** on a full slot to take its contents back.
+Useful for stockpiling beyond the 8 hotbar slots.
+
+Active chest state caps at 4 simultaneously — additional placed
+chests still exist as world blocks but show empty when first opened.
 
 ### Tool & sword ladder
 
@@ -138,7 +173,8 @@ faster, hits harder, and unlocks the next block type.
 
 - **Slime** — basic chaser, contact damage 1
 - **Skeleton** — ranged. Holds at 5 blocks, **fires arrows** with
-  gravity arc and rough line-of-sight check
+  gravity arc and rough line-of-sight check. **Drops a bow + 2-3
+  arrows** when killed.
 - **Spider** — fast melee, 1.5× slime speed, contact damage 2
 - **Creeper** — silent walker; entering 1.8 m range freezes it for a
   **1-second fuse** (visually pulses toward white), then it
@@ -148,10 +184,28 @@ All hostiles only spawn **in shadow or at night**. They stay one cell
 away from you (proper Minecraft-style standoff) — they bite from the
 neighbour block, never enter your cell.
 
+### Bow combat
+
+Once you have a bow + arrows (killed a skeleton), put the bow on
+your hotbar and press **A** to fire — an arrow launches forward from
+your chest in the camera direction. Costs 1 arrow per shot.
+
+**Arrows are recoverable**: any arrow that misses its target —
+embedded in a block, expired in flight, or a skeleton's stray shot
+— drops a collectable arrow item at the landing spot. Walk over it
+to add it back to your inventory.
+
 ### Passive
 
 Sheep, pigs, chickens wander grassland during the day. Currently
-no drops; mob loot is a queued feature.
+no drops; mob loot (wool / feather / pork) is a queued feature.
+
+### Dropped items
+
+Anything that lands in the world as a "floating item" — skeleton
+loot, missed arrows — appears as a small spinning cube on the
+ground. Walk within 1.5 m to auto-collect into inventory. Drops
+expire after 90 s if uncollected.
 
 ## Lighting & torches
 
@@ -182,18 +236,41 @@ automatically:
 You can still do an explicit save: **MENU → Save world**. New worlds:
 **MENU → New world** (generates a fresh seed).
 
+## Inventory page
+
+**MENU → Inventory** opens a scrollable grid showing **every** item
+you own (mined, crafted, picked up). D-pad navigates, **A** assigns
+the selected item to the **currently-active hotbar slot**. **LB/RB**
+cycle which hotbar slot is the assign target — the always-visible
+bottom hotbar shows the highlight in real time. Useful for swapping
+in tools mid-game.
+
+## Held item view
+
+The currently-held hotbar item shows in a small **3D viewport in the
+bottom-right** of the screen — picks, swords, bow, arrow, or a tilted
+cube for any held block. Swings forward on **A press** (mine or
+attack), giving you visual feedback for combat and mining.
+
 ## Tips
 
-- **Mine down for stone & ore.** First wood pickaxe → stone pickaxe
-  → iron pickaxe.
+- **Mine stone first.** Stone drops cobble — you need cobble to
+  craft a furnace and a stone pick.
+- **Skeletons are your bow supplier.** Kill one and pick up the
+  drops. Then you can fight from range.
+- **Recover your arrows.** Missed shots aren't lost — walk to where
+  they landed.
 - **Light caves before exploring.** Hostiles spawn in unlit cave
   cells day or night.
 - **Build a small shelter before sunset.** A 5×5 plank box with a
   torch buys you safety until dawn — or find a hut.
 - **Creepers respect water.** Drop into a pond if one's fuse is
   counting — explosions skip water cells.
-- **Skeletons are persistent shooters.** Break line of sight or close
-  the gap — they stop firing under 3 m and back off.
+- **Smelt instead of crafting cobble→stone in the grid.** The 4-cobble
+  densify recipe works, but the furnace is canonical and unlocks
+  cooked food once that arrives.
+- **Chests beyond the first 4 in your area are empty.** Stick to a
+  small storage hub rather than scattering chests across the map.
 
 ---
 
@@ -223,7 +300,8 @@ pixel drawn to the screen passes through one of the M33 cores.
 | `g_fb` — framebuffer | 32 KB |
 | `craft_world_skyheight` — per-column sky Y | 4 KB |
 | `audio ring + reverb` | 12 KB |
-| Mob models, particle pool, torch list, mod buffers | ~10 KB |
+| Mob models, particle pool, torch list, drops, mod buffers | ~12 KB |
+| Furnace state (×8) + chest state (×4) | ~1 KB |
 | Pico SDK BSS + heap + multicore lockout | ~32 KB |
 | **Total resident** | **~456 KB / 512 KB** |
 
@@ -421,6 +499,55 @@ body (square/triangle). Pickaxe-required "ting" two-tone feedback.
 peaks hit the clamp wall) → int16 sample at 32 000 scale (≈ 98 % of
 the 12-bit PWM DAC's range).
 
+## Sky effects (`craft_render.c`)
+
+### Voxel clouds
+Minecraft-style blocky clouds at `y=58`, above any terrain. The cloud
+layer is a 2D grid of `CLOUD_CELL`-wide cells (4 world units each).
+For each upward sky-ray pixel, the renderer finds where the ray
+crosses the cloud plane, snaps to the cell containing that (wx, wz),
+and looks up the cell with two hashes (a primary cell-fill check and
+a coarser 4×4 super-cell clump check). The two-hash rule gives
+contiguous cloud BLOBS rather than speckled isolated voxels — typical
+coverage ~15 %.
+
+No interpolation: cell edges are sharp pixelated steps when projected
+to screen, exactly like vanilla MC clouds viewed from below. Drift
+is just `world_time * 0.5` added to the X sample so clouds scroll
+east. Twilight tints push cloud colour toward orange when
+`|sun_y| < 0.3`. Per-pixel cost ~12-15 cycles — about 1 % of one
+core at typical outdoor view.
+
+### Sun, moon, stars
+Sun + moon are billboards anchored on the celestial sphere. Stars are
+a fixed star field rotated with sun position, fading in at night.
+
+## Held-item viewport (`craft_render_held_item`)
+
+A 50×40 fixed bbox in the bottom-right of the framebuffer that paints
+the player's currently-held hotbar item in 3D. Per-pixel ray-vs-AABB
+against the cuboid model from `craft_tool_models.c` (picks, swords,
+bow, arrow) or a tilted block cube for placeable blocks. No z-buffer
+test — always overlays. Tilt + dip animation on swing (driven by
+`broke_block` / `placed_block` flags from the player tick).
+
+## Interactive blocks
+
+### Furnace (`craft_furnace.{c,h}`)
+- 8-slot sparse coord-keyed state table (each entry: input/fuel/output
+  block + count + smelt + burn timers, ~28 B)
+- Per-tick `craft_furnace_tick(dt)` walks all active records:
+  burns fuel if any, advances smelt timer if input + output room, on
+  completion does input-- / output++
+- Fuel times: coal 80 s, wood/plank 15 s, stick 5 s. Smelt time 10 s.
+- Smelt recipes: iron_ore → ingot, sand → glass, cobble → smooth stone
+
+### Chest (`craft_chests.{c,h}`)
+- 4-slot sparse coord-keyed state table (each entry: 16 × `(blk, n)` slots)
+- No tick — purely passive storage. UI in `craft_menu.c` handles
+  deposit/withdraw via the active hotbar slot.
+- Beyond 4 placed chests, additional ones show empty (state table cap)
+
 ## Persistence
 
 Two flash layers:
@@ -432,6 +559,11 @@ Two flash layers:
 A new-world action erases the chunk store's records for the old seed
 (records key by `world_seed` so a fresh `get_rand_32()` start cleanly
 shadows the old).
+
+Furnace and chest state are in SRAM only — not persisted across
+power-cycles in the current version. Their world blocks (the
+`BLK_FURNACE` / `BLK_CHEST` cells) DO persist via the chunk store, so
+the structures stay but inventories empty out on reboot.
 
 ## Build pipeline
 
@@ -453,9 +585,13 @@ src/                         portable engine (host + device share these)
 ├── craft_render.{c,h}       DDA raycaster, mob projection helpers, sky/fog
 ├── craft_player.{c,h}       camera, controls, AABB physics, hotbar
 ├── craft_hud.{c,h}          hearts, hotbar, crosshair, toasts
-├── craft_menu.{c,h}         pause + craft grid + recipe book
-├── craft_mobs.{c,h}         3D mob models + AI + arrows
+├── craft_menu.{c,h}         pause + craft grid + recipe book + furnace + chest pages
+├── craft_mobs.{c,h}         3D mob models + AI + arrows + skeleton drops
 ├── craft_torches.{c,h}      3D torch cuboids + orientation hash + light hooks
+├── craft_tool_models.{c,h}  pick/sword/bow/arrow cuboid models for held-item view
+├── craft_drops.{c,h}        floating world items (skeleton loot, missed arrows)
+├── craft_furnace.{c,h}      furnace state + smelt tick
+├── craft_chests.{c,h}       chest contents storage
 ├── craft_particles.{c,h}    block-break / explosion / flame puffs
 ├── craft_audio.{c,h}        synth + music + SFX
 ├── craft_save.{c,h}         engine-side persistence (diff-vs-base)

@@ -22,6 +22,8 @@
 #include "craft_chunk_store.h"
 #include "craft_tool_models.h"
 #include "craft_drops.h"
+#include "craft_furnace.h"
+#include "craft_chests.h"
 
 #include <string.h>
 
@@ -79,6 +81,8 @@ void craft_main_init(uint16_t *fb, uint32_t seed) {
     craft_mobs_spawn_around(spawn, seed);
     craft_particles_init();
     craft_drops_init();
+    craft_furnace_init();
+    craft_chests_init();
     /* Defaults — start in survival with invert-Y on. Player can flip
      * either from the pause menu. */
     s_player.invert_y = true;
@@ -229,6 +233,7 @@ void craft_main_step(const CraftInput *in, float dt, int fps) {
     craft_mobs_tick(dt, &s_player);
     craft_arrows_tick(dt, &s_player);
     craft_drops_tick(dt, &s_player);
+    craft_furnace_tick(dt);
     craft_mobs_day_night_tick(dt, craft_render_sun_y(), &s_player);
     craft_audio_music_set_sun(craft_render_sun_y());
     craft_audio_music_tick(dt);
@@ -236,6 +241,20 @@ void craft_main_step(const CraftInput *in, float dt, int fps) {
     if (s_player.request_menu) {
         s_player.request_menu = false;
         craft_menu_open(in);
+    }
+    if (s_player.request_furnace_open) {
+        s_player.request_furnace_open = false;
+        craft_menu_open_furnace(in,
+            s_player.furnace_open_x,
+            s_player.furnace_open_y,
+            s_player.furnace_open_z);
+    }
+    if (s_player.request_chest_open) {
+        s_player.request_chest_open = false;
+        craft_menu_open_chest(in,
+            s_player.chest_open_x,
+            s_player.chest_open_y,
+            s_player.chest_open_z);
     }
     if (s_player.request_fly_toast) {
         s_player.request_fly_toast = false;
@@ -289,6 +308,20 @@ void craft_main_tick(const CraftInput *in, float dt) {
     if (s_player.request_menu) {
         s_player.request_menu = false;
         craft_menu_open(in);
+    }
+    if (s_player.request_furnace_open) {
+        s_player.request_furnace_open = false;
+        craft_menu_open_furnace(in,
+            s_player.furnace_open_x,
+            s_player.furnace_open_y,
+            s_player.furnace_open_z);
+    }
+    if (s_player.request_chest_open) {
+        s_player.request_chest_open = false;
+        craft_menu_open_chest(in,
+            s_player.chest_open_x,
+            s_player.chest_open_y,
+            s_player.chest_open_z);
     }
     if (s_player.request_fly_toast) {
         s_player.request_fly_toast = false;

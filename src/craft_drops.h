@@ -26,7 +26,7 @@
 #include "craft_player.h"
 #include "craft_render.h"
 
-#define CRAFT_MAX_DROPS         24
+#define CRAFT_MAX_DROPS         12
 #define CRAFT_DROP_PICKUP_DIST  1.5f
 #define CRAFT_DROP_LIFETIME     90.0f   /* sec before despawn */
 

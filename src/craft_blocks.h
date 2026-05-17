@@ -37,6 +37,13 @@ typedef enum {
     BLK_SWORD_IRON    = 21,
     BLK_BOW           = 22,
     BLK_ARROW         = 23,
+    /* Placeable functional blocks resume here. Items that are
+     * never world-cells stay above BLK_STICK; functional placeables
+     * (furnace, chest, ...) are real blocks so they live below it
+     * conceptually but for compatibility we just put new IDs at
+     * the end and let placeable() check by id range explicitly. */
+    BLK_FURNACE       = 24,
+    BLK_CHEST         = 25,
     BLK_COUNT
 } BlockId;
 
@@ -90,9 +97,13 @@ static inline bool craft_block_opaque(BlockId blk) {
 
 /* Whether this block stops player movement (collidable). Items never
  * sit in a world cell so they only matter via the BLK_COUNT > 13
- * inventory side — guard placeable check below. */
+ * inventory side — guard placeable check below. Placeable functional
+ * blocks (furnace, future chest) live above BLK_STICK in the enum so
+ * they need an explicit allow-list. */
 static inline bool craft_block_solid(BlockId blk) {
     if (blk == BLK_AIR || blk == BLK_WATER || blk == BLK_TORCH) return false;
+    if (blk == BLK_FURNACE) return true;
+    if (blk == BLK_CHEST) return true;
     if (blk >= BLK_STICK) return false;   /* inventory items */
     return true;
 }
@@ -101,6 +112,7 @@ static inline bool craft_block_solid(BlockId blk) {
  * entries have inventory slots but never become cells. */
 static inline bool craft_block_placeable(BlockId blk) {
     if (blk == BLK_AIR) return false;
+    if (blk == BLK_FURNACE || blk == BLK_CHEST) return true;
     if (blk >= BLK_STICK) return false;
     return true;
 }
