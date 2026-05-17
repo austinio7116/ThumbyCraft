@@ -19,6 +19,7 @@
 #include "craft_render.h"
 #include "craft_world.h"
 #include "craft_blocks.h"
+#include "craft_tool_models.h"
 #include <string.h>
 
 #define CRAFT_MAX_STEPS  64
@@ -786,4 +787,261 @@ bool craft_render_project(const CraftCamera *cam, Vec3 world_pos,
     if (out_depth) *out_depth = (uint8_t)q;
     if (out_dist) *out_dist = dist;
     return true;
+}
+
+/* --- Held-item viewport ------------------------------------------- *
+ *
+ * Renders the player's currently-held item into a small fixed
+ * viewport at the bottom-right of the framebuffer using the same
+ * per-pixel multi-cuboid pipeline as craft_mobs_render — only with a
+ * virtual near-camera locked to the item's local frame instead of a
+ * projected world AABB.
+ *
+ * No z-buffer interaction: the held item always overdraws whatever
+ * was there. ~50 × 40 px × ~10 cuboid ray tests = a few thousand FMA
+ * per frame, single-digit % of one core.
+ */
+
+#define HELD_VP_W      50
+#define HELD_VP_H      40
+#define HELD_VP_X0     (CRAFT_FB_W - HELD_VP_W)   /* 78 */
+#define HELD_VP_Y0     (CRAFT_FB_H - HELD_VP_H)   /* 88 */
+/* Camera sits this far in -Z from the model origin; the near-camera
+ * FOV is wide enough that the model's ~0.5 m envelope fills the
+ * viewport without clipping at idle. */
+#define HELD_CAM_BACK  0.55f
+
+/* Local ray-vs-AABB slab intersect — independent copy from
+ * craft_mobs.c (which keeps its own static for the mob renderer) so
+ * we don't have to expose either as global. Face id matches the mob
+ * renderer's convention so we can reuse held_face_shade[]. */
+static inline bool held_ray_aabb(float ox, float oy, float oz,
+                                 float dx, float dy, float dz,
+                                 float bminx, float bminy, float bminz,
+                                 float bmaxx, float bmaxy, float bmaxz,
+                                 float *t_out, int *face_out) {
+    float t_near = -1e30f, t_far = 1e30f;
+    int   nf = -1;
+    if (dx > -1e-6f && dx < 1e-6f) {
+        if (ox < bminx || ox > bmaxx) return false;
+    } else {
+        float inv = 1.0f / dx;
+        float t1 = (bminx - ox) * inv;
+        float t2 = (bmaxx - ox) * inv;
+        int near_face = (dx > 0) ? 1 : 0;
+        if (t1 > t2) { float tmp = t1; t1 = t2; t2 = tmp; near_face ^= 1; }
+        if (t1 > t_near) { t_near = t1; nf = near_face; }
+        if (t2 < t_far)  t_far  = t2;
+        if (t_near > t_far) return false;
+    }
+    if (dy > -1e-6f && dy < 1e-6f) {
+        if (oy < bminy || oy > bmaxy) return false;
+    } else {
+        float inv = 1.0f / dy;
+        float t1 = (bminy - oy) * inv;
+        float t2 = (bmaxy - oy) * inv;
+        int near_face = (dy > 0) ? 3 : 2;
+        if (t1 > t2) { float tmp = t1; t1 = t2; t2 = tmp; near_face ^= 1; }
+        if (t1 > t_near) { t_near = t1; nf = near_face; }
+        if (t2 < t_far)  t_far  = t2;
+        if (t_near > t_far) return false;
+    }
+    if (dz > -1e-6f && dz < 1e-6f) {
+        if (oz < bminz || oz > bmaxz) return false;
+    } else {
+        float inv = 1.0f / dz;
+        float t1 = (bminz - oz) * inv;
+        float t2 = (bmaxz - oz) * inv;
+        int near_face = (dz > 0) ? 5 : 4;
+        if (t1 > t2) { float tmp = t1; t1 = t2; t2 = tmp; near_face ^= 1; }
+        if (t1 > t_near) { t_near = t1; nf = near_face; }
+        if (t2 < t_far)  t_far  = t2;
+        if (t_near > t_far) return false;
+    }
+    if (t_near < 0.0f) return false;
+    *t_out = t_near;
+    *face_out = nf;
+    return true;
+}
+
+/* Face shading for the held item — same convention as mobs:
+ *   0=+X, 1=-X, 2=+Y (top, lit), 3=-Y (bottom, dark),
+ *   4=+Z (back, dim), 5=-Z (front, bright-ish). */
+static const uint16_t held_face_shade[6] = {
+    220, 220, 256, 150, 200, 240
+};
+
+static inline uint16_t held_shade565(uint16_t c, int m) {
+    int r = ((c >> 11) & 0x1F) * m >> 8;
+    int g = ((c >>  5) & 0x3F) * m >> 8;
+    int b = ( c        & 0x1F) * m >> 8;
+    if (r > 31) r = 31;
+    if (g > 63) g = 63;
+    if (b > 31) b = 31;
+    return (uint16_t)((r << 11) | (g << 5) | b);
+}
+
+/* Centre-pixel sample of a block face texture — used to give the
+ * held-cube path a representative colour per face without a full UV
+ * sampler. */
+static inline uint16_t held_face_color(BlockId blk, Face face) {
+    const uint16_t *tex = craft_block_texture(blk, face);
+    /* CRAFT_TEX_SIZE is 16; centre = (8,8) → index 8*16+8 = 136. */
+    return tex[(CRAFT_TEX_SIZE / 2) * CRAFT_TEX_SIZE + (CRAFT_TEX_SIZE / 2)];
+}
+
+void craft_render_held_item(BlockId held, uint16_t *fb, float swing_t) {
+    if (held == BLK_AIR) return;
+    if (swing_t < 0.0f) swing_t = 0.0f;
+    if (swing_t > 1.0f) swing_t = 1.0f;
+
+    /* Resolve the model. Placeable blocks render as a 6-face tilted
+     * cube; tools/weapons/bow/arrow render from the tool model
+     * table. Non-handheld items (sticks, ingots) currently have no
+     * model — skip them. */
+    bool is_block = craft_block_placeable(held);
+    CraftToolModel tm;
+    int n_parts = 0;
+    if (is_block) {
+        n_parts = 1;     /* one virtual cuboid, face colour resolved per pixel */
+    } else {
+        tm = craft_tool_model(held);
+        n_parts = tm.n_parts;
+        if (n_parts == 0) return;
+    }
+
+    /* Block "cube" pseudo-model — single 0.36 m cube centred at the
+     * origin. Per-face colour lookup happens after the slab test
+     * (cheaper than 6 cuboid checks). */
+    const float CUBE_HX = 0.18f, CUBE_HY = 0.18f, CUBE_HZ = 0.18f;
+
+    /* Idle pose + swing pose. Even at idle we apply a small fixed
+     * yaw + pitch so the item shows three faces instead of looking
+     * like a flat sticker — exactly the same trick a vanilla
+     * Minecraft hand-render uses. The swing then adds an extra
+     * forward tilt and a downward dip on top of that.
+     *
+     * Conventions: + tilt around X tips the model's top toward the
+     * camera; + yaw around Y swings the model's right side toward
+     * the camera. We apply the inverse rotation to the ray so each
+     * cuboid part stays axis-aligned for the slab test (the part
+     * positions/sizes never change). */
+    const float IDLE_YAW   =  0.4500f;  /* ~26 deg — show right face */
+    const float IDLE_PITCH = -0.3500f;  /* ~-20 deg — show top face  */
+    float yaw_rad   = IDLE_YAW;
+    /* Swing tips the top further toward the viewer (more negative
+     * pitch in our convention — see the rotation matrix below). */
+    float pitch_rad = IDLE_PITCH - 0.5236f * swing_t;
+    float dip       = -0.10f * swing_t;
+    float cos_p = cosf(pitch_rad), sin_p = sinf(pitch_rad);
+    float cos_y = cosf(yaw_rad),   sin_y = sinf(yaw_rad);
+
+    /* Virtual near-camera looking toward +Z from -HELD_CAM_BACK so
+     * the model's -Z front faces the viewer. Wide FOV (~75 deg) so
+     * the model fills the 50×40 viewport. */
+    const float vp_tan_h = 0.85f;   /* tan(half horizontal fov) */
+    const float vp_tan_v = vp_tan_h * (float)HELD_VP_H / (float)HELD_VP_W;
+    const float ox = 0.0f, oy = 0.0f, oz = -HELD_CAM_BACK;
+
+    for (int sy = 0; sy < HELD_VP_H; sy++) {
+        int   py = HELD_VP_Y0 + sy;
+        float ndc_y = -((float)(sy * 2 - HELD_VP_H + 1) / (float)HELD_VP_H);
+        float vy = ndc_y * vp_tan_v;
+        for (int sx = 0; sx < HELD_VP_W; sx++) {
+            int   px = HELD_VP_X0 + sx;
+            float ndc_x = ((float)(sx * 2 - HELD_VP_W + 1) / (float)HELD_VP_W);
+            float vx = ndc_x * vp_tan_h;
+
+            /* Ray dir from camera through pixel into model frame
+             * (+Z forward). */
+            float wdx = vx;
+            float wdy = vy;
+            float wdz = 1.0f;
+
+            /* Apply inverse model transform to ray origin + dir. The
+             * model is rotated by +yaw about Y, then +pitch about X,
+             * then translated by +dip in Y. The inverse on the
+             * camera ray is the reverse order with negated angles:
+             *   1. translate ray origin by -dip in Y
+             *   2. rotate by -pitch about X
+             *   3. rotate by -yaw about Y
+             * With everything zero this collapses to identity. */
+            /* Step 1: undo translation (only origin shifts; dirs
+             * are unaffected by translation). */
+            float ax = ox;
+            float ay = oy - dip;
+            float az = oz;
+            float dax = wdx, day = wdy, daz = wdz;
+            /* Step 2: rotate by -pitch about X. With angle -p,
+             *   y' =  cos·y + sin·z
+             *   z' = -sin·y + cos·z   (using -p so sin flips sign) */
+            float bx = ax;
+            float by =  cos_p * ay + sin_p * az;
+            float bz = -sin_p * ay + cos_p * az;
+            float dbx = dax;
+            float dby =  cos_p * day + sin_p * daz;
+            float dbz = -sin_p * day + cos_p * daz;
+            /* Step 3: rotate by -yaw about Y.
+             *   x' =  cos·x - sin·z
+             *   z' =  sin·x + cos·z */
+            float lox =  cos_y * bx - sin_y * bz;
+            float loy =  by;
+            float loz =  sin_y * bx + cos_y * bz;
+            float ldx =  cos_y * dbx - sin_y * dbz;
+            float ldy =  dby;
+            float ldz =  sin_y * dbx + cos_y * dbz;
+
+            float    best_t = 1e30f;
+            int      best_face = 0;
+            uint16_t best_color = 0;
+
+            if (is_block) {
+                float t; int face;
+                if (held_ray_aabb(lox, loy, loz, ldx, ldy, ldz,
+                                  -CUBE_HX, -CUBE_HY, -CUBE_HZ,
+                                   CUBE_HX,  CUBE_HY,  CUBE_HZ,
+                                   &t, &face)) {
+                    best_t = t;
+                    best_face = face;
+                    /* Map the 6 cuboid faces to a representative
+                     * block texture face. The tilted view shows the
+                     * front (-Z, FACE_NZ), the top (+Y, FACE_PY), and
+                     * the right (+X, FACE_PX) by default. */
+                    Face bf;
+                    switch (face) {
+                        case 2: bf = FACE_PY; break;   /* top */
+                        case 3: bf = FACE_NY; break;   /* bottom */
+                        case 0: bf = FACE_PX; break;   /* right */
+                        case 1: bf = FACE_NX; break;   /* left */
+                        case 4: bf = FACE_PZ; break;   /* back */
+                        default: bf = FACE_NZ; break;  /* front */
+                    }
+                    best_color = held_face_color(held, bf);
+                }
+            } else {
+                for (int p = 0; p < n_parts; p++) {
+                    const CraftToolPart *part = &tm.parts[p];
+                    float t; int face;
+                    if (held_ray_aabb(lox, loy, loz, ldx, ldy, ldz,
+                                      part->cx - part->hx,
+                                      part->cy - part->hy,
+                                      part->cz - part->hz,
+                                      part->cx + part->hx,
+                                      part->cy + part->hy,
+                                      part->cz + part->hz,
+                                      &t, &face)) {
+                        if (t < best_t) {
+                            best_t = t;
+                            best_face = face;
+                            best_color = part->color;
+                        }
+                    }
+                }
+            }
+
+            if (best_t >= 1e29f) continue;
+            uint16_t out = held_shade565(best_color, held_face_shade[best_face]);
+            fb[py * CRAFT_FB_W + px] = out;
+        }
+    }
 }

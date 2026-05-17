@@ -22,6 +22,7 @@
 #include "craft_blocks.h"
 #include "craft_player.h"
 #include "craft_particles.h"
+#include "craft_drops.h"
 
 #include <string.h>
 
@@ -319,6 +320,26 @@ static bool mob_is_hostile(MobType t) {
            t == MOB_SPIDER || t == MOB_CREEPER;
 }
 
+/* Spawn loot for a mob that just died. Drops are world entities the
+ * player can walk into to collect — see craft_drops.h. Called from
+ * the two death sites (player attack + sunlight burn) so the loot
+ * lands at the mob's final position regardless of how it expired. */
+static void mob_die_with_loot(CraftMob *m) {
+    /* Slight upward bias so the drop floats just off the ground. */
+    Vec3 p = (Vec3){ m->pos.x, m->pos.y + 0.4f, m->pos.z };
+    if (m->type == MOB_SKELETON) {
+        /* Always drops a bow + 2 arrows; a 50 % chance for a 3rd. */
+        craft_drops_spawn(BLK_BOW, p);
+        craft_drops_spawn(BLK_ARROW, (Vec3){ p.x + 0.15f, p.y, p.z });
+        craft_drops_spawn(BLK_ARROW, (Vec3){ p.x - 0.15f, p.y, p.z });
+        if (((unsigned)((uintptr_t)m >> 4) & 1) == 0) {
+            craft_drops_spawn(BLK_ARROW, (Vec3){ p.x, p.y, p.z + 0.15f });
+        }
+    }
+    /* Other mobs: no drops yet — wool/feather/etc. land with the
+     * planned Tier 2 mob-loot pass. */
+}
+
 /* --- Find a grass/sand/dirt block under (x, z) ------------------- */
 static int find_ground(int x, int z) {
     /* World is infinite — bound check is now only Y, handled by
@@ -413,6 +434,7 @@ bool craft_mob_damage(int mob_index, int amt) {
     /* Knock-back away from current heading. */
     m->vel.y = 4.0f;
     if (m->hp <= 0) {
+        mob_die_with_loot(m);
         m->alive = false;
         return true;
     }
@@ -743,6 +765,7 @@ void craft_mobs_tick(float dt, CraftPlayer *p) {
                     m->hp -= 1;
                     m->hurt_flash = 0.30f;
                     if (m->hp <= 0) {
+                        mob_die_with_loot(m);
                         m->alive = false;
                         continue;
                     }
@@ -1054,22 +1077,28 @@ void craft_arrows_tick(float dt, CraftPlayer *p) {
         CraftArrow *a = &craft_arrows[i];
         if (!a->alive) continue;
         a->lifetime -= dt;
-        if (a->lifetime <= 0.0f) { a->alive = false; continue; }
+        if (a->lifetime <= 0.0f) {
+            /* Expired in the air — drop an arrow at the landing point
+             * so the player can pick it up. */
+            craft_drops_spawn(BLK_ARROW, a->pos);
+            a->alive = false;
+            continue;
+        }
         a->vel.y += ARROW_GRAVITY * dt;
         a->pos.x += a->vel.x * dt;
         a->pos.y += a->vel.y * dt;
         a->pos.z += a->vel.z * dt;
-        /* World block hit. */
+        /* World block hit — drop the arrow on the surface for recovery. */
         int bx = (int)floorf(a->pos.x);
         int by = (int)floorf(a->pos.y);
         int bz = (int)floorf(a->pos.z);
         if (craft_block_solid(craft_world_get(bx, by, bz))) {
+            craft_drops_spawn(BLK_ARROW, a->pos);
             a->alive = false;
             continue;
         }
-        /* Player hit (sphere vs player body). Player feet at
-         * cam.pos.y - PLAYER_EYE — approximate centre as cam.pos with
-         * a generous 0.6 m radius vertically. */
+        /* Player hit (sphere vs player body). No drop — the arrow
+         * embeds in the player. */
         float dx = a->pos.x - p->cam.pos.x;
         float dy = a->pos.y - (p->cam.pos.y - 0.8f);
         float dz = a->pos.z - p->cam.pos.z;

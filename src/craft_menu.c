@@ -10,6 +10,7 @@
 #include "craft_font.h"
 #include "craft_blocks.h"
 #include "craft_audio.h"
+#include "craft_hud.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -92,19 +93,35 @@ bool craft_menu_is_open(void) { return s_open; }
 #define DPAD_REPEAT       0.12f
 
 /* --- Inventory page -------------------------------------------- *
- * 4 cols × 3 rows grid of blocks the player can put on the hotbar.
- * Selection wraps in both axes. A assigns to active hotbar slot and
- * closes the entire menu; B returns to the main page. */
+ *
+ * Scrollable view of every item the player actually owns
+ * (inventory[blk] > 0). Grid is 5 cols × N visible rows. A on a cell
+ * assigns that block to the currently-active hotbar slot. LB/RB cycle
+ * which slot is active (always-visible hotbar at the bottom shows the
+ * highlight). B returns to the main page.
+ *
+ * In creative mode "owned" means every block (infinite supply), so
+ * the view shows all placeable + tool ids. */
 
-#define INV_COLS 4
-#define INV_ROWS 3
-#define INV_CELLS (INV_COLS * INV_ROWS)
+#define INV_COLS 5
+#define INV_VISIBLE_ROWS 4
+#define INV_VISIBLE (INV_COLS * INV_VISIBLE_ROWS)
+#define INV_MAX_ENTRIES BLK_COUNT     /* upper bound — one row per id */
 
-static const BlockId inv_blocks[INV_CELLS] = {
-    BLK_GRASS,  BLK_DIRT,   BLK_STONE,  BLK_COBBLE,
-    BLK_SAND,   BLK_WOOD,   BLK_PLANK,  BLK_LEAVES,
-    BLK_GLASS,  BLK_WATER,  BLK_AIR,    BLK_AIR,
-};
+/* Snapshot of "what the player has" — rebuilt every frame the
+ * inventory page draws. Cheap (BLK_COUNT ≤ 32 ish). */
+static BlockId s_inv_visible[INV_MAX_ENTRIES];
+static int     s_inv_visible_count;
+static int     s_inv_scroll;          /* topmost row index */
+
+static void inv_rebuild_visible(const CraftPlayer *p) {
+    s_inv_visible_count = 0;
+    for (int b = 1; b < BLK_COUNT; b++) {
+        bool owned = (p->mode == CRAFT_MODE_CREATIVE) || (p->inventory[b] > 0);
+        if (!owned) continue;
+        s_inv_visible[s_inv_visible_count++] = (BlockId)b;
+    }
+}
 
 #define MAIN_VISIBLE_ITEMS 8
 
@@ -178,24 +195,49 @@ static CraftMenuResult tick_main_page(const CraftInput *in, const CraftPlayer *p
 
 static CraftMenuResult tick_inventory_page(const CraftInput *in,
                                            CraftPlayer *pmut) {
+    inv_rebuild_visible(pmut);
+    int n = s_inv_visible_count;
+    if (n < 1) n = 1;                    /* still allow cursor at 0 */
+    if (s_inv_sel >= n) s_inv_sel = n - 1;
+    if (s_inv_sel < 0)  s_inv_sel = 0;
+
     bool dpad_now = in->up || in->down || in->left || in->right;
     if (dpad_now && !s_dpad_was_pressed) {
-        if (in->left)  s_inv_sel = (s_inv_sel + INV_CELLS - 1) % INV_CELLS;
-        if (in->right) s_inv_sel = (s_inv_sel + 1) % INV_CELLS;
-        if (in->up)    s_inv_sel = (s_inv_sel + INV_CELLS - INV_COLS) % INV_CELLS;
-        if (in->down)  s_inv_sel = (s_inv_sel + INV_COLS) % INV_CELLS;
+        if (in->left  && s_inv_sel > 0)         s_inv_sel--;
+        if (in->right && s_inv_sel < n - 1)     s_inv_sel++;
+        if (in->up    && s_inv_sel >= INV_COLS) s_inv_sel -= INV_COLS;
+        if (in->down  && s_inv_sel + INV_COLS < n) s_inv_sel += INV_COLS;
         s_dpad_repeat_t = DPAD_INITIAL_DELAY;
     } else if (dpad_now) {
         s_dpad_repeat_t -= 1.0f / 30.0f;
         if (s_dpad_repeat_t <= 0.0f) {
-            if (in->left)  s_inv_sel = (s_inv_sel + INV_CELLS - 1) % INV_CELLS;
-            if (in->right) s_inv_sel = (s_inv_sel + 1) % INV_CELLS;
-            if (in->up)    s_inv_sel = (s_inv_sel + INV_CELLS - INV_COLS) % INV_CELLS;
-            if (in->down)  s_inv_sel = (s_inv_sel + INV_COLS) % INV_CELLS;
+            if (in->left  && s_inv_sel > 0)         s_inv_sel--;
+            if (in->right && s_inv_sel < n - 1)     s_inv_sel++;
+            if (in->up    && s_inv_sel >= INV_COLS) s_inv_sel -= INV_COLS;
+            if (in->down  && s_inv_sel + INV_COLS < n) s_inv_sel += INV_COLS;
             s_dpad_repeat_t = DPAD_REPEAT;
         }
     }
     s_dpad_was_pressed = dpad_now;
+
+    /* Auto-scroll to keep the selected cell on-screen. */
+    int sel_row = s_inv_sel / INV_COLS;
+    if (sel_row < s_inv_scroll) s_inv_scroll = sel_row;
+    if (sel_row >= s_inv_scroll + INV_VISIBLE_ROWS) {
+        s_inv_scroll = sel_row - INV_VISIBLE_ROWS + 1;
+    }
+
+    /* LB / RB cycle the active hotbar slot — the player can target
+     * any of the 8 slots without leaving the menu. The always-visible
+     * hotbar at the bottom shows the highlight, so the player sees
+     * exactly where their A press will land. */
+    if (in->lb_pressed) {
+        pmut->hotbar_idx = (pmut->hotbar_idx + CRAFT_HOTBAR_SLOTS - 1)
+                            % CRAFT_HOTBAR_SLOTS;
+    }
+    if (in->rb_pressed) {
+        pmut->hotbar_idx = (pmut->hotbar_idx + 1) % CRAFT_HOTBAR_SLOTS;
+    }
 
     bool b_just_released    = !in->b    && s_input_prev_b;
     bool menu_just_released = !in->menu && s_input_prev_menu;
@@ -214,14 +256,15 @@ static CraftMenuResult tick_inventory_page(const CraftInput *in,
         s_dpad_was_pressed = in->up || in->down;
         return CRAFT_MENU_RESULT_NONE;
     }
-    if (in->a_pressed) {
-        BlockId b = inv_blocks[s_inv_sel];
-        if (b != BLK_AIR) {
-            pmut->hotbar[pmut->hotbar_idx] = b;
-            craft_menu_toast(craft_block_name(b));
-            s_open = false;
-            return CRAFT_MENU_RESULT_RESUME;
-        }
+    if (in->a_pressed && s_inv_sel < s_inv_visible_count) {
+        BlockId b = s_inv_visible[s_inv_sel];
+        pmut->hotbar[pmut->hotbar_idx] = b;
+        /* Stay in the inventory — player may want to fill multiple
+         * slots. Toast confirms what landed where. */
+        char toast[32];
+        snprintf(toast, sizeof toast, "%s → slot %d",
+                 craft_block_name(b), pmut->hotbar_idx + 1);
+        craft_menu_toast(toast);
     }
     return CRAFT_MENU_RESULT_NONE;
 }
@@ -660,9 +703,15 @@ static void block_swatch_at(uint16_t *fb, int x, int y, int size, BlockId blk) {
 }
 
 static void draw_inventory_page(uint16_t *fb, const CraftPlayer *p) {
-    int panel_w = 116, panel_h = 110;
+    /* Rebuild the live list — same source the tick uses. Cheap. */
+    inv_rebuild_visible(p);
+
+    /* Panel fills most of the screen but leaves the bottom hotbar
+     * strip uncovered so the active-slot indicator stays visible. */
+    int panel_w = CRAFT_FB_W - 4;
+    int panel_h = CRAFT_FB_H - 22;     /* leave ~22 px for hotbar */
     int x0 = (CRAFT_FB_W - panel_w) / 2;
-    int y0 = (CRAFT_FB_H - panel_h) / 2;
+    int y0 = 2;
     rect(fb, x0, y0, panel_w, panel_h, rgb565(30, 30, 40));
     rect(fb, x0,             y0, panel_w, 1, rgb565(150, 150, 180));
     rect(fb, x0,             y0 + panel_h - 1, panel_w, 1, rgb565(150, 150, 180));
@@ -671,27 +720,46 @@ static void draw_inventory_page(uint16_t *fb, const CraftPlayer *p) {
 
     const char *title = "Inventory";
     int tw = craft_font_width(title);
-    craft_font_draw(fb, title, x0 + (panel_w - tw) / 2, y0 + 4, 0xFFFF);
-    rect(fb, x0 + 6, y0 + 11, panel_w - 12, 1, rgb565(80, 80, 100));
+    craft_font_draw(fb, title, x0 + (panel_w - tw) / 2, y0 + 3, 0xFFFF);
+    rect(fb, x0 + 6, y0 + 10, panel_w - 12, 1, rgb565(80, 80, 100));
 
-    /* Grid */
-    int cell = 22, gap = 3;
+    /* Grid — INV_COLS × INV_VISIBLE_ROWS visible cells, scrolling
+     * through s_inv_visible[]. */
+    int cell = 18, gap = 2;
     int grid_w = INV_COLS * cell + (INV_COLS - 1) * gap;
     int grid_x = x0 + (panel_w - grid_w) / 2;
-    int grid_y = y0 + 16;
-    for (int r = 0; r < INV_ROWS; r++) {
+    int grid_y = y0 + 14;
+    int n = s_inv_visible_count;
+    int sel_row = s_inv_sel / INV_COLS;
+    (void)sel_row;
+    for (int r = 0; r < INV_VISIBLE_ROWS; r++) {
+        int abs_row = s_inv_scroll + r;
         for (int c = 0; c < INV_COLS; c++) {
-            int idx = r * INV_COLS + c;
+            int abs_idx = abs_row * INV_COLS + c;
             int cx = grid_x + c * (cell + gap);
             int cy = grid_y + r * (cell + gap);
-            BlockId b = inv_blocks[idx];
-            /* Cell background */
+            /* Empty (past end of list) — draw a faint placeholder. */
+            if (abs_idx >= n) {
+                rect(fb, cx, cy, cell, cell, rgb565(40, 40, 50));
+                continue;
+            }
+            BlockId b = s_inv_visible[abs_idx];
             rect(fb, cx, cy, cell, cell, rgb565(60, 60, 70));
-            if (b != BLK_AIR) {
-                block_swatch_at(fb, cx + 1, cy + 1, cell - 2, b);
+            block_swatch_at(fb, cx + 1, cy + 1, cell - 2, b);
+            /* Count badge bottom-right. Skip in creative — supply is
+             * infinite, count would be misleading. */
+            if (p->mode == CRAFT_MODE_SURVIVAL && p->inventory[b] > 0) {
+                char cbuf[6];
+                snprintf(cbuf, sizeof cbuf, "%d", p->inventory[b]);
+                int cw = craft_font_width(cbuf);
+                /* Dark backing for legibility against textured swatch. */
+                rect(fb, cx + cell - cw - 2, cy + cell - 6, cw + 1, 6,
+                     rgb565(10, 10, 15));
+                craft_font_draw(fb, cbuf, cx + cell - cw - 1,
+                                cy + cell - 5, 0xFFFF);
             }
             /* Selection highlight */
-            if (idx == s_inv_sel) {
+            if (abs_idx == s_inv_sel) {
                 rect(fb, cx - 1, cy - 1, cell + 2, 1, 0xFFFF);
                 rect(fb, cx - 1, cy + cell, cell + 2, 1, 0xFFFF);
                 rect(fb, cx - 1, cy - 1, 1, cell + 2, 0xFFFF);
@@ -700,19 +768,35 @@ static void draw_inventory_page(uint16_t *fb, const CraftPlayer *p) {
         }
     }
 
-    /* Selected block name + hint at bottom of panel. */
-    BlockId sel_b = inv_blocks[s_inv_sel];
-    const char *name = (sel_b != BLK_AIR) ? craft_block_name(sel_b) : "empty";
-    int nw = craft_font_width(name);
-    craft_font_draw(fb, name, x0 + (panel_w - nw) / 2, y0 + panel_h - 18,
-                    sel_b == BLK_AIR ? rgb565(120, 120, 130) : 0xFFFF);
+    /* Scroll arrows when there's more above / below. */
+    int total_rows = (n + INV_COLS - 1) / INV_COLS;
+    if (s_inv_scroll > 0) {
+        int ay = grid_y - 3;
+        int ax = x0 + panel_w - 8;
+        rect(fb, ax - 1, ay + 1, 3, 1, 0xFFFF);
+        rect(fb, ax,     ay,     1, 1, 0xFFFF);
+    }
+    if (s_inv_scroll + INV_VISIBLE_ROWS < total_rows) {
+        int ay = grid_y + INV_VISIBLE_ROWS * (cell + gap) - gap;
+        int ax = x0 + panel_w - 8;
+        rect(fb, ax - 1, ay, 3, 1, 0xFFFF);
+        rect(fb, ax,     ay + 1, 1, 1, 0xFFFF);
+    }
 
-    char hint[32];
-    /* Show which hotbar slot will receive the block. */
-    snprintf(hint, sizeof hint, "A:slot %d  B:back", p->hotbar_idx + 1);
+    /* Selected name + hint. */
+    const char *name = (n > 0 && s_inv_sel < n)
+                       ? craft_block_name(s_inv_visible[s_inv_sel])
+                       : "empty";
+    int nw = craft_font_width(name);
+    craft_font_draw(fb, name, x0 + (panel_w - nw) / 2,
+                    y0 + panel_h - 16, 0xFFFF);
+
+    char hint[40];
+    snprintf(hint, sizeof hint, "A:slot %d  LB/RB:slot  B:back",
+             p->hotbar_idx + 1);
     int hw = craft_font_width(hint);
-    craft_font_draw(fb, hint, x0 + (panel_w - hw) / 2, y0 + panel_h - 8,
-                    rgb565(180, 180, 200));
+    craft_font_draw(fb, hint, x0 + (panel_w - hw) / 2,
+                    y0 + panel_h - 8, rgb565(180, 180, 200));
 }
 
 static void draw_craft_page(uint16_t *fb, const CraftPlayer *p) {
@@ -931,6 +1015,11 @@ void craft_menu_draw(uint16_t *fb, const CraftPlayer *p) {
     else if (s_page == PAGE_RECIPES)   draw_recipes_page(fb, p);
     else if (s_page == PAGE_CONTROLS)  draw_controls_page(fb, p);
     else                               draw_main_page(fb, p);
+    /* Hotbar always visible at full brightness over the dimmed bg
+     * so the active-slot indicator stays legible while the player
+     * navigates the menu — they need to see what they're holding
+     * when picking what to craft / what to swap to. */
+    craft_hud_draw_hotbar(fb, p);
 }
 
 /* --- Toast ----------------------------------------------------- */

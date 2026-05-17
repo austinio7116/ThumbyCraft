@@ -115,9 +115,7 @@ static void crosshair(uint16_t *fb) {
     put(fb, cx,     cy + 2, c);
 }
 
-void craft_hud_draw(uint16_t *fb, const CraftPlayer *p, int fps) {
-    crosshair(fb);
-
+void craft_hud_draw_hotbar(uint16_t *fb, const CraftPlayer *p) {
     int slot_w = 14, gap = 1;
     int total = CRAFT_HOTBAR_SLOTS * slot_w + (CRAFT_HOTBAR_SLOTS - 1) * gap;
     int x0 = (CRAFT_FB_W - total) / 2;
@@ -134,6 +132,18 @@ void craft_hud_draw(uint16_t *fb, const CraftPlayer *p, int fps) {
         if (i == p->hotbar_idx)
             rect_outline(fb, sx - 1, y0 - 1, slot_w + 2, slot_w + 2, 0xFFFF);
     }
+}
+
+void craft_hud_draw(uint16_t *fb, const CraftPlayer *p, int fps) {
+    crosshair(fb);
+    craft_hud_draw_hotbar(fb, p);
+
+    /* Re-derive the hotbar geometry locally so the label + count
+     * overlays land on the same slots the hotbar function drew. */
+    int slot_w = 14, gap = 1;
+    int total  = CRAFT_HOTBAR_SLOTS * slot_w + (CRAFT_HOTBAR_SLOTS - 1) * gap;
+    int x0     = (CRAFT_FB_W - total) / 2;
+    int y0     = CRAFT_FB_H - slot_w - 1;
 
     /* Block name above hotbar when something just happened. */
     BlockId sel = p->hotbar[p->hotbar_idx];

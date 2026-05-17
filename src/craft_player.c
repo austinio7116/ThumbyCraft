@@ -246,8 +246,11 @@ void craft_player_tick(CraftPlayer *p, const CraftInput *in, float dt) {
             p->vel.z = 0;
         }
         p->vel.y += GRAVITY * dt;
-        /* RB tap on ground = jump. (No sound — was distracting.) */
-        if (in->rb_pressed && p->on_ground) {
+        /* RB tap on ground = jump. Suppressed while MENU is held —
+         * otherwise MENU+RB (hotbar-next chord) launches the player
+         * mid-cycle, and MENU+LB users who flick RB by accident
+         * get a surprise hop. */
+        if (in->rb_pressed && p->on_ground && !in->menu) {
             p->vel.y = JUMP_VEL;
             p->on_ground = false;
         }
@@ -286,6 +289,33 @@ void craft_player_tick(CraftPlayer *p, const CraftInput *in, float dt) {
 
     /* ----- Place / break / attack (only when MENU not held) ---- */
     if (!in->menu) {
+        /* Bow short-circuit — A while holding a bow + having arrows in
+         * inventory fires an arrow from the camera. Doesn't break /
+         * attack at melee range. */
+        if (in->a_pressed &&
+            p->hotbar[p->hotbar_idx] == BLK_BOW &&
+            p->inventory[BLK_ARROW] > 0) {
+            float cy = cosf(p->cam.yaw),  sy = sinf(p->cam.yaw);
+            float cp = cosf(p->cam.pitch), sp = sinf(p->cam.pitch);
+            Vec3 origin = (Vec3){
+                p->cam.pos.x,
+                p->cam.pos.y - 0.1f,           /* fire from chest, not eyes */
+                p->cam.pos.z
+            };
+            Vec3 fwd = (Vec3){ sy * cp, sp, cy * cp };
+            /* Match the skeleton arrow speed so flight time + drop
+             * feel consistent for the player. */
+            const float ARROW_SPEED = 14.0f;
+            Vec3 vel = (Vec3){
+                fwd.x * ARROW_SPEED,
+                fwd.y * ARROW_SPEED + 1.0f,    /* slight lift compensates for gravity */
+                fwd.z * ARROW_SPEED
+            };
+            craft_arrows_spawn(origin, vel);
+            p->inventory[BLK_ARROW]--;
+            p->broke_block = true;            /* drives swing animation */
+            goto skip_attack;
+        }
         if (in->a_pressed) {
             /* Try mob hit first — if within attack range, damage it
              * instead of breaking the block behind. */
@@ -366,6 +396,7 @@ void craft_player_tick(CraftPlayer *p, const CraftInput *in, float dt) {
 break_handled: ;
             }
         }
+skip_attack: ;
         if (in->b_pressed) {
             CraftRayHit h = craft_render_pick(&p->cam);
             if (h.hit && h.distance < 8.0f) {

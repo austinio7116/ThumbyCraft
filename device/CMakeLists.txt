@@ -78,6 +78,8 @@ set(CRAFT_DEVICE_SOURCES
     ${SRC}/craft_mobs.c
     ${SRC}/craft_particles.c
     ${SRC}/craft_torches.c
+    ${SRC}/craft_drops.c
+    ${SRC}/craft_tool_models.c
     ${SRC}/craft_main.c
     ${CRAFT_BAKED_C}
 )

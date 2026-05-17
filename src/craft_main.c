@@ -20,6 +20,8 @@
 #include "craft_particles.h"
 #include "craft_torches.h"
 #include "craft_chunk_store.h"
+#include "craft_tool_models.h"
+#include "craft_drops.h"
 
 #include <string.h>
 
@@ -34,6 +36,11 @@ static float       s_world_time = 60.0f;   /* start at "morning" */
 static bool s_save_req;
 static bool s_load_req;
 static bool s_new_world_req;
+
+/* Held-item swing animation — 1.0 right after the player swings,
+ * decays linearly back to 0 at ~5/sec. Ticked in craft_main_step /
+ * craft_main_tick so both host and device paths stay in sync. */
+static float s_held_swing_t = 0.0f;
 
 /* RNG helper for new-world seeds. Cheap LCG seeded from time
  * accumulator + xorshift, since we don't have rand() everywhere. */
@@ -68,8 +75,10 @@ void craft_main_init(uint16_t *fb, uint32_t seed) {
     Vec3 spawn = craft_gen_spawn();
     craft_player_init(&s_player, spawn);
     craft_mobs_build_sprites();
+    craft_tool_models_init();
     craft_mobs_spawn_around(spawn, seed);
     craft_particles_init();
+    craft_drops_init();
     /* Defaults — start in survival with invert-Y on. Player can flip
      * either from the pause menu. */
     s_player.invert_y = true;
@@ -103,6 +112,16 @@ bool craft_main_take_new_world_request(void) {
 }
 
 float craft_main_world_time(void) { return s_world_time; }
+
+/* Bump the held-item swing animation in response to a just-completed
+ * player tick. broke_block / placed_block are flagged by player_tick
+ * for one frame each; either kick starts a swing. The cooldown decays
+ * at ~5/sec so a typical swing visible-window is ~200 ms. */
+static void held_swing_tick_after_player(float dt) {
+    if (s_player.broke_block || s_player.placed_block) s_held_swing_t = 1.0f;
+    s_held_swing_t -= dt * 5.0f;
+    if (s_held_swing_t < 0.0f) s_held_swing_t = 0.0f;
+}
 
 /* Translate a menu confirmation into actions. */
 static void handle_menu_result(CraftMenuResult r) {
@@ -186,6 +205,7 @@ void craft_main_step(const CraftInput *in, float dt, int fps) {
         craft_render_celestials(&s_player.cam, s_fb);
         craft_mobs_render(&s_player.cam, s_fb);
         craft_arrows_render(&s_player.cam, s_fb);
+        craft_drops_render(&s_player.cam, s_fb);
         craft_torches_render(&s_player.cam, s_fb);
         craft_particles_render(&s_player.cam, s_fb);
         craft_render_pick_outline(&s_player.cam, s_fb);
@@ -196,6 +216,7 @@ void craft_main_step(const CraftInput *in, float dt, int fps) {
     s_world_time += dt;
     if (s_world_time >= CRAFT_DAY_LENGTH) s_world_time -= CRAFT_DAY_LENGTH;
     craft_player_tick(&s_player, in, dt);
+    held_swing_tick_after_player(dt);
     craft_world_maybe_shift((int)s_player.cam.pos.x,
                             (int)s_player.cam.pos.z, s_seed);
     if (s_player.broke_block) {
@@ -207,6 +228,7 @@ void craft_main_step(const CraftInput *in, float dt, int fps) {
     craft_particles_tick(dt);
     craft_mobs_tick(dt, &s_player);
     craft_arrows_tick(dt, &s_player);
+    craft_drops_tick(dt, &s_player);
     craft_mobs_day_night_tick(dt, craft_render_sun_y(), &s_player);
     craft_audio_music_set_sun(craft_render_sun_y());
     craft_audio_music_tick(dt);
@@ -226,9 +248,15 @@ void craft_main_step(const CraftInput *in, float dt, int fps) {
     craft_render_celestials(&s_player.cam, s_fb);
     craft_mobs_render(&s_player.cam, s_fb);
     craft_arrows_render(&s_player.cam, s_fb);
+    craft_drops_render(&s_player.cam, s_fb);
         craft_torches_render(&s_player.cam, s_fb);
     craft_particles_render(&s_player.cam, s_fb);
     craft_render_pick_outline(&s_player.cam, s_fb);
+    /* Held item overlay sits on top of the world but UNDER the HUD —
+     * the hotbar must remain visible over the held-item viewport so
+     * you can see which slot you're holding. */
+    craft_render_held_item(s_player.hotbar[s_player.hotbar_idx],
+                           s_fb, s_held_swing_t);
     craft_hud_draw(s_fb, &s_player, fps);
 }
 
@@ -242,6 +270,7 @@ void craft_main_tick(const CraftInput *in, float dt) {
     s_world_time += dt;
     if (s_world_time >= CRAFT_DAY_LENGTH) s_world_time -= CRAFT_DAY_LENGTH;
     craft_player_tick(&s_player, in, dt);
+    held_swing_tick_after_player(dt);
     craft_world_maybe_shift((int)s_player.cam.pos.x,
                             (int)s_player.cam.pos.z, s_seed);
     if (s_player.broke_block) {
@@ -281,6 +310,10 @@ void craft_main_draw_hud(int fps) {
         craft_torches_render(&s_player.cam, s_fb);
     craft_particles_render(&s_player.cam, s_fb);
     craft_render_pick_outline(&s_player.cam, s_fb);
+    /* Held item overlay sits under the hotbar — the active-slot
+     * indicator must stay visible on top of the viewport. */
+    craft_render_held_item(s_player.hotbar[s_player.hotbar_idx],
+                           s_fb, s_held_swing_t);
     craft_hud_draw(s_fb, &s_player, fps);
     if (craft_menu_is_open()) craft_menu_draw(s_fb, &s_player);
 }

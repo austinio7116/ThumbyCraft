@@ -12,6 +12,7 @@
 #define CRAFT_RENDER_H
 
 #include "craft_types.h"
+#include "craft_blocks.h"
 
 typedef struct {
     Vec3  pos;
@@ -105,5 +106,17 @@ bool craft_render_project(const CraftCamera *cam, Vec3 world_pos,
  * world strip + mobs so it sits in front of the block it outlines.
  * No-op when the pick ray doesn't hit anything or hits too far. */
 void craft_render_pick_outline(const CraftCamera *cam, uint16_t *fb);
+
+/* Paint the player's currently-held item into a fixed viewport in the
+ * bottom-right of the framebuffer. Uses its own virtual near-camera —
+ * does NOT read or write craft_zbuf, so the held item always sits in
+ * front of whatever was there. Tools/weapons/bow/arrow render from
+ * craft_tool_model(); placeable blocks render as a tilted cube with
+ * top/side/bottom shading from the block texture's centre pixels.
+ *
+ * `swing_t` is 0.0..1.0: 0 = idle, 1.0 = just hit. The caller decays
+ * it ~5/sec back to 0 — the renderer uses it to dip the item and
+ * tilt it forward during the swing. */
+void craft_render_held_item(BlockId held, uint16_t *fb, float swing_t);
 
 #endif

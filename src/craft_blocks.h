@@ -35,6 +35,8 @@ typedef enum {
     BLK_SWORD_WOOD    = 19,
     BLK_SWORD_STONE   = 20,
     BLK_SWORD_IRON    = 21,
+    BLK_BOW           = 22,
+    BLK_ARROW         = 23,
     BLK_COUNT
 } BlockId;
 

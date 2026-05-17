@@ -74,6 +74,8 @@ const char *craft_block_name(BlockId blk) {
         case BLK_SWORD_WOOD:    return "wood sword";
         case BLK_SWORD_STONE:   return "stone sword";
         case BLK_SWORD_IRON:    return "iron sword";
+        case BLK_BOW:           return "bow";
+        case BLK_ARROW:         return "arrow";
         default:                return "?";
     }
 }
@@ -489,6 +491,62 @@ void craft_blocks_build_textures(void) {
         memcpy(&craft_textures[(sword_ids[tier] * 3 + 0) * CRAFT_TEX_PIXELS],
                side, sizeof(uint16_t) * CRAFT_TEX_PIXELS);
         memcpy(&craft_textures[(sword_ids[tier] * 3 + 2) * CRAFT_TEX_PIXELS],
+               side, sizeof(uint16_t) * CRAFT_TEX_PIXELS);
+    }
+
+    /* BOW — horizontal C-curve in wood with a vertical white string. */
+    {
+        uint16_t *side = &craft_textures[(BLK_BOW * 3 + 1) * CRAFT_TEX_PIXELS];
+        for (int i = 0; i < CRAFT_TEX_PIXELS; i++) side[i] = rgb565(40, 40, 50);
+        uint16_t wood = rgb565(140, 95, 45), wood_d = rgb565(100, 65, 30);
+        uint16_t str  = rgb565(220, 220, 230);
+        /* Curve arch — two arcs from rows 3..13, columns 4..6 (top) and
+         * 9..11 (bottom), with a back rail at col 4 / 11. */
+        for (int y = 3; y < 6; y++) {
+            side[y * CRAFT_TEX_SIZE + 5] = wood;
+            side[y * CRAFT_TEX_SIZE + 4] = wood_d;
+        }
+        for (int y = 11; y < 14; y++) {
+            side[y * CRAFT_TEX_SIZE + 5] = wood;
+            side[y * CRAFT_TEX_SIZE + 4] = wood_d;
+        }
+        for (int y = 5; y < 12; y++) {
+            side[y * CRAFT_TEX_SIZE + 3] = wood;
+        }
+        /* Bowstring — vertical white line on the inner side. */
+        for (int y = 3; y < 14; y++) {
+            side[y * CRAFT_TEX_SIZE + 7] = str;
+        }
+        memcpy(&craft_textures[(BLK_BOW * 3 + 0) * CRAFT_TEX_PIXELS],
+               side, sizeof(uint16_t) * CRAFT_TEX_PIXELS);
+        memcpy(&craft_textures[(BLK_BOW * 3 + 2) * CRAFT_TEX_PIXELS],
+               side, sizeof(uint16_t) * CRAFT_TEX_PIXELS);
+    }
+
+    /* ARROW — diagonal shaft with white flight + dark tip. */
+    {
+        uint16_t *side = &craft_textures[(BLK_ARROW * 3 + 1) * CRAFT_TEX_PIXELS];
+        for (int i = 0; i < CRAFT_TEX_PIXELS; i++) side[i] = rgb565(40, 40, 50);
+        uint16_t shaft = rgb565(150, 110, 70);
+        uint16_t tip   = rgb565(80, 80, 90);
+        uint16_t fletch= rgb565(230, 230, 230);
+        /* Shaft running TL → BR. */
+        for (int i = 2; i < 14; i++) {
+            int x = i, y = i;
+            if ((unsigned)x < CRAFT_TEX_SIZE && (unsigned)y < CRAFT_TEX_SIZE)
+                side[y * CRAFT_TEX_SIZE + x] = shaft;
+        }
+        /* Tip cluster at top-left. */
+        side[1 * CRAFT_TEX_SIZE + 1] = tip;
+        side[2 * CRAFT_TEX_SIZE + 1] = tip;
+        side[1 * CRAFT_TEX_SIZE + 2] = tip;
+        /* Fletching cluster at bottom-right. */
+        side[13 * CRAFT_TEX_SIZE + 14] = fletch;
+        side[14 * CRAFT_TEX_SIZE + 13] = fletch;
+        side[14 * CRAFT_TEX_SIZE + 14] = fletch;
+        memcpy(&craft_textures[(BLK_ARROW * 3 + 0) * CRAFT_TEX_PIXELS],
+               side, sizeof(uint16_t) * CRAFT_TEX_PIXELS);
+        memcpy(&craft_textures[(BLK_ARROW * 3 + 2) * CRAFT_TEX_PIXELS],
                side, sizeof(uint16_t) * CRAFT_TEX_PIXELS);
     }
 }

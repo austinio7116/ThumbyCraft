@@ -13,4 +13,8 @@
 
 void craft_hud_draw(uint16_t *fb, const CraftPlayer *p, int fps);
 
+/* Just the hotbar strip — used by the pause / craft menu to redraw
+ * the hotbar at full brightness over the darkened background. */
+void craft_hud_draw_hotbar(uint16_t *fb, const CraftPlayer *p);
+
 #endif
