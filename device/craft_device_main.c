@@ -60,6 +60,12 @@ static volatile int  c1_y_start, c1_y_end;
 static volatile bool c1_run, c1_done;
 
 static void core1_main(void) {
+    /* Register as the lockout victim — when core 0 needs to do a
+     * flash erase or program, multicore_lockout_start_blocking()
+     * signals via the SIO FIFO IRQ and waits for our ACK. Without
+     * this init core 0 hangs forever the first time it tries to
+     * write flash (chunk store, save). */
+    multicore_lockout_victim_init();
     for (;;) {
         while (!c1_run) tight_loop_contents();
         c1_run = false;

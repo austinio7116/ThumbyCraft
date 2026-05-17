@@ -246,11 +246,10 @@ void craft_player_tick(CraftPlayer *p, const CraftInput *in, float dt) {
             p->vel.z = 0;
         }
         p->vel.y += GRAVITY * dt;
-        /* RB tap on ground = jump. */
+        /* RB tap on ground = jump. (No sound — was distracting.) */
         if (in->rb_pressed && p->on_ground) {
             p->vel.y = JUMP_VEL;
             p->on_ground = false;
-            craft_audio_jump();
         }
     }
 
@@ -281,25 +280,9 @@ void craft_player_tick(CraftPlayer *p, const CraftInput *in, float dt) {
     if (p->cam.pos.y < 1.0f) p->cam.pos.y = 1.0f;
     if (p->cam.pos.y > CRAFT_WORLD_Y - 1.0f) p->cam.pos.y = CRAFT_WORLD_Y - 1.0f;
 
-    /* ----- Footsteps ---------------------------------------------- */
-    if (!p->fly_mode && p->on_ground) {
-        float spd2 = p->vel.x * p->vel.x + p->vel.z * p->vel.z;
-        if (spd2 > 0.5f) {
-            p->step_acc += dt;
-            if (p->step_acc > 0.40f) {
-                int fx = (int)floorf(p->cam.pos.x);
-                int fy = (int)floorf(p->cam.pos.y - PLAYER_EYE - 0.05f);
-                int fz = (int)floorf(p->cam.pos.z);
-                BlockId under = craft_world_get(fx, fy, fz);
-                if (under != BLK_AIR) craft_audio_step_on(under);
-                p->step_acc = 0.0f;
-            }
-        } else {
-            p->step_acc = 0.0f;
-        }
-    } else {
-        p->step_acc = 0.0f;
-    }
+    /* Footstep SFX removed — the noise-burst layer sounded harsh under
+     * the 3× loudness boost and the field reported it as distracting. */
+    p->step_acc = 0.0f;
 
     /* ----- Place / break / attack (only when MENU not held) ---- */
     if (!in->menu) {

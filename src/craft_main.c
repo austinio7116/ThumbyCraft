@@ -19,6 +19,7 @@
 #include "craft_mobs.h"
 #include "craft_particles.h"
 #include "craft_torches.h"
+#include "craft_chunk_store.h"
 
 #include <string.h>
 
@@ -49,6 +50,9 @@ void craft_main_init(uint16_t *fb, uint32_t seed) {
     s_seed = seed;
     s_rng ^= seed;
     craft_world_init();
+    /* Seed the chunk store so the next load_around restores any
+     * mods previously persisted for this seed. */
+    craft_chunk_store_init(seed);
     craft_blocks_build_textures();
     craft_audio_init();
     /* Ambient "wind" hiss disabled — was barely audible at the
@@ -81,6 +85,10 @@ bool craft_main_load(const uint8_t *blob, size_t n) {
 }
 
 size_t craft_main_save(uint8_t *out, size_t cap) {
+    /* Flush window mods to flash too — even if the player saved the
+     * blob to flash separately, the chunk store gives them an
+     * unbounded edit-history per chunk that survives power-cycles. */
+    craft_world_chunks_persist_window();
     return craft_save_serialise(s_seed, &s_player, out, cap);
 }
 
@@ -177,6 +185,7 @@ void craft_main_step(const CraftInput *in, float dt, int fps) {
         craft_render_stars(&s_player.cam, s_fb);
         craft_render_celestials(&s_player.cam, s_fb);
         craft_mobs_render(&s_player.cam, s_fb);
+        craft_arrows_render(&s_player.cam, s_fb);
         craft_torches_render(&s_player.cam, s_fb);
         craft_particles_render(&s_player.cam, s_fb);
         craft_render_pick_outline(&s_player.cam, s_fb);
@@ -197,6 +206,7 @@ void craft_main_step(const CraftInput *in, float dt, int fps) {
     }
     craft_particles_tick(dt);
     craft_mobs_tick(dt, &s_player);
+    craft_arrows_tick(dt, &s_player);
     craft_mobs_day_night_tick(dt, craft_render_sun_y(), &s_player);
     craft_audio_music_set_sun(craft_render_sun_y());
     craft_audio_music_tick(dt);
@@ -215,6 +225,7 @@ void craft_main_step(const CraftInput *in, float dt, int fps) {
     craft_render_stars(&s_player.cam, s_fb);
     craft_render_celestials(&s_player.cam, s_fb);
     craft_mobs_render(&s_player.cam, s_fb);
+    craft_arrows_render(&s_player.cam, s_fb);
         craft_torches_render(&s_player.cam, s_fb);
     craft_particles_render(&s_player.cam, s_fb);
     craft_render_pick_outline(&s_player.cam, s_fb);
@@ -241,6 +252,7 @@ void craft_main_tick(const CraftInput *in, float dt) {
     }
     craft_particles_tick(dt);
     craft_mobs_tick(dt, &s_player);
+    craft_arrows_tick(dt, &s_player);
     craft_mobs_day_night_tick(dt, craft_render_sun_y(), &s_player);
     craft_audio_music_set_sun(craft_render_sun_y());
     craft_audio_music_tick(dt);
@@ -265,6 +277,7 @@ void craft_main_draw_hud(int fps) {
     craft_render_stars(&s_player.cam, s_fb);
     craft_render_celestials(&s_player.cam, s_fb);
     craft_mobs_render(&s_player.cam, s_fb);
+    craft_arrows_render(&s_player.cam, s_fb);
         craft_torches_render(&s_player.cam, s_fb);
     craft_particles_render(&s_player.cam, s_fb);
     craft_render_pick_outline(&s_player.cam, s_fb);

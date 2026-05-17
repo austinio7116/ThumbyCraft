@@ -160,21 +160,34 @@ static const float pent_freqs[10] = {
 #define MELODY_MIN_GAP_NIGHT  2.5f
 #define MELODY_MAX_GAP_NIGHT  5.5f
 #define MELODY_REST_PCT_NIGHT 0.55f
-#define MELODY_MIN_GAP_DAY    0.9f
-#define MELODY_MAX_GAP_DAY    2.2f
-#define MELODY_REST_PCT_DAY   0.30f
-/* Day mode: 55% of melody events kick off an arpeggio rather than
- * a single note. */
-#define ARPEGGIO_PCT_DAY      0.55f
-#define ARPEGGIO_NOTE_GAP     0.125f   /* sec between arp notes — 16th at 120 BPM feel */
-#define ARPEGGIO_MAX_NOTES    8
+#define MELODY_MIN_GAP_DAY    1.2f
+#define MELODY_MAX_GAP_DAY    2.8f
+#define MELODY_REST_PCT_DAY   0.20f
+
+/* Day mode mix of melody event types (sum to 1.0):
+ *   SCALE_RUN — long sequential pentatonic sweep (8-14 notes,
+ *               ascending or descending, optionally crossing
+ *               octaves). This is the Claire-de-Lune RH figure.
+ *   ARPEGGIO  — short broken chord (4-6 notes).
+ *   SINGLE    — one held note. */
+#define DAY_PCT_SCALE     0.60f
+#define DAY_PCT_ARPEGGIO  0.25f
+/* Night mode: occasional scale runs for variety, but sparser. */
+#define NIGHT_PCT_SCALE   0.15f
+
+#define RUN_MAX_NOTES   16
+#define RUN_NOTE_GAP    0.105f   /* 16th-note feel at ~140 BPM — sweepy */
+#define ARP_NOTE_GAP    0.140f   /* slightly slower for chord arps */
 
 typedef struct {
     int    n_notes;
     int    next_idx;
     float  next_t;
-    float  freqs[ARPEGGIO_MAX_NOTES];
-} ArpState;
+    float  note_gap;
+    float  velocity;
+    float  release_t;
+    float  freqs[RUN_MAX_NOTES];
+} RunState;
 
 typedef struct {
     bool   enabled;
@@ -188,7 +201,7 @@ typedef struct {
     int    last_note;
     float  duck_until;
     float  sun_y;        /* >0 day, <0 night. Set by host each tick. */
-    ArpState arp;
+    RunState run;        /* active scale-run or arpeggio note queue */
     uint32_t rng;
 } MusicState;
 
@@ -222,7 +235,7 @@ void craft_audio_init(void) {
     s_music.next_note_t       = 1.0f;
     s_music.last_chord_played = -1;
     s_music.sun_y             = 1.0f;   /* assume day until world sets it */
-    s_music.arp.n_notes       = 0;
+    s_music.run.n_notes       = 0;
     memset(s_delay_ring, 0, sizeof s_delay_ring);
     s_delay_pos = 0;
     if (!s_sine_ready) sine_init();
@@ -436,26 +449,61 @@ static int pick_next_melody_note(int last, uint32_t *rng) {
     return next;
 }
 
-/* Build an ascending or descending arpeggio sequence from the
- * current chord's pitches plus an octave-up doubling for that
- * sparkling Debussy lift. */
-static void arp_build(ArpState *arp, const Chord *ch, uint32_t *rng) {
+/* Short chord arpeggio — 4-6 notes through the chord tones plus an
+ * octave-up doubling. Filler between scale runs. */
+static void arp_build(RunState *run, const Chord *ch, uint32_t *rng) {
     uint32_t r = xs(rng);
     bool descending = (r & 1);
-    bool include_octave = ((r >> 1) & 3) != 0;   /* 75% include octave */
+    bool include_octave = ((r >> 1) & 3) != 0;
     int n = 4;
-    if (include_octave) n = (((r >> 3) & 1) ? 5 : 6);  /* 5 or 6 notes */
-    arp->n_notes = n;
-    arp->next_idx = 0;
-    arp->next_t = 0.0f;   /* fire immediately */
+    if (include_octave) n = (((r >> 3) & 1) ? 5 : 6);
+    run->n_notes = n;
+    run->next_idx = 0;
+    run->next_t = 0.0f;
+    run->note_gap = ARP_NOTE_GAP;
+    run->velocity = 0.15f;
+    run->release_t = 0.80f;
     for (int i = 0; i < 4; i++) {
         int idx = descending ? (3 - i) : i;
-        arp->freqs[i] = ch->freqs[idx];
+        run->freqs[i] = ch->freqs[idx];
     }
-    /* Extra notes: re-fire top one octave up (Claire-de-Lune-style
-     * "and one more on top" gesture). */
-    if (n >= 5) arp->freqs[4] = ch->freqs[descending ? 0 : 3] * 2.0f;
-    if (n >= 6) arp->freqs[5] = ch->freqs[descending ? 1 : 2] * 2.0f;
+    if (n >= 5) run->freqs[4] = ch->freqs[descending ? 0 : 3] * 2.0f;
+    if (n >= 6) run->freqs[5] = ch->freqs[descending ? 1 : 2] * 2.0f;
+}
+
+/* SCALE RUN — sequential pentatonic sweep. Picks a random start,
+ * direction, and length (8-14 notes) and walks the pent_freqs[]
+ * table in one-step increments, wrapping into the octave above when
+ * we run off the top. This is the Claire-de-Lune RH cascade — long
+ * continuous lines, not chord-tone hops. */
+static void scale_build(RunState *run, uint32_t *rng) {
+    uint32_t r = xs(rng);
+    bool descending = (r & 1);
+    int len = 8 + (int)((r >> 1) & 7);   /* 8..15 */
+    if (len > RUN_MAX_NOTES) len = RUN_MAX_NOTES;
+    run->n_notes = len;
+    run->next_idx = 0;
+    run->next_t = 0.0f;
+    run->note_gap = RUN_NOTE_GAP;
+    /* Slightly louder than chord arps so the sweep cuts through. */
+    run->velocity = 0.20f;
+    run->release_t = 0.55f;
+    /* Pick a start index so the run stays in-table once we add len
+     * steps; if it would overflow, the upper notes are doubled an
+     * octave higher from the low pent_freqs entries (continuous feel). */
+    int max_start = descending ? (PENT_COUNT - 1) : 4;
+    int start = (int)((r >> 4) % (uint32_t)(max_start + 1));
+    if (descending) start = (PENT_COUNT - 1) - start;  /* prefer high starts */
+    for (int i = 0; i < len; i++) {
+        int step = descending ? -i : i;
+        int idx = start + step;
+        float oct_mul = 1.0f;
+        /* Wrap into next octave instead of clamping — Debussy
+         * cascades that climb past their starting range. */
+        while (idx >= PENT_COUNT) { idx -= PENT_COUNT; oct_mul *= 2.0f; }
+        while (idx < 0)           { idx += PENT_COUNT; oct_mul *= 0.5f; }
+        run->freqs[i] = pent_freqs[idx] * oct_mul;
+    }
 }
 
 void craft_audio_music_tick(float dt) {
@@ -492,38 +540,44 @@ void craft_audio_music_tick(float dt) {
             /* release */ is_day ? 3.0f : 4.5f);
     }
 
-    /* Drive any active arpeggio — fire next note when its time comes. */
-    if (s_music.arp.n_notes > 0 && s_music.t >= s_music.arp.next_t) {
-        int i = s_music.arp.next_idx;
-        float freqs1[1] = { s_music.arp.freqs[i] };
+    /* Drive any active run (scale or arpeggio) — fire next note when
+     * its time comes. */
+    if (s_music.run.n_notes > 0 && s_music.t >= s_music.run.next_t) {
+        int i = s_music.run.next_idx;
+        float freqs1[1] = { s_music.run.freqs[i] };
         trigger_music_voice(
             MUSIC_MELODY_VOICE,
             freqs1, 1,
-            /* velocity */ 0.14f,
-            /* attack */ 0.03f,
-            /* sustain hold */ 0.06f,
-            /* release */ 0.7f);
-        s_music.arp.next_idx++;
-        s_music.arp.next_t = s_music.t + ARPEGGIO_NOTE_GAP;
-        if (s_music.arp.next_idx >= s_music.arp.n_notes) {
-            s_music.arp.n_notes = 0;   /* sequence done */
-            /* Don't immediately stack another note — defer next
-             * melody event by at least the arp's natural tail. */
+            s_music.run.velocity,
+            /* attack */ 0.025f,
+            /* sustain hold */ 0.04f,
+            /* release */ s_music.run.release_t);
+        s_music.run.next_idx++;
+        s_music.run.next_t = s_music.t + s_music.run.note_gap;
+        if (s_music.run.next_idx >= s_music.run.n_notes) {
+            s_music.run.n_notes = 0;   /* sequence done */
+            /* Defer next melody event so the sweep's tail rings out. */
             float span = melody_max - melody_min;
             s_music.next_note_t = s_music.t + melody_min + frand01(&s_music.rng) * span;
         }
     }
-    else if (s_music.t >= s_music.next_note_t && s_music.arp.n_notes == 0) {
+    else if (s_music.t >= s_music.next_note_t && s_music.run.n_notes == 0) {
         uint32_t r = xs(&s_music.rng);
         bool rest = (r & 0xFFFF) < (uint32_t)(melody_rest * 0x10000);
         if (!rest) {
-            /* Day mode: chance to fire an arpeggio instead of a
-             * single note. Night mode: always single sustained
-             * notes for the contemplative feel. */
-            bool arp = is_day &&
-                       (((r >> 16) & 0xFFFF) < (uint32_t)(ARPEGGIO_PCT_DAY * 0x10000));
-            if (arp) {
-                arp_build(&s_music.arp, &chord_prog[s_music.chord_idx],
+            /* Pick event kind:
+             *   day:   SCALE (60%) → ARP (25%) → SINGLE (15%)
+             *   night: SCALE (15%) → SINGLE (85%)  -- no arps
+             * Scale runs are the dominant Claire-de-Lune feature so
+             * we want them often during the day and as occasional
+             * night sparkle. */
+            float pick = ((r >> 16) & 0xFFFF) / 65535.0f;
+            float p_scale = is_day ? DAY_PCT_SCALE : NIGHT_PCT_SCALE;
+            float p_arp   = is_day ? DAY_PCT_ARPEGGIO : 0.0f;
+            if (pick < p_scale) {
+                scale_build(&s_music.run, &s_music.rng);
+            } else if (pick < p_scale + p_arp) {
+                arp_build(&s_music.run, &chord_prog[s_music.chord_idx],
                           &s_music.rng);
             } else {
                 int note = pick_next_melody_note(s_music.last_note, &s_music.rng);
@@ -541,9 +595,9 @@ void craft_audio_music_tick(float dt) {
                     /* release */ is_day ? 1.2f : 2.2f);
             }
         }
-        if (s_music.arp.n_notes == 0) {
-            /* Only schedule next event when an arp wasn't queued —
-             * the arp-end path handles its own scheduling above. */
+        if (s_music.run.n_notes == 0) {
+            /* Only schedule next event when a run wasn't queued —
+             * the run-end path handles its own scheduling above. */
             float span = melody_max - melody_min;
             s_music.next_note_t = s_music.t + melody_min + frand01(&s_music.rng) * span;
         }

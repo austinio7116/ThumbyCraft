@@ -22,6 +22,9 @@ typedef enum {
     MOB_PIG,
     MOB_CHICKEN,
     MOB_SLIME,       /* hostile — chases and contact-damages the player */
+    MOB_SKELETON,    /* hostile — ranged, stops at ~5 blocks and shoots arrows */
+    MOB_SPIDER,      /* hostile — fast melee, low-profile */
+    MOB_CREEPER,     /* hostile — melee, freezes + explodes on proximity */
     MOB_TYPE_COUNT
 } MobType;
 
@@ -34,7 +37,31 @@ typedef struct {
     float   ai_timer;     /* sec until next decision */
     int     hp;           /* set on spawn from mob type table */
     float   hurt_flash;   /* sec — non-zero shows red tint */
+    /* Per-type behaviour state. Unused fields are zero. */
+    float   fire_cooldown;/* skeleton: sec until next arrow */
+    float   fuse_t;       /* creeper: 0 = not fused, >0 = sec into fuse */
+    float   burn_acc;     /* sec accumulated in direct sun — 1 HP per */
 } CraftMob;
+
+/* --- Arrow projectile system (Phase 28) -------------------------- *
+ * Skeleton-fired arrows that ballistically arc toward the player.
+ * Tick advances position by velocity * dt, applies gravity. Despawn
+ * on lifetime, world block hit, or player hit. */
+#define CRAFT_MAX_ARROWS 16
+
+typedef struct {
+    bool  alive;
+    Vec3  pos;
+    Vec3  vel;
+    float lifetime;       /* sec — counts down to 0 then despawn */
+} CraftArrow;
+
+extern CraftArrow craft_arrows[CRAFT_MAX_ARROWS];
+
+void craft_arrows_clear(void);
+void craft_arrows_spawn(Vec3 pos, Vec3 vel);
+void craft_arrows_tick(float dt, CraftPlayer *p);
+void craft_arrows_render(const CraftCamera *cam, uint16_t *fb);
 
 /* Damage a mob by `amt`. If hp drops to 0, mob dies (alive=false) and
  * the function returns true. */

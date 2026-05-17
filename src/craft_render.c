@@ -179,35 +179,55 @@ INLINE_HOT TraceHit trace_ray(Vec3 origin, Vec3 dir, bool stop_at_water) {
     int prev_vx = vx, prev_vy = vy, prev_vz = vz;
     float t = 0.0f;
 
+    /* Maintain `idx` = local-buffer index = (vy*WORLD_Z + lz)*WORLD_X + lx
+     * incrementally as the DDA steps. Saves a function call + bounds
+     * compare + multiply on every step (up to 64 steps per pixel ×
+     * 16 384 pixels per frame).
+     *
+     * Validity: trace_ray is only called from camera-position rays
+     * (render strip, player pick), and the camera lives inside the
+     * window via maybe_shift. So origin is always in-window and the
+     * initial idx is in-range. The DDA signs are fixed for a ray so
+     * once vx/vy/vz step outside the window they stay outside — we
+     * break before the next read, so idx is never used while
+     * out-of-range. */
+    int lx0 = vx - craft_world_origin_x;
+    int lz0 = vz - craft_world_origin_z;
+    int idx = (vy * CRAFT_WORLD_Z + lz0) * CRAFT_WORLD_X + lx0;
+    const int idx_dy = CRAFT_WORLD_X * CRAFT_WORLD_Z;
+    const int idx_dz = CRAFT_WORLD_X;
+
     for (int step = 0; step < CRAFT_MAX_STEPS; step++) {
         prev_vx = vx; prev_vy = vy; prev_vz = vz;
         if (t_max_x < t_max_y && t_max_x < t_max_z) {
             vx += sx;
+            idx += sx;
             t = t_max_x;
             t_max_x += t_delta_x;
             face = (sx > 0) ? FACE_NX : FACE_PX;
         } else if (t_max_y < t_max_z) {
             vy += sy;
+            idx += sy * idx_dy;
             t = t_max_y;
             t_max_y += t_delta_y;
             face = (sy > 0) ? FACE_NY : FACE_PY;
         } else {
             vz += sz;
+            idx += sz * idx_dz;
             t = t_max_z;
             t_max_z += t_delta_z;
             face = (sz > 0) ? FACE_NZ : FACE_PZ;
         }
 
         if (t > CRAFT_MAX_DIST) break;
-        /* Terminate the ray when it exits the loaded WINDOW (not the
-         * old fixed-world bounds 0..63). The window slides with the
-         * player so the visible terrain follows them in infinite
-         * worlds. */
+        /* Terminate the ray when it exits the loaded WINDOW. */
         if ((unsigned)(vx - craft_world_origin_x) >= CRAFT_WORLD_X ||
             (unsigned)vy >= CRAFT_WORLD_Y ||
             (unsigned)(vz - craft_world_origin_z) >= CRAFT_WORLD_Z) break;
 
-        BlockId blk = craft_world_get(vx, vy, vz);
+        /* Direct buffer read — bounds already checked above, idx is
+         * maintained incrementally so this is one load. */
+        BlockId blk = (BlockId)craft_world_blocks[idx];
         if (blk == BLK_AIR) continue;
         /* Torches are smaller-than-cube objects rendered in a
          * separate 3D post-pass. The raycaster sees the cell as

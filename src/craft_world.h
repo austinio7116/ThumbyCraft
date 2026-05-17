@@ -86,6 +86,14 @@ void craft_world_maybe_shift(int player_wx, int player_wz, uint32_t seed);
 /* Number of mod entries in the table (for HUD diagnostics). */
 int craft_world_mod_count(void);
 
+/* Persist all currently-windowed chunks' mods to flash, and pull in
+ * any flash-persisted mods for chunks in the window. The pair is the
+ * bridge between the in-SRAM mod hash and the flash chunk store —
+ * the world layer calls them automatically on load and around window
+ * shifts; the save path can call persist explicitly for safety. */
+void craft_world_chunks_persist_window(void);
+void craft_world_chunks_restore_window(void);
+
 /* Get/set use *absolute world coordinates*. Out-of-window get
  * returns BLK_AIR (the renderer treats that as sky-equivalent at
  * window edge); out-of-window set still records in the mod table

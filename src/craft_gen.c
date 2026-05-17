@@ -93,35 +93,27 @@ static float mountain_factor(int x, int z, uint32_t seed) {
     return (b - 0.55f) / 0.20f;
 }
 
-/* River factor in [0, 1]. Ridge noise — value peaks where the
- * underlying fbm crosses 0.5, creating winding 1D lines through
- * 2D space. Wider falloff multiplier (5×) gives gentler bank
- * slopes than the previous 8× value. */
+/* River factor in [0, 1]. Sharp ridge noise — narrow band around
+ * where the underlying fbm crosses 0.5. The 25× multiplier makes
+ * the activated band only a few world units wide so rivers come
+ * out as small streams rather than valleys. */
 static float river_factor(int x, int z, uint32_t seed) {
     float n  = fbm((float)x * 0.012f, (float)z * 0.012f, seed ^ 0x7E417A11u);
     float dr = n - 0.5f;
-    float ridge = 1.0f - fabsf(dr) * 5.0f;
+    float ridge = 1.0f - fabsf(dr) * 25.0f;
     if (ridge < 0.0f) ridge = 0.0f;
     return ridge;
 }
 
-/* Rivers depress the height below water level when the ridge is
- * strong enough AND we're not in a mountain. Returns the depression
- * in blocks (0 = no river here).
- *
- * Softer than before: max 2 blocks deep (was 4), and the activation
- * threshold + slope are tuned so the BANKS taper gently down to the
- * channel over many blocks rather than dropping into a canyon. */
+/* Returns 0 = no river, 1-2 = depth below water level. The narrow
+ * ridge above means total channel is roughly 3-5 cells wide with
+ * the deepest 1-2 cells at the very centre. */
 static int river_carve_depth(int x, int z, uint32_t seed) {
     float r = river_factor(x, z, seed);
     if (r < 0.30f) return 0;
-    /* Mountains shrug off rivers — keeps them in lowlands. */
+    /* Mountains shrug off rivers. */
     float m = mountain_factor(x, z, seed);
     if (m > 0.3f) return 0;
-    /* Linear ramp from r=0.30 (depth=0, river edge) to r=1.0
-     * (depth=2, channel centre). The wide active band means a river
-     * smoothly sinks into existing terrain over many blocks instead
-     * of cutting a sharp canyon. */
     float t = (r - 0.30f) / 0.70f;            /* 0..1 across active band */
     int depth = (int)(t * 2.5f);              /* 0, 1, 2 */
     if (depth > 2) depth = 2;
@@ -136,12 +128,17 @@ static int height_at(int x, int z, uint32_t seed) {
     /* Mountain biome adds up to ~22 blocks of extra elevation. */
     float m = mountain_factor(x, z, seed);
     height += (int)(m * 22.0f);
-    /* River carving — clamp the surface down so water naturally
-     * pools in the channel. */
-    int rd = river_carve_depth(x, z, seed);
-    if (rd > 0) {
-        int river_h = CRAFT_WATER_LEVEL - rd;
-        if (river_h < height) height = river_h;
+    /* River carving — ONLY where the natural terrain is already a
+     * lowland (within 2 blocks of water level). Without this gate the
+     * winding ridge noise sliced canyons through any hill it crossed.
+     * Now rivers only form where the noise's path happens to coincide
+     * with naturally low ground — which is how real rivers behave. */
+    if (height <= CRAFT_WATER_LEVEL + 2) {
+        int rd = river_carve_depth(x, z, seed);
+        if (rd > 0) {
+            int river_h = CRAFT_WATER_LEVEL - rd;
+            if (river_h < height) height = river_h;
+        }
     }
     if (height < 1) height = 1;
     if (height >= CRAFT_WORLD_Y - 4) height = CRAFT_WORLD_Y - 4;
@@ -172,27 +169,302 @@ static bool tree_at(int x, int z, uint32_t seed) {
     return ((r & 0x7F) == 0);
 }
 
-/* Tree shape: trunk = 4 tall wood at column (x, base+1..base+4), where
- * base = surface y. Top of trunk = base+4. Leaf canopy follows the
- * original place_tree layout. */
-static BlockId tree_block_at(int dx, int dz, int y, int trunk_base) {
+typedef enum {
+    TREE_OAK = 0,        /* Standard Minecraft small oak — 5-tall trunk */
+    TREE_OAK_LARGE,      /* Minecraft big oak — 8-tall trunk with branches */
+    TREE_PINE,           /* Tall conifer — pointed tip, wide layered base */
+} TreeType;
+
+/* Pick a tree shape per position deterministically. Mountain biome
+ * is all pine; grassland is mostly standard oak with occasional
+ * large oaks for variety. */
+static TreeType tree_type_at(int x, int z, uint32_t seed) {
+    float m = mountain_factor(x, z, seed);
+    if (m > 0.4f) return TREE_PINE;
+    uint32_t r = hash3(x, z, seed ^ 0x7E47A1B5u);
+    int roll = (int)((r >> 3) & 0xFF);
+    /* Grassland: ~75% standard oak, ~25% large oak. */
+    if (roll < 192) return TREE_OAK;
+    return TREE_OAK_LARGE;
+}
+
+/* Per-tree variant byte — used to rotate branch directions and so on.
+ * Deterministic on (x, z, seed). */
+static int tree_variant_at(int x, int z, uint32_t seed) {
+    return (int)(hash3(x, z, seed ^ 0xBADBE1FFu) & 0xFF);
+}
+
+/* Per-shape block lookup. Each function returns the tree block at the
+ * given (dx, dz) offset from the trunk base for the given absolute y,
+ * or BLK_AIR if this cell isn't part of the tree. trunk_base is the
+ * surface block's y; the trunk starts one cell above. */
+/* Helpers — Chebyshev distance and "is a corner of a square ring". */
+static inline int abs_i(int v) { return v < 0 ? -v : v; }
+static inline int max_chess(int dx, int dz) {
+    int a = abs_i(dx), b = abs_i(dz);
+    return a > b ? a : b;
+}
+
+/* STANDARD MINECRAFT OAK
+ *
+ * 5-tall trunk. Canopy follows the small-oak pattern exactly:
+ *
+ *   y = top + 1   3×3
+ *   y = top       3×3  (with corner-cell randomness in MC; we keep full)
+ *   y = top - 1   5×5 minus the 4 single corners
+ *   y = top - 2   5×5 minus the 4 single corners
+ *
+ * Trunk passes through the two lower leaf layers; the top two leaf
+ * layers cap above the trunk. */
+static BlockId tree_block_oak(int dx, int dz, int y, int trunk_base) {
     int trunk_y = trunk_base + 1;
-    int top = trunk_y + 3;             /* top of trunk */
-    if (dx == 0 && dz == 0 && y >= trunk_y && y < trunk_y + 4) return BLK_WOOD;
-    /* Lower canopy at top..top+1 within radius² ≤ 5. */
-    for (int dy = 0; dy < 2; dy++) {
-        if (y == top + dy) {
-            int r2 = dx * dx + dz * dz;
-            if (r2 > 5) continue;
-            if (dx == 0 && dz == 0) continue;   /* trunk occupies this */
-            return BLK_LEAVES;
+    int top = trunk_y + 4;             /* 5-tall trunk (y = trunk_y..top) */
+    if (dx == 0 && dz == 0 && y >= trunk_y && y <= top) return BLK_WOOD;
+    int ady = y - top;
+    int adx = abs_i(dx), adz = abs_i(dz);
+    int chess = max_chess(dx, dz);
+    /* Bottom two leaf layers — wide 5×5 minus corners. */
+    if (ady == -2 || ady == -1) {
+        if (chess <= 2 && !(adx == 2 && adz == 2)) {
+            if (!(dx == 0 && dz == 0)) return BLK_LEAVES;
         }
     }
-    /* Crown at top+2: centre + 4 cardinal neighbours. */
-    if (y == top + 2) {
-        if (dx == 0 && dz == 0) return BLK_LEAVES;
-        if ((dx == 1 || dx == -1) && dz == 0) return BLK_LEAVES;
-        if (dx == 0 && (dz == 1 || dz == -1)) return BLK_LEAVES;
+    /* Top two leaf layers — 3×3. */
+    if (ady == 0 || ady == 1) {
+        if (chess <= 1) {
+            if (!(dx == 0 && dz == 0 && ady == 0)) return BLK_LEAVES;
+        }
+    }
+    return BLK_AIR;
+}
+
+/* LARGE OAK (Minecraft "big oak" approximation)
+ *
+ * 8-tall trunk with two side branches at mid-height extending in
+ * opposite directions (axis from variant bit 0). Each branch is 2
+ * wood blocks plus a 3×3 leaf cluster (in the branch's Y plane and
+ * one cell above) around the branch tip. Main crown sits at the top
+ * of the trunk with the same layered shape as a small oak. */
+static BlockId tree_block_oak_large(int variant, int dx, int dz, int y, int trunk_base) {
+    int trunk_y = trunk_base + 1;
+    int top = trunk_y + 7;             /* 8-tall trunk */
+    if (dx == 0 && dz == 0 && y >= trunk_y && y <= top) return BLK_WOOD;
+
+    /* Branch axis from variant — 0 = X, 1 = Z. Branches go opposite
+     * directions along that axis. */
+    int axis = variant & 1;
+    int b1x = (axis == 0) ?  1 : 0;
+    int b1z = (axis == 0) ?  0 : 1;
+    int b2x = -b1x;
+    int b2z = -b1z;
+
+    /* Branch 1 lower (y = trunk_y + 3) in +axis, branch 2 higher
+     * (y = trunk_y + 5) in -axis. Each: 2 cells of wood out. */
+    int b1y = trunk_y + 3;
+    int b2y = trunk_y + 5;
+    if (y == b1y) {
+        if (dx == b1x && dz == b1z) return BLK_WOOD;
+        if (dx == 2*b1x && dz == 2*b1z) return BLK_WOOD;
+    }
+    if (y == b2y) {
+        if (dx == b2x && dz == b2z) return BLK_WOOD;
+        if (dx == 2*b2x && dz == 2*b2z) return BLK_WOOD;
+    }
+
+    /* Leaf clusters at branch tips — 3×3 in the branch's Y plane,
+     * plus a 3-cell cap one above. */
+    int adx = abs_i(dx), adz = abs_i(dz);
+    int chess = max_chess(dx, dz);
+    for (int b = 0; b < 2; b++) {
+        int by = (b == 0) ? b1y : b2y;
+        int btx = (b == 0) ? 2*b1x : 2*b2x;
+        int btz = (b == 0) ? 2*b1z : 2*b2z;
+        int tdx = dx - btx;
+        int tdz = dz - btz;
+        int tchess = max_chess(tdx, tdz);
+        if (y == by && tchess <= 1) {
+            if (!(tdx == 0 && tdz == 0)) {
+                if (!(dx == 0 && dz == 0)) return BLK_LEAVES;
+            }
+        }
+        if (y == by + 1 && tchess <= 1 &&
+            (abs_i(tdx) + abs_i(tdz)) <= 1) {
+            if (!(dx == 0 && dz == 0)) return BLK_LEAVES;
+        }
+    }
+
+    /* Main crown at trunk top — same layered shape as standard oak. */
+    int ady = y - top;
+    if (ady == -2 || ady == -1) {
+        if (chess <= 2 && !(adx == 2 && adz == 2)) {
+            if (!(dx == 0 && dz == 0)) return BLK_LEAVES;
+        }
+    }
+    if (ady == 0 || ady == 1) {
+        if (chess <= 1) {
+            if (!(dx == 0 && dz == 0 && ady == 0)) return BLK_LEAVES;
+        }
+    }
+    return BLK_AIR;
+}
+
+/* PINE — tall conifer with a pointed top and a wider layered base.
+ *
+ * 8-tall trunk; tip leaf sits one cell above. Canopy alternates
+ * narrow / wide skirts on the way down for that layered spruce look:
+ *
+ *   y = top + 1     single leaf (tip)
+ *   y = top         + (4 cardinals around trunk top)
+ *   y = top - 1     3×3 (full ring)
+ *   y = top - 2     +  (skirt gap — narrower for layered look)
+ *   y = top - 3     3×3
+ *   y = top - 4     5×5 minus single corners (wide tier)
+ *   y = top - 5     5×5 minus single corners (widest base)
+ */
+static BlockId tree_block_pine(int dx, int dz, int y, int trunk_base) {
+    int trunk_y = trunk_base + 1;
+    int top = trunk_y + 7;             /* 8-tall trunk */
+    if (dx == 0 && dz == 0 && y >= trunk_y && y <= top) return BLK_WOOD;
+    int ady = y - top;
+    int adx = abs_i(dx), adz = abs_i(dz);
+    int chess = max_chess(dx, dz);
+    int manh = adx + adz;
+    /* Tip. */
+    if (ady == 1 && dx == 0 && dz == 0) return BLK_LEAVES;
+    /* Cardinal cross around the trunk's topmost cell. */
+    if (ady == 0 && manh == 1) return BLK_LEAVES;
+    /* Two 3×3 layers and the skirt-gap between them. */
+    if (ady == -1) {
+        if (chess <= 1 && !(dx == 0 && dz == 0)) return BLK_LEAVES;
+    }
+    if (ady == -2) {
+        /* + only — narrow gap layer for the layered profile. */
+        if (manh == 1) return BLK_LEAVES;
+    }
+    if (ady == -3) {
+        if (chess <= 1 && !(dx == 0 && dz == 0)) return BLK_LEAVES;
+    }
+    /* Wide 5×5-minus-corners tiers near the base. */
+    if (ady == -4 || ady == -5) {
+        if (chess <= 2 && !(adx == 2 && adz == 2)) {
+            if (!(dx == 0 && dz == 0)) return BLK_LEAVES;
+        }
+    }
+    return BLK_AIR;
+}
+
+static BlockId tree_block_at(TreeType t, int variant, int dx, int dz,
+                             int y, int trunk_base) {
+    switch (t) {
+        case TREE_OAK_LARGE: return tree_block_oak_large(variant, dx, dz, y, trunk_base);
+        case TREE_PINE:      return tree_block_pine(dx, dz, y, trunk_base);
+        case TREE_OAK:
+        default:             return tree_block_oak(dx, dz, y, trunk_base);
+    }
+}
+
+/* --- Wooden huts -----------------------------------------------------
+ *
+ * Small 5×5 plank cabins. A hut "exists" at world column (hx, hz) iff
+ * hut_origin_at(hx, hz, seed) returns true. The footprint occupies
+ * cells [hx..hx+4, hz..hz+4]; walls run y=gy+1..gy+3 around the
+ * perimeter, roof at y=gy+4 covers the full 5×5, and a 2-cell door
+ * (y=gy+1..2) opens on one side picked by the variant byte. The hut
+ * floor (y=gy) is left untouched so the player walks in on the natural
+ * surface block (grass).
+ *
+ * Generation is deterministic per (hx, hz, seed) and must be applied
+ * identically in craft_gen_block_at and craft_gen_column — the save
+ * diff layer relies on per-cell agreement. */
+#define HUT_W 5
+#define HUT_H 5
+
+static bool hut_origin_at(int hx, int hz, uint32_t seed) {
+    uint32_t r = hash3(hx, hz, seed ^ 0xCAB1F00Du);
+    /* ~1 in 16 384 columns → roughly one hut per 128×128 region. */
+    if ((r & 0x3FFF) != 0) return false;
+    /* Lowland-only — mountain biome shrugs huts off. */
+    float m = mountain_factor(hx, hz, seed);
+    if (m > 0.20f) return false;
+    /* Above water, naturally flat across the whole footprint. */
+    int ref_h = height_at(hx, hz, seed);
+    if (ref_h <= CRAFT_WATER_LEVEL + 1) return false;
+    int min_h = ref_h, max_h = ref_h;
+    for (int dz = 0; dz < HUT_H; dz++) {
+        for (int dx = 0; dx < HUT_W; dx++) {
+            int h = height_at(hx + dx, hz + dz, seed);
+            if (h < min_h) min_h = h;
+            if (h > max_h) max_h = h;
+        }
+    }
+    /* Reject sloped sites — walls would hang in air or bury. */
+    if (max_h - min_h > 1) return false;
+    return true;
+}
+
+/* Floor Y for the hut at (hx, hz) — taken as the minimum of the
+ * footprint so walls always start from a complete grass base. */
+static int hut_floor_y(int hx, int hz, uint32_t seed) {
+    int min_h = height_at(hx, hz, seed);
+    for (int dz = 0; dz < HUT_H; dz++) {
+        for (int dx = 0; dx < HUT_W; dx++) {
+            int h = height_at(hx + dx, hz + dz, seed);
+            if (h < min_h) min_h = h;
+        }
+    }
+    return min_h;
+}
+
+/* Per-hut variant byte — bits 0-1 pick the door wall direction. */
+static int hut_variant(int hx, int hz, uint32_t seed) {
+    return (int)(hash3(hx, hz, seed ^ 0x110D5EEDu) & 0xFFu);
+}
+
+/* What block sits at hut-local (dx, dz, dy)?
+ *   dy = 0  : floor (always AIR — keep natural surface)
+ *   dy = 1-3: wall perimeter (PLANK) / interior (AIR) / door opening (AIR)
+ *   dy = 4  : roof (full PLANK 5×5)
+ * dx, dz in [0, HUT_W-1] / [0, HUT_H-1]. */
+static BlockId hut_block_local(int dx, int dz, int dy, int variant) {
+    if (dy <= 0 || dy > 4) return BLK_AIR;
+    if (dy == 4) {
+        /* Roof — full square. */
+        if (dx >= 0 && dx < HUT_W && dz >= 0 && dz < HUT_H) return BLK_PLANK;
+        return BLK_AIR;
+    }
+    /* Walls — perimeter only. */
+    bool on_perim = (dx == 0 || dx == HUT_W - 1 || dz == 0 || dz == HUT_H - 1);
+    if (!on_perim) return BLK_AIR;
+    /* Door — 2-cell opening at middle of the chosen wall, dy 1..2. */
+    if (dy <= 2) {
+        int dir = variant & 3;
+        switch (dir) {
+            case 0: if (dz == 0          && dx == HUT_W / 2) return BLK_AIR; break;  /* south */
+            case 1: if (dz == HUT_H - 1  && dx == HUT_W / 2) return BLK_AIR; break;  /* north */
+            case 2: if (dx == HUT_W - 1  && dz == HUT_H / 2) return BLK_AIR; break;  /* east */
+            case 3: if (dx == 0          && dz == HUT_H / 2) return BLK_AIR; break;  /* west */
+        }
+    }
+    return BLK_PLANK;
+}
+
+/* If world cell (x, y, z) lies inside any hut footprint, set *covered
+ * and return the hut block (which may be AIR for interior/door). The
+ * 5×5 scan in (dx, dz) is small enough to run per-cell from
+ * craft_gen_block_at without measurable cost. */
+static BlockId hut_cell(int x, int y, int z, uint32_t seed, bool *covered) {
+    *covered = false;
+    for (int dz = -(HUT_H - 1); dz <= 0; dz++) {
+        for (int dx = -(HUT_W - 1); dx <= 0; dx++) {
+            int hx = x + dx, hz = z + dz;
+            if (!hut_origin_at(hx, hz, seed)) continue;
+            int gy = hut_floor_y(hx, hz, seed);
+            int dy = y - gy;
+            if (dy <= 0 || dy > 4) continue;  /* outside hut Y range */
+            *covered = true;
+            int variant = hut_variant(hx, hz, seed);
+            return hut_block_local(-dx, -dz, dy, variant);
+        }
     }
     return BLK_AIR;
 }
@@ -220,13 +492,24 @@ BlockId craft_gen_block_at(int x, int y, int z, uint32_t seed) {
     /* Above ground but below water: water or air. */
     if (y <= CRAFT_WATER_LEVEL) return BLK_WATER;
 
+    /* Hut check FIRST so walls/interior override any tree blocks that
+     * would otherwise land in the footprint. Hut floor (y=gy) is not
+     * "covered" — that's the natural surface. */
+    {
+        bool covered;
+        BlockId hb = hut_cell(x, y, z, seed, &covered);
+        if (covered) return hb;
+    }
+
     /* Tree check — scan a 7×7 neighbourhood of columns. */
     for (int dz = -3; dz <= 3; dz++) {
         for (int dx = -3; dx <= 3; dx++) {
             int tx = x + dx, tz = z + dz;
             if (!tree_at(tx, tz, seed)) continue;
             int th = height_at(tx, tz, seed);
-            BlockId b = tree_block_at(-dx, -dz, y, th);
+            TreeType tt = tree_type_at(tx, tz, seed);
+            int tv = tree_variant_at(tx, tz, seed);
+            BlockId b = tree_block_at(tt, tv, -dx, -dz, y, th);
             if (b != BLK_AIR) return b;
         }
     }
@@ -287,9 +570,30 @@ void craft_gen_column(int wx, int wz, uint32_t seed,
             int tx = wx + dx, tz = wz + dz;
             if (!tree_at(tx, tz, seed)) continue;
             int th = height_at(tx, tz, seed);
+            TreeType tt = tree_type_at(tx, tz, seed);
+            int tv = tree_variant_at(tx, tz, seed);
             for (int y = th + 1; y < CRAFT_WORLD_Y; y++) {
-                BlockId b = tree_block_at(-dx, -dz, y, th);
+                BlockId b = tree_block_at(tt, tv, -dx, -dz, y, th);
                 if (b != BLK_AIR && out[y] == BLK_AIR) out[y] = b;
+            }
+        }
+    }
+
+    /* Hut pass — runs AFTER trees so walls/interior overwrite any tree
+     * blocks that landed in the footprint. Scan 5×5 candidate hut
+     * origins whose footprint covers this column. */
+    for (int dz = -(HUT_H - 1); dz <= 0; dz++) {
+        for (int dx = -(HUT_W - 1); dx <= 0; dx++) {
+            int hx = wx + dx, hz = wz + dz;
+            if (!hut_origin_at(hx, hz, seed)) continue;
+            int gy = hut_floor_y(hx, hz, seed);
+            int variant = hut_variant(hx, hz, seed);
+            for (int dy = 1; dy <= 4; dy++) {
+                int y = gy + dy;
+                if (y < 0 || y >= CRAFT_WORLD_Y) continue;
+                /* Stamp unconditionally — interior AIR clears any tree
+                 * block sitting where the hut wants empty space. */
+                out[y] = (uint8_t)hut_block_local(-dx, -dz, dy, variant);
             }
         }
     }

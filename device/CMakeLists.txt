@@ -63,6 +63,7 @@ set(CRAFT_DEVICE_SOURCES
     ${DEVICE}/craft_buttons.c
     ${DEVICE}/craft_audio_pwm.c
     ${DEVICE}/craft_save_flash.c
+    ${DEVICE}/craft_chunk_store_flash.c
 
     ${SRC}/craft_world.c
     ${SRC}/craft_blocks.c

@@ -45,6 +45,7 @@ add_custom_target(generate_craft_textures DEPENDS ${CRAFT_BAKED_C})
 
 add_executable(thumbycraft_host
     ${CMAKE_CURRENT_LIST_DIR}/host_main.c
+    ${CMAKE_CURRENT_LIST_DIR}/craft_chunk_store_stub.c
     ${SRC}/craft_world.c
     ${SRC}/craft_blocks.c
     ${SRC}/craft_gen.c

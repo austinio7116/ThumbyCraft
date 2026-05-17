@@ -23,6 +23,14 @@ void craft_particles_init(void);
  * block is set to BLK_AIR. */
 void craft_particles_emit_break(Vec3 centre, BlockId broken);
 
+/* Big radial fireball — used by creeper detonation. ~24 particles
+ * with extended lifetime (0.9-1.5 s) launched outward in fire colors. */
+void craft_particles_emit_explosion(Vec3 centre);
+
+/* Small rising flame puff — 1-2 particles per call, no gravity, ~0.4 s
+ * lifetime. Call once per frame from any continuously-burning source. */
+void craft_particles_emit_flame(Vec3 centre);
+
 /* Advance physics + age by dt seconds. */
 void craft_particles_tick(float dt);
 

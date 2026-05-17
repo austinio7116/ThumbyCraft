@@ -21,10 +21,12 @@
 #include "craft_world.h"
 #include "craft_blocks.h"
 #include "craft_player.h"
+#include "craft_particles.h"
 
 #include <string.h>
 
-CraftMob craft_mobs[CRAFT_MAX_MOBS];
+CraftMob   craft_mobs[CRAFT_MAX_MOBS];
+CraftArrow craft_arrows[CRAFT_MAX_ARROWS];
 
 /* --- Model description ------------------------------------------- */
 
@@ -34,7 +36,13 @@ typedef struct {
     uint16_t color;
 } CuboidPart;
 
-#define MAX_PARTS 8
+/* Bumped 13 → 17 for the detailed skeleton (skull + nose socket + jaw +
+ * upper/lower torso + sternum + 3 ribs + 2 eyes + 2 arms + 2 legs = 15)
+ * and the detailed creeper (head + base ring + 4 eye cubes + 2-piece
+ * T-mouth + torso + 4 mottle spots + 4 legs = 17). Adds ~28 B × 4 slots
+ * × 7 mob types ≈ 0.8 KB BSS — sized to keep total RAM under the link
+ * ceiling (heap + stack + BSS all fight for the 512 KB region). */
+#define MAX_PARTS 17
 typedef struct {
     int             n_parts;
     CuboidPart      parts[MAX_PARTS];
@@ -49,13 +57,40 @@ static const float mob_speed[MOB_TYPE_COUNT] = {
     1.3f,    /* pig   */
     1.6f,    /* chicken */
     2.2f,    /* slime */
+    1.8f,    /* skeleton — strafes / approaches at moderate pace */
+    3.3f,    /* spider — fast */
+    2.4f,    /* creeper — slightly faster than slime */
 };
 static const int mob_hp_table[MOB_TYPE_COUNT] = {
     3, 3, 1, 2,
+    4,  /* skeleton */
+    4,  /* spider   */
+    3,  /* creeper  */
 };
-/* Aggro range — slime starts chasing when player within this distance. */
-#define SLIME_AGGRO_DIST   12.0f
-#define SLIME_CONTACT_DIST 0.9f
+/* Aggro / contact distances and behavioural tunables.
+ *
+ * Mob stand-off: hostiles stop closing when they're within this far
+ * of the player so they always sit in the ADJACENT world cell rather
+ * than shoving into the player's own cell. With player half-width
+ * 0.30 and mob radii 0.4-0.6, 1.4 m keeps the mob centre in a
+ * different floor cell from the player's centre across all approach
+ * angles. Melee mobs still hit from this range (their attack is a
+ * contact-tick, not an AABB collision). */
+#define MOB_STANDOFF           1.40f
+#define SLIME_AGGRO_DIST       12.0f
+#define SLIME_CONTACT_DIST     MOB_STANDOFF
+#define SKEL_AGGRO_DIST        16.0f
+#define SKEL_KEEP_DIST          5.0f   /* stop closing inside this range */
+#define SKEL_BACK_DIST          3.0f   /* back off if too close */
+#define SKEL_FIRE_GAP           2.0f   /* sec between arrow shots */
+#define SKEL_ARROW_SPEED       14.0f
+#define SPIDER_AGGRO_DIST      14.0f
+#define SPIDER_CONTACT_DIST    MOB_STANDOFF
+#define CREEPER_AGGRO_DIST     14.0f
+#define CREEPER_FUSE_DIST       1.80f   /* fuse a tad sooner so blast point is adjacent */
+#define CREEPER_FUSE_TIME       1.0f
+#define CREEPER_BLAST_DIST      2.5f
+#define CREEPER_BLAST_DAMAGE    5
 #define NIGHT_SPAWN_GAP    4.0f   /* sec between spawn attempts at night */
 #define DAY_SPAWN_GAP     20.0f   /* sec between spawn attempts during the day */
 
@@ -133,9 +168,156 @@ void craft_mobs_build_sprites(void) {
     m->n_parts = 4;
     m->radius  = 0.55f;
     m->height  = 0.70f;
+
+    /* SKELETON — humanoid: skull with sunken eyes + nose cavity + jaw,
+     * ribcage with horizontal rib slats and central sternum, arms at
+     * sides, narrow legs. ~0.5 wide × 1.6 tall × 0.32 deep envelope. */
+    m = &s_models[MOB_SKELETON];
+    uint16_t BONE   = rgb565(230, 230, 215);
+    uint16_t BONE_D = rgb565(180, 180, 170);
+    uint16_t RIB    = rgb565(150, 150, 140);   /* darker bone for ribs */
+    uint16_t SOCKET = rgb565(10, 10, 10);
+    /* Skull — cubic, ~0.30 across, sits on top. */
+    m->parts[0] = (CuboidPart){  0.00f, 1.42f,  0.00f,  0.15f, 0.13f, 0.13f, BONE   };  /* skull */
+    /* Eye sockets — recessed deeper into the skull (front face flush,
+     * extra depth behind). cz shifted back, hz grown so the socket
+     * punches further in but only just protrudes from the skull face. */
+    m->parts[1] = (CuboidPart){ -0.07f, 1.46f,  0.11f,  0.04f, 0.04f, 0.04f, SOCKET };  /* L eye socket */
+    m->parts[2] = (CuboidPart){  0.07f, 1.46f,  0.11f,  0.04f, 0.04f, 0.04f, SOCKET };  /* R eye socket */
+    /* Nose cavity — central dark triangle/socket below the eyes. */
+    m->parts[3] = (CuboidPart){  0.00f, 1.38f,  0.11f,  0.02f, 0.04f, 0.04f, SOCKET };  /* nose cavity */
+    /* Jaw — narrower chunk hanging below the skull front. */
+    m->parts[4] = (CuboidPart){  0.00f, 1.24f,  0.03f,  0.10f, 0.04f, 0.09f, BONE_D };  /* jaw */
+    /* Hourglass ribcage: wider upper chest, narrower lower torso. */
+    m->parts[5] = (CuboidPart){  0.00f, 1.02f,  0.00f,  0.17f, 0.13f, 0.09f, BONE_D };  /* upper torso */
+    m->parts[6] = (CuboidPart){  0.00f, 0.78f,  0.00f,  0.10f, 0.12f, 0.07f, BONE_D };  /* lower torso */
+    /* Ribs — 3 horizontal slats across the chest, slightly proud of
+     * the upper torso (cz 0.12 > torso front face 0.09). Spaced ~0.10
+     * apart vertically across the chest. */
+    m->parts[7] = (CuboidPart){  0.00f, 1.13f,  0.12f,  0.10f, 0.02f, 0.03f, RIB    };  /* top rib */
+    m->parts[8] = (CuboidPart){  0.00f, 1.02f,  0.12f,  0.10f, 0.02f, 0.03f, RIB    };  /* mid rib */
+    m->parts[9] = (CuboidPart){  0.00f, 0.91f,  0.12f,  0.10f, 0.02f, 0.03f, RIB    };  /* low rib */
+    /* Sternum — vertical bone ridge running down the centre of the
+     * ribs, slightly more proud than the ribs themselves. */
+    m->parts[10] = (CuboidPart){  0.00f, 1.02f,  0.13f,  0.018f, 0.13f, 0.025f, BONE };  /* sternum */
+    /* Arms hanging at the sides, just outboard of the chest. */
+    m->parts[11] = (CuboidPart){ -0.22f, 0.85f,  0.00f,  0.05f, 0.27f, 0.05f, BONE   };  /* L arm */
+    m->parts[12] = (CuboidPart){  0.22f, 0.85f,  0.00f,  0.05f, 0.27f, 0.05f, BONE   };  /* R arm */
+    /* Legs — narrow bone shafts down to the feet (y=0). */
+    m->parts[13] = (CuboidPart){ -0.08f, 0.30f,  0.00f,  0.05f, 0.30f, 0.05f, BONE   };  /* L leg */
+    m->parts[14] = (CuboidPart){  0.08f, 0.30f,  0.00f,  0.05f, 0.30f, 0.05f, BONE   };  /* R leg */
+    m->n_parts = 15;
+    m->radius  = 0.30f;   /* arms set the widest yaw-invariant envelope */
+    m->height  = 1.60f;
+
+    /* SPIDER — wide & low arachnid. Front cephalothorax (smaller),
+     * rear abdomen (larger) with red hourglass marking on top, two
+     * red eye dots on the front, eight splayed legs (two per side
+     * front/back, four per side total). ~1.2 wide × 0.5 tall ×
+     * 1.0 deep envelope. */
+    m = &s_models[MOB_SPIDER];
+    uint16_t SPDR   = rgb565(30, 22, 26);   /* abdomen — coldest dark */
+    uint16_t SPDR_H = rgb565(55, 42, 46);   /* cephalothorax — slightly lifted */
+    uint16_t SPDR_L = rgb565(20, 16, 20);   /* legs — near-black */
+    uint16_t EYE_R  = rgb565(230, 30, 30);
+    uint16_t MARK_R = rgb565(160, 25, 25);  /* deep crimson marking */
+    /* Cephalothorax (front, +Z). */
+    m->parts[0] = (CuboidPart){  0.00f, 0.20f,  0.20f,  0.16f, 0.10f, 0.18f, SPDR_H };
+    /* Abdomen (rear, -Z) — bigger, slightly higher dome. */
+    m->parts[1] = (CuboidPart){  0.00f, 0.22f, -0.20f,  0.22f, 0.13f, 0.24f, SPDR   };
+    /* Red marking visible from above on the abdomen. */
+    m->parts[2] = (CuboidPart){  0.00f, 0.36f, -0.20f,  0.08f, 0.01f, 0.14f, MARK_R };
+    /* Eyes — small red dots on front of cephalothorax. */
+    m->parts[3] = (CuboidPart){ -0.06f, 0.22f,  0.38f,  0.03f, 0.025f, 0.02f, EYE_R };
+    m->parts[4] = (CuboidPart){  0.06f, 0.22f,  0.38f,  0.03f, 0.025f, 0.02f, EYE_R };
+    /* Eight legs — four per side, splayed outward and at four
+     * different Z offsets so they read as distinct legs from the
+     * side. Each is a thin horizontal cuboid that juts past the
+     * body silhouette. Y kept near body height so they read as
+     * "legs out to the side" not "feet under". */
+    /* Left side: front, mid-front, mid-back, back. */
+    m->parts[5]  = (CuboidPart){ -0.42f, 0.16f,  0.28f,  0.22f, 0.025f, 0.03f, SPDR_L };
+    m->parts[6]  = (CuboidPart){ -0.44f, 0.16f,  0.09f,  0.22f, 0.025f, 0.03f, SPDR_L };
+    m->parts[7]  = (CuboidPart){ -0.44f, 0.16f, -0.12f,  0.22f, 0.025f, 0.03f, SPDR_L };
+    m->parts[8]  = (CuboidPart){ -0.42f, 0.16f, -0.32f,  0.22f, 0.025f, 0.03f, SPDR_L };
+    /* Right side: front, mid-front, mid-back, back. */
+    m->parts[9]  = (CuboidPart){  0.42f, 0.16f,  0.28f,  0.22f, 0.025f, 0.03f, SPDR_L };
+    m->parts[10] = (CuboidPart){  0.44f, 0.16f,  0.09f,  0.22f, 0.025f, 0.03f, SPDR_L };
+    m->parts[11] = (CuboidPart){  0.44f, 0.16f, -0.12f,  0.22f, 0.025f, 0.03f, SPDR_L };
+    m->parts[12] = (CuboidPart){  0.42f, 0.16f, -0.32f,  0.22f, 0.025f, 0.03f, SPDR_L };
+    m->n_parts = 13;
+    m->radius  = 0.72f;   /* widest splay of legs (corner of outer leg cuboid) */
+    m->height  = 0.50f;
+
+    /* CREEPER — iconic Minecraft silhouette: cubic-ish head on top
+     * with vanilla 4-quadrant eyes + downturned T-mouth, base ring
+     * at the head/torso join, mottled torso, 4 stubby corner legs,
+     * NO arms. ~0.65 wide × 1.7 tall × 0.45 deep. */
+    m = &s_models[MOB_CREEPER];
+    uint16_t CRP   = rgb565(80, 190, 80);    /* bright creeper green */
+    uint16_t CRP_D = rgb565(45, 120, 45);    /* darker mottle + base ring */
+    uint16_t CRP_F = rgb565(15, 15, 15);     /* face features (black) */
+    /* Head — wider/deeper than torso, sits at the top. */
+    m->parts[0] = (CuboidPart){  0.00f, 1.50f,  0.00f,  0.22f, 0.20f, 0.22f, CRP   };  /* head */
+    /* Base ring — thin darker green band where the head meets the
+     * torso, slightly proud so it reads as a defined seam. */
+    m->parts[1] = (CuboidPart){  0.00f, 1.31f,  0.00f,  0.225f, 0.015f, 0.225f, CRP_D }; /* base ring */
+    /* Eyes — 4 small dark cubes (2 per eye, side-by-side) to suggest
+     * the vanilla pixelated 2×2-ish square eye holes high on the head. */
+    m->parts[2] = (CuboidPart){ -0.13f, 1.58f,  0.23f,  0.04f, 0.045f, 0.02f, CRP_F }; /* L eye outer */
+    m->parts[3] = (CuboidPart){ -0.05f, 1.58f,  0.23f,  0.04f, 0.045f, 0.02f, CRP_F }; /* L eye inner */
+    m->parts[4] = (CuboidPart){  0.05f, 1.58f,  0.23f,  0.04f, 0.045f, 0.02f, CRP_F }; /* R eye inner */
+    m->parts[5] = (CuboidPart){  0.13f, 1.58f,  0.23f,  0.04f, 0.045f, 0.02f, CRP_F }; /* R eye outer */
+    /* Mouth — downturned T: central vertical stem + single horizontal
+     * "frown" bar across its top, in dark face colour. (One wider bar
+     * instead of two flanking cubes — same silhouette, saves a part.) */
+    m->parts[6] = (CuboidPart){  0.00f, 1.39f,  0.23f,  0.03f, 0.07f, 0.02f, CRP_F }; /* stem */
+    m->parts[7] = (CuboidPart){  0.00f, 1.44f,  0.23f,  0.13f, 0.02f, 0.02f, CRP_F }; /* frown bar */
+    /* Torso — narrower than head front-to-back, tall column. */
+    m->parts[8] = (CuboidPart){  0.00f, 0.80f,  0.00f,  0.18f, 0.50f, 0.10f, CRP   };  /* torso */
+    /* Mottling — small darker green spots scattered across the torso,
+     * each sitting just proud of the surface (front, back, both sides). */
+    m->parts[9]  = (CuboidPart){ -0.09f, 1.10f,  0.11f,  0.025f, 0.025f, 0.01f, CRP_D }; /* front upper */
+    m->parts[10] = (CuboidPart){  0.07f, 0.55f,  0.11f,  0.025f, 0.025f, 0.01f, CRP_D }; /* front lower */
+    m->parts[11] = (CuboidPart){ -0.19f, 0.95f, -0.02f,  0.01f,  0.025f, 0.025f, CRP_D }; /* L side */
+    m->parts[12] = (CuboidPart){  0.19f, 0.65f,  0.03f,  0.01f,  0.025f, 0.025f, CRP_D }; /* R side */
+    /* Four stubby corner legs. */
+    m->parts[13] = (CuboidPart){ -0.10f, 0.15f,  0.06f,  0.08f, 0.15f, 0.05f, CRP   };  /* FL leg */
+    m->parts[14] = (CuboidPart){  0.10f, 0.15f,  0.06f,  0.08f, 0.15f, 0.05f, CRP   };  /* FR leg */
+    m->parts[15] = (CuboidPart){ -0.10f, 0.15f, -0.06f,  0.08f, 0.15f, 0.05f, CRP   };  /* BL leg */
+    m->parts[16] = (CuboidPart){  0.10f, 0.15f, -0.06f,  0.08f, 0.15f, 0.05f, CRP   };  /* BR leg */
+    m->n_parts = 17;
+    m->radius  = 0.32f;   /* head diagonal sets the yaw-invariant envelope */
+    m->height  = 1.70f;
+
+    /* Sort every model's parts by volume descending. The mob renderer
+     * iterates parts per pixel inside the screen bbox with a best_t
+     * early-out — if we test the big body cube first it tightens
+     * best_t immediately, and the dozens of tiny detail cubes (eyes,
+     * mouth, ribs, mottling) get rejected by `t_near > best_t` in
+     * one compare instead of running the full slab intersection.
+     * Insertion sort — N ≤ 17 and only runs once at startup. */
+    for (int type = 0; type < MOB_TYPE_COUNT; type++) {
+        MobModel *mm = &s_models[type];
+        for (int i = 1; i < mm->n_parts; i++) {
+            CuboidPart key = mm->parts[i];
+            float key_vol = key.hx * key.hy * key.hz;
+            int j = i - 1;
+            while (j >= 0) {
+                float jvol = mm->parts[j].hx * mm->parts[j].hy * mm->parts[j].hz;
+                if (jvol >= key_vol) break;
+                mm->parts[j + 1] = mm->parts[j];
+                j--;
+            }
+            mm->parts[j + 1] = key;
+        }
+    }
 }
 
-static bool mob_is_hostile(MobType t) { return t == MOB_SLIME; }
+static bool mob_is_hostile(MobType t) {
+    return t == MOB_SLIME || t == MOB_SKELETON ||
+           t == MOB_SPIDER || t == MOB_CREEPER;
+}
 
 /* --- Find a grass/sand/dirt block under (x, z) ------------------- */
 static int find_ground(int x, int z) {
@@ -151,6 +333,7 @@ static int find_ground(int x, int z) {
 void craft_mobs_spawn_around(Vec3 centre, uint32_t seed) {
     s_rng ^= seed;
     for (int i = 0; i < CRAFT_MAX_MOBS; i++) craft_mobs[i].alive = false;
+    craft_arrows_clear();
     int placed = 0;
     for (int tries = 0; tries < 60 && placed < CRAFT_PASSIVE_MAX; tries++) {
         int dx = (int)(xs() & 0x1F) - 16;
@@ -168,6 +351,8 @@ void craft_mobs_spawn_around(Vec3 centre, uint32_t seed) {
         m->ai_timer = 0.5f + frand() * 2.0f;
         m->hp       = mob_hp_table[m->type];
         m->hurt_flash = 0.0f;
+        m->fire_cooldown = 0.0f;
+        m->fuse_t        = 0.0f;
         placed++;
     }
     s_day_night_t = 0.0f;
@@ -200,14 +385,19 @@ void craft_mobs_spawn_hostile(CraftPlayer *p, int n) {
         for (int i = 0; i < CRAFT_MAX_MOBS; i++) {
             if (craft_mobs[i].alive) continue;
             CraftMob *m = &craft_mobs[i];
+            /* Pick a random hostile type. SLIME/SKELETON/SPIDER/CREEPER
+             * are 4 contiguous enum values starting at MOB_SLIME. */
+            MobType t = (MobType)(MOB_SLIME + (xs() & 3));
             m->alive    = true;
-            m->type     = MOB_SLIME;
+            m->type     = t;
             m->pos      = v3((float)x + 0.5f, (float)(y + 1), (float)z + 0.5f);
             m->yaw      = frand() * 6.2831853f;
             m->vel      = v3(0, 0, 0);
             m->ai_timer = 0.5f;
-            m->hp       = mob_hp_table[MOB_SLIME];
-            m->hurt_flash = 0.0f;
+            m->hp       = mob_hp_table[t];
+            m->hurt_flash    = 0.0f;
+            m->fire_cooldown = 1.0f + frand() * 1.5f;
+            m->fuse_t        = 0.0f;
             placed++;
             break;
         }
@@ -328,17 +518,186 @@ static void slime_ai(CraftMob *m, CraftPlayer *p, float dt) {
         if (m->ai_timer <= 0.0f) ai_decide(m);
         return;
     }
-    /* In range — chase. */
+    /* In range — chase until stand-off distance, then hold. */
     if (dist > 0.001f) {
         m->yaw = atan2f(dx, dz);
-        float spd = mob_speed[MOB_SLIME];
-        m->vel.x = (dx / dist) * spd;
-        m->vel.z = (dz / dist) * spd;
+        if (dist > MOB_STANDOFF) {
+            float spd = mob_speed[MOB_SLIME];
+            m->vel.x = (dx / dist) * spd;
+            m->vel.z = (dz / dist) * spd;
+        } else {
+            m->vel.x = 0; m->vel.z = 0;
+        }
         m->ai_timer = 0.5f;
     }
-    /* Contact damage. */
-    if (dist < SLIME_CONTACT_DIST) {
+    /* Contact damage — fires while sitting at stand-off range. */
+    if (dist < SLIME_CONTACT_DIST + 0.10f) {
         craft_player_take_damage(p, 1);
+    }
+}
+
+/* Rough "line of sight" — true if no solid block lies along the
+ * horizontal line from mob eye to player eye. Step in ~0.5-block
+ * increments and short-circuit on first solid. */
+static bool has_los(Vec3 from, Vec3 to) {
+    float dx = to.x - from.x, dy = to.y - from.y, dz = to.z - from.z;
+    float dist = sqrtf(dx*dx + dy*dy + dz*dz);
+    if (dist < 0.001f) return true;
+    int steps = (int)(dist * 2.0f);   /* ~0.5-block step */
+    if (steps < 2) steps = 2;
+    if (steps > 64) steps = 64;
+    float inv = 1.0f / (float)steps;
+    for (int i = 1; i < steps; i++) {
+        float t = (float)i * inv;
+        int bx = (int)floorf(from.x + dx * t);
+        int by = (int)floorf(from.y + dy * t);
+        int bz = (int)floorf(from.z + dz * t);
+        if (craft_block_solid(craft_world_get(bx, by, bz))) return false;
+    }
+    return true;
+}
+
+/* Skeleton AI: walk toward player but hold at SKEL_KEEP_DIST. Fire
+ * arrows on a fixed cooldown when in line of sight. */
+static void skeleton_ai(CraftMob *m, CraftPlayer *p, float dt) {
+    float dx = p->cam.pos.x - m->pos.x;
+    float dz = p->cam.pos.z - m->pos.z;
+    float dist = sqrtf(dx * dx + dz * dz);
+    if (dist > SKEL_AGGRO_DIST) {
+        if (m->ai_timer <= 0.0f) ai_decide(m);
+        return;
+    }
+    float spd = mob_speed[MOB_SKELETON];
+    if (dist > 0.001f) m->yaw = atan2f(dx, dz);
+    if (dist > SKEL_KEEP_DIST) {
+        /* Close in. */
+        m->vel.x = (dx / dist) * spd;
+        m->vel.z = (dz / dist) * spd;
+    } else if (dist < SKEL_BACK_DIST) {
+        /* Back off. */
+        m->vel.x = -(dx / dist) * spd * 0.6f;
+        m->vel.z = -(dz / dist) * spd * 0.6f;
+    } else {
+        m->vel.x = 0; m->vel.z = 0;
+    }
+    m->ai_timer = 0.3f;
+
+    /* Fire on cooldown. */
+    m->fire_cooldown -= dt;
+    if (m->fire_cooldown <= 0.0f) {
+        m->fire_cooldown = SKEL_FIRE_GAP;
+        Vec3 from = v3(m->pos.x, m->pos.y + 1.25f, m->pos.z);
+        Vec3 to   = v3(p->cam.pos.x, p->cam.pos.y - 0.2f, p->cam.pos.z);
+        if (has_los(from, to)) {
+            /* Aim slightly above the player to compensate for gravity
+             * over the flight time. Crude — works fine at < 16 blocks. */
+            float tx = to.x - from.x;
+            float ty = to.y - from.y;
+            float tz = to.z - from.z;
+            float td = sqrtf(tx*tx + tz*tz);
+            float tof = (td > 0.001f) ? (td / SKEL_ARROW_SPEED) : 0.1f;
+            /* drop = 0.5 * g * tof^2, gravity tuned to -8 for arrows */
+            float lead_y = 0.5f * 8.0f * tof * tof;
+            Vec3 dir = v3(tx, ty + lead_y, tz);
+            float dl = sqrtf(dir.x*dir.x + dir.y*dir.y + dir.z*dir.z);
+            if (dl > 0.001f) {
+                float inv = SKEL_ARROW_SPEED / dl;
+                Vec3 vel = v3(dir.x * inv, dir.y * inv, dir.z * inv);
+                craft_arrows_spawn(from, vel);
+            }
+        }
+    }
+}
+
+/* Spider AI: fast melee chase. Behaves like a faster slime. */
+static void spider_ai(CraftMob *m, CraftPlayer *p, float dt) {
+    (void)dt;
+    float dx = p->cam.pos.x - m->pos.x;
+    float dz = p->cam.pos.z - m->pos.z;
+    float dist = sqrtf(dx * dx + dz * dz);
+    if (dist > SPIDER_AGGRO_DIST) {
+        if (m->ai_timer <= 0.0f) ai_decide(m);
+        return;
+    }
+    if (dist > 0.001f) {
+        m->yaw = atan2f(dx, dz);
+        if (dist > MOB_STANDOFF) {
+            float spd = mob_speed[MOB_SPIDER];
+            m->vel.x = (dx / dist) * spd;
+            m->vel.z = (dz / dist) * spd;
+        } else {
+            m->vel.x = 0; m->vel.z = 0;
+        }
+        m->ai_timer = 0.3f;
+    }
+    if (dist < SPIDER_CONTACT_DIST + 0.10f) {
+        craft_player_take_damage(p, 2);
+    }
+}
+
+/* Creeper AI: chase toward player; on entering fuse range, freeze and
+ * tint brighter for CREEPER_FUSE_TIME seconds, then explode. */
+static void creeper_ai(CraftMob *m, CraftPlayer *p, float dt) {
+    float dx = p->cam.pos.x - m->pos.x;
+    float dz = p->cam.pos.z - m->pos.z;
+    float dist = sqrtf(dx * dx + dz * dz);
+
+    if (m->fuse_t > 0.0f) {
+        /* Already fusing — freeze in place and count down. */
+        m->vel.x = 0; m->vel.z = 0;
+        m->fuse_t -= dt;
+        if (m->fuse_t <= 0.0f) {
+            /* Boom — damage, particles, block destruction. */
+            Vec3 ctr = v3(m->pos.x, m->pos.y + 0.7f, m->pos.z);
+            if (dist < CREEPER_BLAST_DIST) {
+                craft_player_take_damage(p, CREEPER_BLAST_DAMAGE);
+            }
+            craft_particles_emit_explosion(ctr);
+            /* Destroy solid blocks in spherical radius. We sweep an
+             * AABB around the creeper position and null any cell whose
+             * centre is within blast radius. Skip water (lets the
+             * explosion punch underwater without draining the pool)
+             * and BLK_AIR (already empty). The world_set call drops
+             * the mod into the chunk store so destruction persists. */
+            int r = (int)(CREEPER_BLAST_DIST + 0.5f);
+            int cx = (int)floorf(m->pos.x);
+            int cy = (int)floorf(m->pos.y + 0.7f);
+            int cz = (int)floorf(m->pos.z);
+            for (int dy = -r; dy <= r; dy++) {
+                for (int dz = -r; dz <= r; dz++) {
+                    for (int dxi = -r; dxi <= r; dxi++) {
+                        float fx = (float)dxi + 0.5f;
+                        float fy = (float)dy  + 0.5f - 0.7f;  /* centre offset back */
+                        float fz = (float)dz  + 0.5f;
+                        if (fx*fx + fy*fy + fz*fz > CREEPER_BLAST_DIST * CREEPER_BLAST_DIST)
+                            continue;
+                        int wx = cx + dxi, wy = cy + dy, wz = cz + dz;
+                        BlockId b = craft_world_get(wx, wy, wz);
+                        if (b == BLK_AIR || b == BLK_WATER) continue;
+                        craft_world_set(wx, wy, wz, BLK_AIR);
+                    }
+                }
+            }
+            m->alive = false;
+        }
+        return;
+    }
+
+    if (dist > CREEPER_AGGRO_DIST) {
+        if (m->ai_timer <= 0.0f) ai_decide(m);
+        return;
+    }
+    if (dist < CREEPER_FUSE_DIST) {
+        m->fuse_t = CREEPER_FUSE_TIME;
+        m->vel.x = 0; m->vel.z = 0;
+        return;
+    }
+    if (dist > 0.001f) {
+        m->yaw = atan2f(dx, dz);
+        float spd = mob_speed[MOB_CREEPER];
+        m->vel.x = (dx / dist) * spd;
+        m->vel.z = (dz / dist) * spd;
+        m->ai_timer = 0.3f;
     }
 }
 
@@ -357,16 +716,55 @@ static bool ahead_solid(float fx, float fy, float fz) {
 
 void craft_mobs_tick(float dt, CraftPlayer *p) {
     if (dt > 0.1f) dt = 0.1f;
+    /* Daytime sunlight burn: hostile mobs caught in direct sun take
+     * continuous damage and pulse red. Cheap — single sky_height
+     * lookup per mob. */
+    bool burning_weather = s_last_sun_y > 0.10f;
     for (int i = 0; i < CRAFT_MAX_MOBS; i++) {
         CraftMob *m = &craft_mobs[i];
         if (!m->alive) continue;
         if (m->hurt_flash > 0.0f) m->hurt_flash -= dt;
-        m->ai_timer -= dt;
-        if (mob_is_hostile(m->type)) {
-            slime_ai(m, p, dt);
-        } else if (m->ai_timer <= 0.0f) {
-            ai_decide(m);
+        if (burning_weather && mob_is_hostile(m->type)) {
+            int hx = (int)m->pos.x;
+            int hy = (int)(m->pos.y + s_models[m->type].height * 0.7f);
+            int hz = (int)m->pos.z;
+            if (craft_world_sky_exposed(hx, hy, hz)) {
+                m->burn_acc += dt;
+                /* Visual flame puff each tick — particle module
+                 * rate-limits internally to 1-2 per call so even at
+                 * 30 fps the budget stays sane. */
+                Vec3 flame_pos = v3(m->pos.x,
+                                    m->pos.y + s_models[m->type].height * 0.4f,
+                                    m->pos.z);
+                craft_particles_emit_flame(flame_pos);
+                /* 1 HP per second of direct sun. */
+                if (m->burn_acc >= 1.0f) {
+                    m->burn_acc -= 1.0f;
+                    m->hp -= 1;
+                    m->hurt_flash = 0.30f;
+                    if (m->hp <= 0) {
+                        m->alive = false;
+                        continue;
+                    }
+                }
+            } else {
+                m->burn_acc = 0.0f;
+            }
+        } else {
+            m->burn_acc = 0.0f;
         }
+        m->ai_timer -= dt;
+        switch (m->type) {
+            case MOB_SLIME:    slime_ai(m, p, dt); break;
+            case MOB_SKELETON: skeleton_ai(m, p, dt); break;
+            case MOB_SPIDER:   spider_ai(m, p, dt); break;
+            case MOB_CREEPER:  creeper_ai(m, p, dt); break;
+            default:
+                if (m->ai_timer <= 0.0f) ai_decide(m);
+                break;
+        }
+        /* Creeper just exploded itself — skip remaining physics. */
+        if (!m->alive) continue;
 
         m->vel.y -= 22.0f * dt;
         if (m->vel.y < -16.0f) m->vel.y = -16.0f;
@@ -596,6 +994,21 @@ void craft_mobs_render(const CraftCamera *cam, uint16_t *fb) {
                     b = b / 3;
                     best_color = (uint16_t)((r << 11) | (g << 5) | b);
                 }
+                /* Creeper fuse tint — lerp toward white as fuse_t
+                 * winds down from CREEPER_FUSE_TIME to 0. */
+                if (m->type == MOB_CREEPER && m->fuse_t > 0.0f) {
+                    float k = 1.0f - (m->fuse_t / CREEPER_FUSE_TIME);
+                    if (k < 0.0f) k = 0.0f;
+                    if (k > 1.0f) k = 1.0f;
+                    int kk = (int)(k * 256.0f);
+                    int r = ((best_color >> 11) & 0x1F);
+                    int g = ((best_color >>  5) & 0x3F);
+                    int b = ( best_color        & 0x1F);
+                    r = r + ((31 - r) * kk >> 8);
+                    g = g + ((63 - g) * kk >> 8);
+                    b = b + ((31 - b) * kk >> 8);
+                    best_color = (uint16_t)((r << 11) | (g << 5) | b);
+                }
 
                 /* World distance = t * |world_dir| (rotation preserves
                  * length, so |local_dir| = |world_dir|). */
@@ -611,6 +1024,113 @@ void craft_mobs_render(const CraftCamera *cam, uint16_t *fb) {
                     craft_zbuf[idx] = (uint8_t)q;
                 }
             }
+        }
+    }
+}
+
+/* --- Arrow projectile system ------------------------------------- */
+
+void craft_arrows_clear(void) {
+    for (int i = 0; i < CRAFT_MAX_ARROWS; i++) craft_arrows[i].alive = false;
+}
+
+void craft_arrows_spawn(Vec3 pos, Vec3 vel) {
+    for (int i = 0; i < CRAFT_MAX_ARROWS; i++) {
+        if (craft_arrows[i].alive) continue;
+        craft_arrows[i].alive    = true;
+        craft_arrows[i].pos      = pos;
+        craft_arrows[i].vel      = vel;
+        craft_arrows[i].lifetime = 3.0f;
+        return;
+    }
+}
+
+#define ARROW_GRAVITY  -8.0f
+#define ARROW_HIT_R     0.45f      /* player hit radius squared check */
+
+void craft_arrows_tick(float dt, CraftPlayer *p) {
+    if (dt > 0.1f) dt = 0.1f;
+    for (int i = 0; i < CRAFT_MAX_ARROWS; i++) {
+        CraftArrow *a = &craft_arrows[i];
+        if (!a->alive) continue;
+        a->lifetime -= dt;
+        if (a->lifetime <= 0.0f) { a->alive = false; continue; }
+        a->vel.y += ARROW_GRAVITY * dt;
+        a->pos.x += a->vel.x * dt;
+        a->pos.y += a->vel.y * dt;
+        a->pos.z += a->vel.z * dt;
+        /* World block hit. */
+        int bx = (int)floorf(a->pos.x);
+        int by = (int)floorf(a->pos.y);
+        int bz = (int)floorf(a->pos.z);
+        if (craft_block_solid(craft_world_get(bx, by, bz))) {
+            a->alive = false;
+            continue;
+        }
+        /* Player hit (sphere vs player body). Player feet at
+         * cam.pos.y - PLAYER_EYE — approximate centre as cam.pos with
+         * a generous 0.6 m radius vertically. */
+        float dx = a->pos.x - p->cam.pos.x;
+        float dy = a->pos.y - (p->cam.pos.y - 0.8f);
+        float dz = a->pos.z - p->cam.pos.z;
+        if (dx*dx + dz*dz < ARROW_HIT_R && dy > -1.2f && dy < 0.6f) {
+            craft_player_take_damage(p, 1);
+            a->alive = false;
+            continue;
+        }
+    }
+}
+
+/* Project arrow centre to screen, paint a short dark cuboid trail
+ * aligned to velocity. Cheap — at most CRAFT_MAX_ARROWS=16 sprites
+ * and each draws a thin line of pixels. */
+void craft_arrows_render(const CraftCamera *cam, uint16_t *fb) {
+    for (int i = 0; i < CRAFT_MAX_ARROWS; i++) {
+        const CraftArrow *a = &craft_arrows[i];
+        if (!a->alive) continue;
+        /* Tail point is one segment back along velocity. */
+        float vlen = sqrtf(a->vel.x*a->vel.x + a->vel.y*a->vel.y + a->vel.z*a->vel.z);
+        float t = (vlen > 0.001f) ? (0.35f / vlen) : 0.0f;
+        Vec3 tail = v3(a->pos.x - a->vel.x * t,
+                       a->pos.y - a->vel.y * t,
+                       a->pos.z - a->vel.z * t);
+        int sx0, sy0, sx1, sy1;
+        uint8_t d0, d1;
+        float dist0, dist1;
+        if (!craft_render_project(cam, a->pos, &sx1, &sy1, &d1, &dist1)) continue;
+        if (!craft_render_project(cam, tail,   &sx0, &sy0, &d0, &dist0)) {
+            sx0 = sx1; sy0 = sy1; d0 = d1;
+        }
+        if (dist1 > CRAFT_MAX_DIST_FOR_ZBUF) continue;
+        /* Bresenham — z-tested against world. */
+        int dx =  (sx1 > sx0) ? (sx1 - sx0) : (sx0 - sx1);
+        int dy = -((sy1 > sy0) ? (sy1 - sy0) : (sy0 - sy1));
+        int stp_x = (sx0 < sx1) ? 1 : -1;
+        int stp_y = (sy0 < sy1) ? 1 : -1;
+        int err = dx + dy;
+        int steps = (dx > -dy) ? dx : -dy;
+        if (steps < 1) steps = 1;
+        uint16_t shaft = rgb565(60, 45, 30);
+        uint16_t tipc  = rgb565(220, 220, 220);
+        int step_i = 0;
+        for (;;) {
+            if ((unsigned)sx0 < CRAFT_FB_W && (unsigned)sy0 < CRAFT_FB_H) {
+                int idx = sy0 * CRAFT_FB_W + sx0;
+                /* Interpolate depth from d0 to d1. */
+                int depth = d0 + (d1 - d0) * step_i / steps;
+                if (depth < 0)   depth = 0;
+                if (depth > 254) depth = 254;
+                if (craft_zbuf[idx] > (uint8_t)depth) {
+                    fb[idx] = (step_i == steps) ? tipc : shaft;
+                    craft_zbuf[idx] = (uint8_t)depth;
+                }
+            }
+            if (sx0 == sx1 && sy0 == sy1) break;
+            int e2 = 2 * err;
+            if (e2 >= dy) { err += dy; sx0 += stp_x; }
+            if (e2 <= dx) { err += dx; sy0 += stp_y; }
+            step_i++;
+            if (step_i > 32) break;  /* safety cap */
         }
     }
 }

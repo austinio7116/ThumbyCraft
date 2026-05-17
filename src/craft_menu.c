@@ -273,6 +273,12 @@ static const CraftRecipe RECIPES[] = {
         BLK_COAL_ORE, BLK_AIR, BLK_AIR,
         BLK_AIR,      BLK_AIR, BLK_AIR }, BLK_IRON_INGOT, 1, "Iron ingot" },
 
+    /* Sand + coal → 1 glass (in-grid "smelt", same convention as iron;
+     * vanilla smelts sand in a furnace for 1 glass). */
+    { { BLK_SAND,     BLK_AIR, BLK_AIR,
+        BLK_COAL_ORE, BLK_AIR, BLK_AIR,
+        BLK_AIR,      BLK_AIR, BLK_AIR }, BLK_GLASS, 1, "Glass" },
+
     /* --- Pickaxes (all use sticks for the handle) --- */
     { { BLK_PLANK, BLK_PLANK, BLK_PLANK,
         BLK_AIR,   BLK_STICK, BLK_AIR,

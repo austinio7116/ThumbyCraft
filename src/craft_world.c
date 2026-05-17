@@ -19,6 +19,7 @@
 #include "craft_world.h"
 #include "craft_gen.h"
 #include "craft_torches.h"
+#include "craft_chunk_store.h"
 #include <string.h>
 
 uint8_t  craft_world_blocks[CRAFT_WORLD_VOXELS];
@@ -88,6 +89,75 @@ static int mod_get(int wx, int wy, int wz) {
 }
 
 int craft_world_mod_count(void) { return s_mod_count; }
+
+/* --- Flash chunk-store bridge ------------------------------------ */
+
+static inline int chunk_of(int w) {
+    if (w >= 0) return w / CHUNK_STORE_CHUNK_SIZE;
+    return -((-w + CHUNK_STORE_CHUNK_SIZE - 1) / CHUNK_STORE_CHUNK_SIZE);
+}
+static inline int chunk_local(int w) {
+    int m = w % CHUNK_STORE_CHUNK_SIZE;
+    return m < 0 ? m + CHUNK_STORE_CHUNK_SIZE : m;
+}
+
+static void persist_chunk(int cx, int cz) {
+    static ChunkMod buf[CHUNK_STORE_MAX_MODS_PER_CHUNK];
+    int n = 0;
+    for (int i = 0; i < MOD_TABLE_SIZE && n < CHUNK_STORE_MAX_MODS_PER_CHUNK; i++) {
+        ModEntry *e = &s_mods[i];
+        if (!(e->flags & 1)) continue;
+        if (chunk_of(e->wx) != cx) continue;
+        if (chunk_of(e->wz) != cz) continue;
+        buf[n].lx  = (uint8_t)chunk_local(e->wx);
+        buf[n].y   = (uint8_t)e->wy;
+        buf[n].lz  = (uint8_t)chunk_local(e->wz);
+        buf[n].blk = e->blk;
+        n++;
+    }
+    craft_chunk_store_save(cx, cz, buf, n);
+}
+
+static void restore_chunk(int cx, int cz) {
+    static ChunkMod buf[CHUNK_STORE_MAX_MODS_PER_CHUNK];
+    int n = craft_chunk_store_load(cx, cz, buf, CHUNK_STORE_MAX_MODS_PER_CHUNK);
+    for (int i = 0; i < n; i++) {
+        int wx = cx * CHUNK_STORE_CHUNK_SIZE + buf[i].lx;
+        int wz = cz * CHUNK_STORE_CHUNK_SIZE + buf[i].lz;
+        mod_set(wx, buf[i].y, wz, (BlockId)buf[i].blk);
+    }
+}
+
+static void window_chunk_range(int *cx0, int *cx1, int *cz0, int *cz1) {
+    int x0 = craft_world_origin_x;
+    int x1 = craft_world_origin_x + CRAFT_WORLD_X - 1;
+    int z0 = craft_world_origin_z;
+    int z1 = craft_world_origin_z + CRAFT_WORLD_Z - 1;
+    *cx0 = chunk_of(x0);
+    *cx1 = chunk_of(x1);
+    *cz0 = chunk_of(z0);
+    *cz1 = chunk_of(z1);
+}
+
+void craft_world_chunks_persist_window(void) {
+    int cx0, cx1, cz0, cz1;
+    window_chunk_range(&cx0, &cx1, &cz0, &cz1);
+    for (int cz = cz0; cz <= cz1; cz++) {
+        for (int cx = cx0; cx <= cx1; cx++) {
+            persist_chunk(cx, cz);
+        }
+    }
+}
+
+void craft_world_chunks_restore_window(void) {
+    int cx0, cx1, cz0, cz1;
+    window_chunk_range(&cx0, &cx1, &cz0, &cz1);
+    for (int cz = cz0; cz <= cz1; cz++) {
+        for (int cx = cx0; cx <= cx1; cx++) {
+            restore_chunk(cx, cz);
+        }
+    }
+}
 
 /* --- Window-local indexing --------------------------------------- */
 static inline int local_idx(int lx, int wy, int lz) {
@@ -321,6 +391,11 @@ static void window_load(uint32_t seed) {
 void craft_world_load_around(int player_wx, int player_wz, uint32_t seed) {
     craft_world_origin_x = player_wx - CRAFT_WORLD_X / 2;
     craft_world_origin_z = player_wz - CRAFT_WORLD_Z / 2;
+    /* Restore persisted mods for chunks in the new window BEFORE
+     * regen — that way window_load's mod_get lookups see them and
+     * the buffer comes out with the player's previous edits already
+     * applied. */
+    craft_world_chunks_restore_window();
     window_load(seed);
     compute_skyheight_all();
     craft_torches_rebuild();
@@ -421,12 +496,17 @@ void craft_world_maybe_shift(int player_wx, int player_wz, uint32_t seed) {
     while (lz >= CRAFT_WORLD_Z - CRAFT_EDGE_MARGIN) { dz += CRAFT_SHIFT; lz -= CRAFT_SHIFT; }
     if (dx == 0 && dz == 0) return;
 
+    /* Before shifting: flush all current-window chunk mods to flash
+     * so anything that's about to scroll off-window survives. */
+    craft_world_chunks_persist_window();
+
     /* No overlap → full regen. Happens only on huge teleports. */
     int adx = (dx > 0) ? dx : -dx;
     int adz = (dz > 0) ? dz : -dz;
     if (adx >= CRAFT_WORLD_X || adz >= CRAFT_WORLD_Z) {
         craft_world_origin_x += dx;
         craft_world_origin_z += dz;
+        craft_world_chunks_restore_window();
         window_load(seed);
         return;
     }
@@ -437,6 +517,24 @@ void craft_world_maybe_shift(int player_wx, int player_wz, uint32_t seed) {
      * ~7 ms (one 1024-column strip) — fits inside one frame. */
     if (dx != 0) shift_x(dx, seed);
     if (dz != 0) shift_z(dz, seed);
+
+    /* After shift: pull in mods for chunks that newly overlap the
+     * window AND back-stamp any in-hash mods onto the buffer (some
+     * strips were regenerated before the restore added them, so
+     * they'd otherwise be missing). The back-stamp loop scans the
+     * 2K-entry hash — microseconds. */
+    craft_world_chunks_restore_window();
+    for (int i = 0; i < MOD_TABLE_SIZE; i++) {
+        ModEntry *e = &s_mods[i];
+        if (!(e->flags & 1)) continue;
+        int lxi = e->wx - craft_world_origin_x;
+        int lzi = e->wz - craft_world_origin_z;
+        if ((unsigned)lxi >= CRAFT_WORLD_X) continue;
+        if ((unsigned)lzi >= CRAFT_WORLD_Z) continue;
+        if ((unsigned)e->wy >= CRAFT_WORLD_Y) continue;
+        int idx = (e->wy * CRAFT_WORLD_Z + lzi) * CRAFT_WORLD_X + lxi;
+        craft_world_blocks[idx] = e->blk;
+    }
 
     /* Sky-height, lightmap, and torch list are all local-indexed —
      * rebuild from the contents of the new window. Few ms total. */
