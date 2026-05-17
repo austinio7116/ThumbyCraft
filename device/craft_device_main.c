@@ -18,6 +18,7 @@
 
 #include "pico/stdlib.h"
 #include "pico/multicore.h"
+#include "pico/rand.h"
 #include "hardware/clocks.h"
 
 #include "craft_lcd_gc9107.h"
@@ -116,8 +117,10 @@ int main(void) {
 
     splash();
 
-    /* Seed from the timer — chaotic enough at startup. */
-    uint32_t seed = (uint32_t)to_ms_since_boot(get_absolute_time()) ^ 0xCAFEF00Du;
+    /* Seed from the SDK's ROSC-backed entropy source — to_ms_since_boot
+     * here would be a small, near-constant value (we're milliseconds
+     * past power-on) and gave the same world every boot. */
+    uint32_t seed = get_rand_32();
     craft_main_init(g_fb, seed);
 
     /* Restore previous save if present. */

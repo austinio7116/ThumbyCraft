@@ -22,6 +22,51 @@ extern uint32_t craft_world_dirty;
 extern int craft_world_origin_x;
 extern int craft_world_origin_z;
 
+/* Lightmap — 2 bits per cell, 0..CRAFT_LIGHT_MAX. 0 means "no torch
+ * light reaches this cell"; higher levels mean brighter. The renderer
+ * looks at the air cell on the outside of each rendered face and uses
+ * that cell's level to floor the face brightness, giving a smooth
+ * radial falloff around torches.
+ *
+ * Size: 262144 cells × 2 bits = 64 KB. Funded by moving craft_textures
+ * to flash (see craft_blocks.c). */
+#define CRAFT_LIGHTMAP_BYTES (CRAFT_WORLD_VOXELS / 4)
+#define CRAFT_LIGHT_MAX       3
+#define CRAFT_LIGHT_RADIUS    6  /* BFS hop limit — also the dist at which level hits 0 */
+extern uint8_t craft_world_lightmap[CRAFT_LIGHTMAP_BYTES];
+
+/* Sky-height per column — Y of the topmost solid cell. Anything
+ * above that cell is "sky-exposed" (gets sun/moon brightness);
+ * anything at-or-below is in shadow (cave / under cover) and stays
+ * dark independent of the day/night cycle. Updated whenever a
+ * column's contents change. */
+extern uint8_t craft_world_skyheight[CRAFT_WORLD_X * CRAFT_WORLD_Z];
+
+static inline bool craft_world_sky_exposed(int wx, int wy, int wz) {
+    int lx = wx - craft_world_origin_x;
+    int lz = wz - craft_world_origin_z;
+    if ((unsigned)lx >= CRAFT_WORLD_X) return true;  /* off-window = sky */
+    if ((unsigned)lz >= CRAFT_WORLD_Z) return true;
+    if ((unsigned)wy >= CRAFT_WORLD_Y) return true;
+    return wy > craft_world_skyheight[lz * CRAFT_WORLD_X + lx];
+}
+
+static inline int craft_world_light_level(int wx, int wy, int wz) {
+    if ((unsigned)wy >= CRAFT_WORLD_Y) return 0;
+    int lx = wx - craft_world_origin_x;
+    int lz = wz - craft_world_origin_z;
+    if ((unsigned)lx >= CRAFT_WORLD_X) return 0;
+    if ((unsigned)lz >= CRAFT_WORLD_Z) return 0;
+    int idx = (wy * CRAFT_WORLD_Z + lz) * CRAFT_WORLD_X + lx;
+    return (craft_world_lightmap[idx >> 2] >> ((idx & 3) * 2)) & 3;
+}
+
+/* Recompute the entire lightmap from torches in the current window.
+ * Called automatically after window_load, window shifts, and any
+ * craft_world_set that involves a torch. ~few ms even with many
+ * torches in view. */
+void craft_world_rebuild_lightmap(void);
+
 /* Initialise the world to an empty buffer at origin (0, 0). */
 void craft_world_init(void);
 

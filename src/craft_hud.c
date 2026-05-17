@@ -30,6 +30,68 @@ static void rect_outline(uint16_t *fb, int x, int y, int w, int h, uint16_t c) {
     for (int yy = y; yy < y + h; yy++) { put(fb, x, yy, c); put(fb, x + w - 1, yy, c); }
 }
 
+/* Draw a single 9×8 heart with a fill level 0..4 (quarters).
+ * Layout:
+ *
+ *   . X X . . X X .
+ *   X . . X X . . X     ← outline (empty heart)
+ *   X . . . . . . X
+ *   X . . . . . . X     ← fill rows depending on level
+ *   . X . . . . X .
+ *   . . X . . X . .
+ *   . . . X X . . .
+ *
+ * level=0 → empty silhouette only; level=4 → fully filled. The fill
+ * fraction is computed as a *vertical* mask so a hit visibly drains
+ * the heart from the bottom up (more readable than a left-to-right
+ * sweep on a 9px sprite). */
+static void draw_heart(uint16_t *fb, int x, int y, int level) {
+    static const uint8_t MASK[8] = {
+        /* row bits, LSB = leftmost column. 9 wide so use 0x1FF mask. */
+        0b001100110,  /* row 0 */
+        0b011111111,  /* row 1 */
+        0b011111111,  /* row 2 — full body */
+        0b011111111,  /* row 3 — full body */
+        0b001111110,  /* row 4 */
+        0b000111100,  /* row 5 */
+        0b000011000,  /* row 6 */
+        0b000000000,  /* row 7 — empty padding */
+    };
+    /* Mapping level → number of bottom rows to NOT fill.
+     * level 4 = fill all 7 rows of the heart shape.
+     * level 3 = fill rows 0..5 (one quarter empty at bottom).
+     * level 2 = fill rows 0..4. level 1 = rows 0..2. level 0 = none. */
+    int filled_rows;
+    switch (level) {
+        case 4: filled_rows = 7; break;
+        case 3: filled_rows = 6; break;
+        case 2: filled_rows = 5; break;
+        case 1: filled_rows = 3; break;
+        default: filled_rows = 0; break;
+    }
+    const uint16_t outline = rgb565(40, 0, 0);
+    const uint16_t fill    = rgb565(230, 40, 50);
+    const uint16_t empty   = rgb565(80, 20, 30);
+    for (int row = 0; row < 7; row++) {
+        uint8_t bits = MASK[row];
+        for (int col = 0; col < 9; col++) {
+            if (!(bits & (1u << col))) continue;
+            /* Outline if this is an edge pixel (any neighbour outside
+             * the mask), otherwise it's a fill pixel. */
+            bool is_edge = false;
+            if (row == 0 || !(MASK[row-1] & (1u << col))) is_edge = true;
+            if (row == 6 || !(MASK[row+1] & (1u << col))) is_edge = true;
+            if (col == 0 || !(bits & (1u << (col-1)))) is_edge = true;
+            if (col == 8 || !(bits & (1u << (col+1)))) is_edge = true;
+            uint16_t c;
+            if (is_edge) c = outline;
+            else if (row < filled_rows) c = fill;
+            else c = empty;
+            put(fb, x + col, y + row, c);
+        }
+    }
+}
+
 /* Draw a chunky downscaled preview of a block's side texture. */
 static void block_swatch(uint16_t *fb, int x, int y, int size, BlockId blk) {
     const uint16_t *tex = craft_block_texture(blk, FACE_PZ);
@@ -120,23 +182,19 @@ void craft_hud_draw(uint16_t *fb, const CraftPlayer *p, int fps) {
     if (p->fly_mode) {
         craft_font_draw(fb, "FLY", 2, 1, rgb565(120, 220, 255));
     }
-    if (p->look_sticky) {
-        craft_font_draw(fb, "LOOK", 2, 8, rgb565(255, 255, 100));
-    }
 
-    /* Survival mode: HP + hunger + apple count top-left. */
+    /* Survival mode: 3 hearts top-left. Each heart is one third of
+     * MAX_HP; quarter-heart resolution since MAX_HP=12. */
     if (p->mode == CRAFT_MODE_SURVIVAL) {
-        char line[20];
-        snprintf(line, sizeof line, "HP %d", p->hp);
-        uint16_t col = p->hp > 4 ? rgb565(220, 60, 60) : rgb565(255, 100, 100);
-        craft_font_draw(fb, line, 2, 1, col);
-        snprintf(line, sizeof line, "F %d", p->hunger);
-        col = p->hunger >= CRAFT_PLAYER_REGEN_MIN_HUNGER
-              ? rgb565(220, 180, 60) : rgb565(180, 100, 60);
-        craft_font_draw(fb, line, 2, 8, col);
-        if (p->apples > 0) {
-            snprintf(line, sizeof line, "A %d", p->apples);
-            craft_font_draw(fb, line, 2, 15, rgb565(220, 60, 60));
+        for (int i = 0; i < 3; i++) {
+            int level;
+            /* hp_for_heart_i goes 0..4 covering this heart's 4 quarters */
+            int hp_used_before = i * 4;
+            int hp_this_heart = p->hp - hp_used_before;
+            if (hp_this_heart < 0) level = 0;
+            else if (hp_this_heart >= 4) level = 4;
+            else level = hp_this_heart;
+            draw_heart(fb, 2 + i * 10, 1, level);
         }
         if (p->damage_flash > 0.0f) {
             /* Tint the whole framebuffer red briefly. */

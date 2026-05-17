@@ -32,6 +32,7 @@
 #include "craft_render.h"
 #include "craft_audio.h"
 #include "craft_mobs.h"
+#include "craft_torches.h"
 
 #include <string.h>
 
@@ -55,17 +56,9 @@ void craft_player_init(CraftPlayer *p, Vec3 spawn) {
     p->mode      = CRAFT_MODE_CREATIVE;
     p->fly_mode  = false;
     p->hp        = CRAFT_PLAYER_MAX_HP;
-    p->hunger    = CRAFT_PLAYER_MAX_HUNGER;
-    p->apples    = 0;
     p->spawn_point = spawn;
-    p->hotbar[0] = BLK_GRASS;
-    p->hotbar[1] = BLK_DIRT;
-    p->hotbar[2] = BLK_STONE;
-    p->hotbar[3] = BLK_COBBLE;
-    p->hotbar[4] = BLK_PLANK;
-    p->hotbar[5] = BLK_WOOD;
-    p->hotbar[6] = BLK_LEAVES;
-    p->hotbar[7] = BLK_GLASS;
+    /* Hotbar starts empty in BOTH modes — fills as the player mines.
+     * memset above already zeroed it (BLK_AIR == 0). */
     p->hotbar_idx = 0;
 }
 
@@ -75,10 +68,14 @@ void craft_player_set_mode(CraftPlayer *p, CraftGameMode mode) {
         p->fly_mode      = false;
         p->vel.y         = 0;
         p->hp            = CRAFT_PLAYER_MAX_HP;
-        p->hunger        = CRAFT_PLAYER_MAX_HUNGER;
-        p->apples        = 0;
         p->respawn_timer = 0.0f;
         for (int i = 0; i < BLK_COUNT; i++) p->inventory[i] = 0;
+        /* Starter torches so the player can immediately test caves
+         * and night exploration without having to find coal first. */
+        p->inventory[BLK_TORCH] = 8;
+        for (int i = 0; i < CRAFT_HOTBAR_SLOTS; i++) {
+            if (p->hotbar[i] == BLK_AIR) { p->hotbar[i] = BLK_TORCH; break; }
+        }
     } else {
         p->hp              = CRAFT_PLAYER_MAX_HP;
         p->damage_cooldown = 0;
@@ -117,11 +114,23 @@ static bool aabb_blocked(float px, float feet_y, float pz) {
     return false;
 }
 
-/* `stepped_up` is shared across the two try_horizontal calls in a
- * frame (X then Z). Auto-step fires at most once per frame; without
- * the cap, walking diagonally into a corner stacked two +1 bumps and
- * the player climbed indefinitely. Also gated on vel.y <= 0 so it
- * never compounds with an in-progress jump. */
+/* Auto-step over 1-block obstacles.
+ *
+ * Strategy: smooth teleport (cam.pos.y += 1.0, no jump arc) gated by
+ * a per-player cooldown. The cooldown is the critical piece — without
+ * it, walking across bumpy terrain or up stairs triggers the step
+ * every couple of frames and the player visibly bunny-hops. With
+ * AUTOSTEP_COOLDOWN, at most one auto-step per ~350 ms, which is
+ * slow enough to be invisible during normal walking but still fast
+ * enough that stair climbing flows naturally.
+ *
+ * Two compound gates:
+ *   - within-frame: *stepped_up caps to one step per tick so X+Z
+ *     chained calls don't stack two upward bumps in one frame
+ *     (that's how the old code accidentally let players climb).
+ *   - cross-frame: p->autostep_cooldown enforces the time spacing. */
+#define AUTOSTEP_COOLDOWN 0.35f
+
 static bool try_horizontal(CraftPlayer *p, float nx, float nz,
                            bool *stepped_up) {
     float feet_y = p->cam.pos.y - PLAYER_EYE;
@@ -132,12 +141,14 @@ static bool try_horizontal(CraftPlayer *p, float nx, float nz,
     }
     if (!p->fly_mode && p->on_ground &&
         !*stepped_up &&
+        p->autostep_cooldown <= 0.0f &&
         p->vel.y <= 0.001f &&
         !aabb_blocked(nx, feet_y + 1.0f, nz)) {
         p->cam.pos.x = nx;
         p->cam.pos.z = nz;
         p->cam.pos.y += 1.0f;
         *stepped_up = true;
+        p->autostep_cooldown = AUTOSTEP_COOLDOWN;
         return true;
     }
     return false;
@@ -146,21 +157,19 @@ static bool try_horizontal(CraftPlayer *p, float nx, float nz,
 void craft_player_tick(CraftPlayer *p, const CraftInput *in, float dt) {
     p->broke_block = false;
     p->placed_block = false;
+    if (p->autostep_cooldown > 0.0f) {
+        p->autostep_cooldown -= dt;
+        if (p->autostep_cooldown < 0.0f) p->autostep_cooldown = 0.0f;
+    }
 
     /* ----- MENU state machine (open-menu disambiguation) ------- */
     bool menu_just_pressed  = in->menu && !p->_menu_prev;
     bool menu_just_released = !in->menu && p->_menu_prev;
     if (menu_just_pressed) p->_menu_chord_used = false;
 
-    /* ----- LB state machine (look-mode + chord) ---------------- */
+    /* ----- LB state (walk button + chord suppression) ---------- */
     bool lb_just_pressed  = in->lb && !p->_lb_prev;
-    bool lb_just_released = !in->lb && p->_lb_prev;
-    if (lb_just_pressed) {
-        p->_lb_hold_t = 0.0f;
-        p->_lb_pitched_this_hold = false;
-        p->_lb_consumed_by_chord = false;
-    }
-    if (in->lb) p->_lb_hold_t += dt;
+    if (lb_just_pressed) p->_lb_consumed_by_chord = false;
 
     /* ----- MENU + chord actions -------------------------------- */
     if (in->menu) {
@@ -190,30 +199,15 @@ void craft_player_tick(CraftPlayer *p, const CraftInput *in, float dt) {
     }
     p->_menu_prev = in->menu;
 
-    /* ----- Pitch mode (LB held or sticky-look) ----------------- */
-    bool pitch_mode = (in->lb && !p->_lb_consumed_by_chord) || p->look_sticky;
-
-    /* ----- Look + turn ---------------------------------------- */
+    /* ----- Look + turn (D-pad is ALWAYS the look stick) -------- */
     if (in->left)  p->cam.yaw -= TURN_SPEED * dt;
     if (in->right) p->cam.yaw += TURN_SPEED * dt;
-    if (pitch_mode) {
-        if (in->up || in->down) p->_lb_pitched_this_hold = true;
-        float sign = p->invert_y ? -1.0f : 1.0f;
-        if (in->up)   p->cam.pitch += PITCH_SPEED * dt * sign;
-        if (in->down) p->cam.pitch -= PITCH_SPEED * dt * sign;
-        const float pmax = 85.0f * 3.14159265f / 180.0f;
-        if (p->cam.pitch >  pmax) p->cam.pitch =  pmax;
-        if (p->cam.pitch < -pmax) p->cam.pitch = -pmax;
-    }
-
-    /* LB tap release (short hold, no chord, no pitch use) →
-     * toggle sticky look. */
-    if (lb_just_released &&
-        !p->_lb_consumed_by_chord &&
-        p->_lb_hold_t < LB_TAP_MAX &&
-        !p->_lb_pitched_this_hold) {
-        p->look_sticky = !p->look_sticky;
-    }
+    float pitch_sign = p->invert_y ? -1.0f : 1.0f;
+    if (in->up)    p->cam.pitch += PITCH_SPEED * dt * pitch_sign;
+    if (in->down)  p->cam.pitch -= PITCH_SPEED * dt * pitch_sign;
+    const float pmax = 85.0f * 3.14159265f / 180.0f;
+    if (p->cam.pitch >  pmax) p->cam.pitch =  pmax;
+    if (p->cam.pitch < -pmax) p->cam.pitch = -pmax;
     p->_lb_prev = in->lb;
 
     /* ----- Camera basis vectors -------------------------------- */
@@ -222,12 +216,12 @@ void craft_player_tick(CraftPlayer *p, const CraftInput *in, float dt) {
     Vec3 fwd_full = v3(sy * cp, sp, cy * cp);
     Vec3 fwd_h    = v3(sy, 0.0f, cy);
 
-    /* ----- Build wish vector (no strafe in v3) ----------------- */
+    /* ----- Build wish vector — LB held = walk forward ---------- */
     Vec3 wish = v3(0, 0, 0);
-    if (!pitch_mode) {
+    bool walk_active = in->lb && !p->_lb_consumed_by_chord;
+    if (walk_active) {
         Vec3 fwd = p->fly_mode ? fwd_full : fwd_h;
-        if (in->up)   wish = v3_add(wish, fwd);
-        if (in->down) wish = v3_sub(wish, fwd);
+        wish = fwd;
     }
 
     if (p->fly_mode) {
@@ -313,51 +307,88 @@ void craft_player_tick(CraftPlayer *p, const CraftInput *in, float dt) {
             /* Try mob hit first — if within attack range, damage it
              * instead of breaking the block behind. */
             int mob_i = craft_mobs_pick(&p->cam, CRAFT_PLAYER_ATTACK_RANGE);
+            int torch_i = (mob_i >= 0) ? -1
+                          : craft_torches_pick(&p->cam, 8.0f);
             if (mob_i >= 0) {
-                craft_mob_damage(mob_i, CRAFT_PLAYER_ATTACK_DAMAGE);
+                /* Sword in active slot boosts damage by tier. */
+                BlockId held = p->hotbar[p->hotbar_idx];
+                int dmg = CRAFT_PLAYER_ATTACK_DAMAGE;
+                if      (held == BLK_SWORD_IRON)  dmg = 4;
+                else if (held == BLK_SWORD_STONE) dmg = 3;
+                else if (held == BLK_SWORD_WOOD)  dmg = 2;
+                craft_mob_damage(mob_i, dmg);
                 craft_audio_break(BLK_DIRT);   /* generic thud */
+            } else if (torch_i >= 0) {
+                /* Break a torch — convert back to AIR + give to inventory. */
+                CraftTorch *t = &craft_torches[torch_i];
+                int tx = t->wx, ty = t->wy, tz = t->wz;
+                craft_world_set(tx, ty, tz, BLK_AIR);
+                p->inventory[BLK_TORCH]++;
+                p->broke_block = true;
+                p->last_block_touched = BLK_TORCH;
+                p->last_action_x = tx;
+                p->last_action_y = ty;
+                p->last_action_z = tz;
+                craft_audio_break(BLK_TORCH);
             } else {
             CraftRayHit h = craft_render_pick(&p->cam);
             if (h.hit && h.distance < 8.0f) {
                 BlockId was = craft_world_get(h.bx, h.by, h.bz);
+                /* Mining tier gating. Player has the highest pickaxe
+                 * they own; reject if the block needs a higher tier. */
+                int need = craft_block_pickaxe_tier(was);
+                int have = 0;
+                if      (p->inventory[BLK_PICKAXE_IRON]  > 0) have = 3;
+                else if (p->inventory[BLK_PICKAXE_STONE] > 0) have = 2;
+                else if (p->inventory[BLK_PICKAXE_WOOD]  > 0) have = 1;
+                if (need > have) {
+                    extern void craft_audio_pickaxe_ting(void);
+                    craft_audio_pickaxe_ting();
+                    goto break_handled;
+                }
                 craft_world_set(h.bx, h.by, h.bz, BLK_AIR);
                 p->broke_block = true;
                 p->last_block_touched = was;
                 p->last_action_x = h.bx;
                 p->last_action_y = h.by;
                 p->last_action_z = h.bz;
-                /* Survival: gather into inventory.
-                 * Bonus: ~25 % chance for leaves to drop an apple. */
-                if (p->mode == CRAFT_MODE_SURVIVAL && was != BLK_AIR) {
+                if (was != BLK_AIR) {
+                    /* Track inventory counts in BOTH modes — creative
+                     * needs them so the crafting picker can know what
+                     * the player has mined. Creative just never
+                     * decrements on place. */
                     p->inventory[was]++;
-                    if (was == BLK_LEAVES) {
-                        /* Cheap pseudo-RNG using world position. */
-                        uint32_t r = ((uint32_t)h.bx * 73856093u) ^
-                                     ((uint32_t)h.by * 19349663u) ^
-                                     ((uint32_t)h.bz * 83492791u);
-                        if ((r & 0x3) == 0) p->apples++;
-                    }
-                    /* Auto-add to first empty hotbar slot if not present. */
+                    /* Both modes: auto-add to hotbar if not present.
+                     * In creative, slots only appear as the player
+                     * mines a block type for the first time. */
                     bool present = false;
                     for (int i = 0; i < CRAFT_HOTBAR_SLOTS; i++)
                         if (p->hotbar[i] == was) { present = true; break; }
                     if (!present) {
-                        for (int i = 0; i < CRAFT_HOTBAR_SLOTS; i++)
-                            if (p->hotbar[i] == BLK_AIR ||
-                                p->inventory[p->hotbar[i]] == 0) {
+                        for (int i = 0; i < CRAFT_HOTBAR_SLOTS; i++) {
+                            bool empty = (p->hotbar[i] == BLK_AIR);
+                            bool exhausted =
+                                (p->mode == CRAFT_MODE_SURVIVAL) &&
+                                p->hotbar[i] != BLK_AIR &&
+                                p->inventory[p->hotbar[i]] == 0;
+                            if (empty || exhausted) {
                                 p->hotbar[i] = was;
                                 break;
                             }
+                        }
                     }
                 }
                 craft_audio_break(was);
             }
+break_handled: ;
             }
         }
         if (in->b_pressed) {
             CraftRayHit h = craft_render_pick(&p->cam);
             if (h.hit && h.distance < 8.0f) {
                 BlockId blk = p->hotbar[p->hotbar_idx];
+                /* Tools (pickaxe) are non-placeable; skip silently. */
+                if (!craft_block_placeable(blk)) goto place_done;
                 /* Survival: must have at least one of this block. */
                 bool affordable = (p->mode == CRAFT_MODE_CREATIVE) ||
                                   (blk != BLK_AIR && p->inventory[blk] > 0);
@@ -375,14 +406,23 @@ void craft_player_tick(CraftPlayer *p, const CraftInput *in, float dt) {
                         p->last_action_y = h.fy;
                         p->last_action_z = h.fz;
                         if (p->mode == CRAFT_MODE_SURVIVAL) p->inventory[blk]--;
+                        /* Torches: record orientation so the 3D
+                         * render pass can mount them correctly. */
+                        if (blk == BLK_TORCH) {
+                            craft_torches_record_orient(
+                                h.fx, h.fy, h.fz, h.face);
+                            /* Rebuild now to pick up the orient. */
+                            craft_torches_rebuild();
+                        }
                         craft_audio_place(blk);
                     }
                 }
             }
+place_done: ;
         }
     }
 
-    /* --- Survival: damage cooldown, hunger, regen, respawn ------- */
+    /* --- Survival: damage cooldown, regen, respawn ------- */
     if (p->mode == CRAFT_MODE_SURVIVAL) {
         if (p->damage_cooldown > 0.0f) p->damage_cooldown -= dt;
         p->no_damage_t += dt;
@@ -397,27 +437,12 @@ void craft_player_tick(CraftPlayer *p, const CraftInput *in, float dt) {
                 p->cam.pos = p->spawn_point;
                 p->vel     = v3(0, 0, 0);
                 p->hp      = CRAFT_PLAYER_MAX_HP;
-                p->hunger  = CRAFT_PLAYER_MAX_HUNGER;
                 p->damage_cooldown = 0.0f;
                 p->damage_flash    = 0.0f;
             }
         } else {
-            /* Hunger decay. */
-            p->hunger_decay_acc += dt;
-            if (p->hunger_decay_acc > CRAFT_PLAYER_HUNGER_DECAY) {
-                p->hunger_decay_acc = 0.0f;
-                if (p->hunger > 0) p->hunger--;
-            }
-            /* Auto-eat apple to keep hunger up to half. */
-            if (p->hunger < CRAFT_PLAYER_REGEN_MIN_HUNGER && p->apples > 0) {
-                p->apples--;
-                p->hunger += 4;
-                if (p->hunger > CRAFT_PLAYER_MAX_HUNGER)
-                    p->hunger = CRAFT_PLAYER_MAX_HUNGER;
-            }
-            /* HP regen — only when hunger above threshold. */
-            if (p->hunger >= CRAFT_PLAYER_REGEN_MIN_HUNGER &&
-                p->no_damage_t > CRAFT_PLAYER_REGEN_DELAY &&
+            /* HP regen — passive, just needs N seconds without damage. */
+            if (p->no_damage_t > CRAFT_PLAYER_REGEN_DELAY &&
                 p->hp < CRAFT_PLAYER_MAX_HP) {
                 p->regen_acc += dt;
                 if (p->regen_acc >= CRAFT_PLAYER_REGEN_INTERVAL) {

@@ -52,14 +52,114 @@ static float fbm(float x, float y, uint32_t seed) {
     return s / norm;
 }
 
+/* 3D value noise — trilinear interpolation of 8 corner hashes. Used
+ * only by the cave generator; the heightmap stays 2D. */
+static float val_noise3(float x, float y, float z, uint32_t seed) {
+    int ix = (int)floorf(x), iy = (int)floorf(y), iz = (int)floorf(z);
+    float fx = smoothstep(x - ix);
+    float fy = smoothstep(y - iy);
+    float fz = smoothstep(z - iz);
+    float v000 = frand(hash3(ix,     iy,     iz)     ^ seed);
+    float v100 = frand(hash3(ix + 1, iy,     iz)     ^ seed);
+    float v010 = frand(hash3(ix,     iy + 1, iz)     ^ seed);
+    float v110 = frand(hash3(ix + 1, iy + 1, iz)     ^ seed);
+    float v001 = frand(hash3(ix,     iy,     iz + 1) ^ seed);
+    float v101 = frand(hash3(ix + 1, iy,     iz + 1) ^ seed);
+    float v011 = frand(hash3(ix,     iy + 1, iz + 1) ^ seed);
+    float v111 = frand(hash3(ix + 1, iy + 1, iz + 1) ^ seed);
+    float a00 = v000 * (1 - fx) + v100 * fx;
+    float a10 = v010 * (1 - fx) + v110 * fx;
+    float a01 = v001 * (1 - fx) + v101 * fx;
+    float a11 = v011 * (1 - fx) + v111 * fx;
+    float b0  = a00 * (1 - fy) + a10 * fy;
+    float b1  = a01 * (1 - fy) + a11 * fy;
+    return b0 * (1 - fz) + b1 * fz;
+}
+
+/* Biome noise — low-frequency band so mountain regions are dozens
+ * of blocks wide rather than per-cell. Output in [0, 1]. */
+static float biome_at(int x, int z, uint32_t seed) {
+    float nx = (float)x * 0.015f;
+    float nz = (float)z * 0.015f;
+    return fbm(nx, nz, seed ^ 0x88112233u);
+}
+
+/* Mountain factor in [0, 1]: 0 = lowland, 1 = full mountain. Smooth
+ * ramp from 0.55 (foothills) to 0.75 (peak). */
+static float mountain_factor(int x, int z, uint32_t seed) {
+    float b = biome_at(x, z, seed);
+    if (b < 0.55f) return 0.0f;
+    if (b > 0.75f) return 1.0f;
+    return (b - 0.55f) / 0.20f;
+}
+
+/* River factor in [0, 1]. Ridge noise — value peaks where the
+ * underlying fbm crosses 0.5, creating winding 1D lines through
+ * 2D space. Wider falloff multiplier (5×) gives gentler bank
+ * slopes than the previous 8× value. */
+static float river_factor(int x, int z, uint32_t seed) {
+    float n  = fbm((float)x * 0.012f, (float)z * 0.012f, seed ^ 0x7E417A11u);
+    float dr = n - 0.5f;
+    float ridge = 1.0f - fabsf(dr) * 5.0f;
+    if (ridge < 0.0f) ridge = 0.0f;
+    return ridge;
+}
+
+/* Rivers depress the height below water level when the ridge is
+ * strong enough AND we're not in a mountain. Returns the depression
+ * in blocks (0 = no river here).
+ *
+ * Softer than before: max 2 blocks deep (was 4), and the activation
+ * threshold + slope are tuned so the BANKS taper gently down to the
+ * channel over many blocks rather than dropping into a canyon. */
+static int river_carve_depth(int x, int z, uint32_t seed) {
+    float r = river_factor(x, z, seed);
+    if (r < 0.30f) return 0;
+    /* Mountains shrug off rivers — keeps them in lowlands. */
+    float m = mountain_factor(x, z, seed);
+    if (m > 0.3f) return 0;
+    /* Linear ramp from r=0.30 (depth=0, river edge) to r=1.0
+     * (depth=2, channel centre). The wide active band means a river
+     * smoothly sinks into existing terrain over many blocks instead
+     * of cutting a sharp canyon. */
+    float t = (r - 0.30f) / 0.70f;            /* 0..1 across active band */
+    int depth = (int)(t * 2.5f);              /* 0, 1, 2 */
+    if (depth > 2) depth = 2;
+    return depth;
+}
+
 static int height_at(int x, int z, uint32_t seed) {
     float nx = (float)x * 0.06f;
     float nz = (float)z * 0.06f;
     float h  = fbm(nx, nz, seed);
     int  height = (int)(h * 24.0f) + CRAFT_WATER_LEVEL - 4;
+    /* Mountain biome adds up to ~22 blocks of extra elevation. */
+    float m = mountain_factor(x, z, seed);
+    height += (int)(m * 22.0f);
+    /* River carving — clamp the surface down so water naturally
+     * pools in the channel. */
+    int rd = river_carve_depth(x, z, seed);
+    if (rd > 0) {
+        int river_h = CRAFT_WATER_LEVEL - rd;
+        if (river_h < height) height = river_h;
+    }
     if (height < 1) height = 1;
-    if (height >= CRAFT_WORLD_Y - 8) height = CRAFT_WORLD_Y - 8;
+    if (height >= CRAFT_WORLD_Y - 4) height = CRAFT_WORLD_Y - 4;
     return height;
+}
+
+/* Is (x, y, z) inside a cave?  Two-octave 3D value noise with
+ * stretched Y so caves form mostly-horizontal chambers rather than
+ * vertical shafts. Returns true above the threshold (which gives
+ * ~6% cave density). Only valid for cells strictly below the
+ * surface; callers should not carve grass, dirt, or water. */
+static bool is_cave(int x, int y, int z, uint32_t seed) {
+    /* Two octaves of 3D noise summed, biased toward thin connected
+     * tunnels. Y-scale tighter than X/Z so caves spread sideways. */
+    float n1 = val_noise3(x * 0.10f, y * 0.16f, z * 0.10f, seed ^ 0xCAFE5u);
+    float n2 = val_noise3(x * 0.21f, y * 0.30f, z * 0.21f, seed ^ 0xCAFE6u);
+    float v  = n1 * 0.65f + n2 * 0.35f;
+    return v > 0.66f;
 }
 
 /* Is there a tree spawned at column (x, z) for this seed?
@@ -104,8 +204,14 @@ BlockId craft_gen_block_at(int x, int y, int z, uint32_t seed) {
 
     int h = height_at(x, z, seed);
 
-    /* Underground / surface columns. */
-    if (y <  h - 3) return BLK_STONE;
+    /* Underground / surface columns. Caves carve out the deep stone
+     * layer only — never touches the topmost dirt or surface block,
+     * so the silhouette of the world from above is unaffected. The
+     * y>=2 floor keeps a stone "bedrock" layer below caves. */
+    if (y <  h - 3) {
+        if (y >= 2 && is_cave(x, y, z, seed)) return BLK_AIR;
+        return BLK_STONE;
+    }
     if (y <  h)     return BLK_DIRT;
     if (y == h) {
         if (h <= CRAFT_WATER_LEVEL + 1) return BLK_SAND;
@@ -131,18 +237,47 @@ void craft_gen_column(int wx, int wz, uint32_t seed,
                       uint8_t out[/* CRAFT_WORLD_Y */]) {
     int h = height_at(wx, wz, seed);
     if (h < 1) h = 1;
-    if (h >= CRAFT_WORLD_Y - 8) h = CRAFT_WORLD_Y - 8;
+    if (h >= CRAFT_WORLD_Y - 4) h = CRAFT_WORLD_Y - 4;
 
-    /* Terrain pass — stone / dirt / surface / water / air. */
+    float m = mountain_factor(wx, wz, seed);
+    /* Ore placement chance — denser in mountain biome.
+     * Iron is rarer than coal in both biomes. Test: (hash & mask)==0. */
+    uint32_t coal_mask = (m > 0.5f) ? 0x0F : 0x3F;   /* ~1/16 vs 1/64 */
+    uint32_t iron_mask = (m > 0.5f) ? 0x1F : 0x7F;   /* ~1/32 vs 1/128 */
+
+    /* Terrain pass — stone (or coal ore) / dirt / surface / water / air. */
     int wl = CRAFT_WATER_LEVEL;
-    BlockId surface = (h <= wl + 1) ? BLK_SAND : BLK_GRASS;
-    for (int y = 0; y < h - 3; y++)         out[y] = BLK_STONE;
-    for (int y = h - 3; y < h; y++)         out[y] = BLK_DIRT;
+    /* Mountain peaks: surface is stone rather than grass once we're
+     * well above tree line. */
+    BlockId surface;
+    if (h <= wl + 1)                    surface = BLK_SAND;
+    else if (m > 0.5f && h > wl + 18)   surface = BLK_STONE;
+    else                                surface = BLK_GRASS;
+    for (int y = 0; y < h - 3; y++) {
+        /* Cave carve before ore placement — caves remove a cell
+         * entirely so ore doesn't get assigned to it. y<2 stays
+         * solid as a "bedrock" floor. */
+        if (y >= 2 && is_cave(wx, y, wz, seed)) {
+            out[y] = BLK_AIR;
+            continue;
+        }
+        uint32_t r = hash3(wx, y, wz) ^ (seed * 1370529931u);
+        BlockId b = BLK_STONE;
+        if ((r & coal_mask) == 0)      b = BLK_COAL_ORE;
+        else if ((r & iron_mask) == 0) b = BLK_IRON_ORE;
+        out[y] = b;
+    }
+    for (int y = h - 3; y < h; y++) {
+        /* Mountains: replace dirt sub-surface with stone too. */
+        out[y] = (m > 0.5f && h > wl + 18) ? BLK_STONE : BLK_DIRT;
+    }
     out[h] = surface;
-    int start_water = h + 1;
-    for (int y = start_water; y <= wl; y++) out[y] = BLK_WATER;
-    int start_air = (start_water > wl + 1) ? start_water : wl + 1;
-    for (int y = start_air; y < CRAFT_WORLD_Y; y++) out[y] = BLK_AIR;
+    /* Above-surface fill — fused single loop so GCC can't lower the
+     * old two-loop form to a pair of memsets where a negative count
+     * (h > wl) underflows to a huge unsigned and smashes the stack. */
+    for (int y = h + 1; y < CRAFT_WORLD_Y; y++) {
+        out[y] = (y <= wl) ? BLK_WATER : BLK_AIR;
+    }
 
     /* Tree pass — scan 7×7 neighbour columns. tree_at + height_at are
      * cached implicitly via height_at being deterministic + cheap.

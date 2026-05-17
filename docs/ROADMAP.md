@@ -1,228 +1,171 @@
-# ThumbyCraft v2 roadmap
+# ThumbyCraft roadmap
 
-What "complete game" means at this scale, sequenced by ROI. Each
-phase is shippable on its own — pick what you actually want.
+Living plan for ThumbyCraft. Each phase is shippable on its own.
 
-Status legend: ✅ shipped, 🟡 in-flight, ⬜ planned.
+Status legend: ✅ shipped · 🟡 in-flight · ⬜ planned
 
-## Foundations (v1)
+## What's playable today
 
-| Phase | Description | Status |
+A first-person voxel sandbox you can actually play through. Survival
+mode is the default; creative is one menu toggle away.
+
+- **World**: infinite sliding-window (64³ resident, partial-regen on
+  shift, ~5 ms stutter), procedural terrain with mountain biome,
+  trees, water, ore distribution
+- **Survival loop**: gather → craft → mine ore → smelt-equivalent →
+  upgrade tools → fight slimes at night, eat to regen
+- **Tools**: wood / stone / iron pickaxes (tier-gated mining), wood /
+  stone / iron swords (tier damage)
+- **Crafting**: 3×3 shaped grid with 11 recipes including the full
+  tool tier ladder, a recipe-book reference, and torches
+- **Mobs**: 3D voxel-cuboid sheep / pig / chicken (passive) and
+  slime (hostile, day+night spawn cap, chases player)
+- **Audio**: procedural sine-pad + melody music (C-major pentatonic
+  with comb-delay reverb), material-specific break sounds, footsteps,
+  damage flash, pickaxe-required "ting"
+- **Visual**: day/night cycle, world-fixed celestial-sphere
+  starfield, sun + moon billboards, water animation, break particles,
+  pick-outline with face highlight, fog
+- **Menu**: scrolling pause list with sub-pages for Inventory, Craft,
+  Recipes, Controls cheatsheet
+- **Save**: flash wear-ring on device, file on host
+
+## Shipped phases
+
+### Engine + drivers
+- Phase 0-2: Repo, host SDL2 build, device RP2350 dual-core renderer
+- Phase 10: Performance pass (SRAM-resident renderer, per-column
+  basis, skip per-pixel normalize, column-batched gen)
+
+### World
+- Phase 4: Procedural terrain (FBM noise + trees + water)
+- Phase 6: Flash saves (delta-vs-base format, 4-sector wear ring)
+- Phase 14: Water animation (per-frame stripe shift)
+- Phase 23: Sliding-window infinite world (partial regen via memmove
+  + new-strip fill; 2048-slot mod hash for player edits across shifts)
+- Phase 25 (partial): Mountain biome with low-freq biome noise +
+  height boost; mountain peaks become stone-surfaced; ore density
+  doubles in mountains
+
+### Player + physics
+- Phase 3, 5: Place / break, hotbar, AABB sweep, gravity, auto-step-up
+- Phase 9-9b-v4: Control scheme — LB walks, D-pad always
+  pitches/turns, RB jumps, A break, B place, MENU chord for hotbar
+  and fly toggle
+
+### Modes + survival
+- Phase 29: Game modes — Creative / Survival, HP, hunger, contact
+  damage, respawn timer
+- Phase 30: Hunger system (decay, gates regen, apples drop from
+  leaves, auto-eat)
+
+### Combat
+- Mob HP + player attack picks mob over block when in range
+- Sword tier damage (1 → 2 → 3 → 4 for hand / wood / stone / iron)
+- Mining tier gating (`craft_block_pickaxe_tier`: 0=hand, 1=wood,
+  2=stone)
+
+### Mobs
+- Phase 26: Z-buffer (uint8 quantised, populated by render_strip)
+- Phase 27: 3D cuboid mobs (sheep, pig, chicken, slime) with proper
+  ray-vs-cuboid hit test, slab intersection, face shading, depth
+  sort, hurt flash
+- Phase 28: Day/night spawn rate (faster at night, never despawns)
+
+### Crafting
+- Phase 17: Inventory grid (4×3 picker)
+- Phase 38: Shaped 3×3 crafting grid with output preview
+- 11 recipes: planks, sticks, smooth stone, iron ingot, wood/stone/iron
+  pickaxes, wood/stone/iron swords, torches
+- Recipe-book page (visual catalog)
+
+### Audio
+- Phase 34: Procedural ambient music v2 — sine waves, octave-doubled
+  pad, exp ADSR, comb-delay reverb, C-major pentatonic with I-vi-IV-V
+  chord progression, ducking on SFX
+- Phase 20: Material-aware footsteps
+- Per-material break + place sounds (layered transient + body)
+- Pickaxe-required ting
+
+### Visual
+- Phase 11: Day/night cycle (4-min, sky shift, brightness scale)
+- Phase 12: Sun + moon billboard
+- Phase 15: Break particles
+- Phase 16: Pick outline with face highlight (placement face glows)
+- World-fixed celestial-sphere starfield
+
+### UI
+- Phase 18: Pause menu with all toggles
+- Phase 22: Toast notifications
+- Scrolling menu (vertical overflow handling)
+- Controls cheatsheet page
+- Recipe book page
+- Settings shown inline: Game mode, Toggle fly, Invert Y, Music
+
+### Platform
+- Phase 8: ThumbyOne slot scaffolding
+
+## Open phases — prioritised
+
+### Tier 1 — already discussed with the user, queued
+
+| Phase | Description | Effort | Status |
+|---|---|---|---|
+| **A — Furnace UI** | Placeable `BLK_FURNACE` (8-cobble ring recipe), B on a placed furnace opens a 3-slot sub-page (input / fuel / output) with a ~5 s smelt timer. Promotes the iron-ingot grid hack to proper smelting; unlocks `sand→glass`, `cobble→stone`, raw meat → cooked meat | ~350 LOC | ⬜ next |
+| **B — Chest storage** | Placeable `BLK_CHEST`, B opens 4×4 = 16-slot per-chest inventory. Contents persisted in a sparse coord-keyed table (mod-hash style). Lets the player stockpile beyond the 8 hotbar slots | ~300 LOC | ⬜ |
+| **C — Light propagation** | 1-bit lightmap (32 KB BSS) flood-filled from each torch within radius ~6. Renderer reads lightmap to floor block brightness at night, making torches actually useful for caving | ~230 LOC | ⬜ |
+
+### Tier 2 — visual polish & systems
+
+| Phase | Description | Effort |
 |---|---|---|
-| 0 | Repo scaffold + drivers | ✅ |
-| 1 | Host SDL2 raycaster | ✅ |
-| 2 | Device raycaster, dual-core | ✅ |
-| 3 | Place / break + hotbar | ✅ |
-| 4 | Terrain generation | ✅ |
-| 5 | Player physics | ✅ |
-| 6 | Flash saves | ✅ |
-| 7 | Polish — fog, shading, audio | ✅ |
-| 8 | ThumbyOne slot scaffolding | ✅ |
-| 9 | Control revamp (v2 scheme + auto-step-up) | ✅ |
-| 10 | Performance pass (SRAM renderer + per-column basis + skip-normalize) | ✅ |
-| 9b | Control revamp v3 (no strafe, LB look, RB jump, MENU = pause) | ✅ |
-| 11 | Day/night cycle (4-min cycle, sky colour shift, brightness scale, stars) | ✅ |
-| 18 | Pause menu (Resume / Inventory / Save / Load / Toggle fly / Invert Y / New world / Settings) | ✅ |
-| 22 | Toast notifications ("World saved" / "Fly mode ON" / etc) | ✅ |
-| 17 | Inventory grid (4×3 picker, A assigns to active hotbar slot) | ✅ |
-| 12 | Sun + moon billboard (proper 3D projection, tracks day/night) | ✅ |
-| 26 | Z-buffer (16 KB uint8 quantised, populated by render_strip) | ✅ |
-| 27 | Passive mobs (sheep / pig / chicken, random walk, 3D cuboid raycaster) | ✅ |
-| 34 | Procedural ambient music (C-major pentatonic, I-vi-IV-V chord prog, ADSR, ducking on SFX) | ✅ |
-| —  | Music v2 — sine waves, octave-doubled pad, exp ADSR, comb-delay reverb, slower pace | ✅ |
-| —  | World-fixed starfield (96 stars, celestial sphere projection, day/night fade) | ✅ |
-| 15 | Break particles (8 per break, ballistic, fade, z-tested) | ✅ |
-| 16 | Pick outline (wireframe cube of targeted block) | ✅ |
-| 20 | Material-aware footsteps (grass/stone/sand/wood/leaves/glass tones) | ✅ |
-| 29 | Game modes — Creative / Survival, HP, inventory, slime hostile mob | ✅ |
-| 14 | Water animation (per-frame stripe + jitter shift) | ✅ |
-| 28 | Day/night hostile spawning (slimes spawn at night, despawn at noon) | ✅ |
-| —  | Mob HP + player attack (A hits mob if in attack range, else breaks block) | ✅ |
-| —  | Death + respawn (3 s timer, full HP/hunger reset, back to spawn point) | ✅ |
-| 30 | Hunger system (decay over time, gates regen, apples drop from leaves auto-eaten) | ✅ |
+| Phase 13 | **Block ambient occlusion** — darken convex corners via cheap per-face neighbour sample. Big depth-perception upgrade | S |
+| Phase 19 | **Settings page** — FOV, fog toggle, music volume, render distance. Persists separately from save | S |
+| Phase 21 | **Save slots** — 4 named worlds in 4 sector groups; startup picker | M |
+| Phase 25 (rest) | **More biomes** — beach, forest, plains (now have only mountain + default); per-biome tree density + surface block | M |
 
-## Visual & feel (the next thing to ship)
+### Tier 3 — combat, food, drops
 
-| Phase | Description | Effort | Why |
-|---|---|---|---|
-| 11 | **Day/night cycle** | S | Sun rotates over 4 min; sky + fog shift colour; stars at night; ambient brightness scales per-face. Massive feel upgrade for ~100 LOC. |
-| 12 | **Sun + moon billboard** | XS | Visible disc tracking the day-cycle angle. ~80 LOC. |
-| 13 | **Block ambient occlusion** | S | Darker at convex corners — cheap per-face sample of neighbours. ~150 LOC, no extra memory if computed on-the-fly. |
-| 14 | **Water animation + waves** | XS | Cycle 4 stripe offsets per second; vertex-displace water surface in raycaster by sin(world_t + x×0.3). |
-| 15 | **Break particles** | S | Small 1-px coloured shower at break point, ballistic, fades out. ~150 LOC. |
-| 16 | **Place / destroy ghost preview** | XS | Faint outline of the targeted block face on the world render, white when placing, red when about to break. ~50 LOC. |
-
-## Game systems
-
-| Phase | Description | Effort | Why |
-|---|---|---|---|
-| 17 | **Inventory grid** | M | MENU + long-hold opens 4×4 picker spanning all 11 blocks, D-pad navigates, A confirms into active hotbar slot. ~200 LOC. |
-| 18 | **Pause menu** | M | Overlay with Resume / Save / Load / New World / Settings / Exit. Required before save slots. ~200 LOC. |
-| 19 | **Settings page** | S | FOV slider, fog toggle, audio gain, render distance. Persists to a separate flash sector. ~150 LOC. |
-| 20 | **Material-aware footsteps** | S | Per-step audio whose timbre matches the block under the player's feet (sand whoosh, stone clack, grass rustle). ~80 LOC. |
-| 21 | **Save slots — multiple worlds** | M | 4 named worlds in 4 separate sector groups; picker UI on startup; each tracks its own seed + deltas. ~300 LOC. |
-| 22 | **Auto-save toast + indicator** | XS | Pulsing icon top-right while saving; "Saved" toast for 1.5 s. ~50 LOC. |
-
-## World scale
-
-| Phase | Description | Effort | Why |
-|---|---|---|---|
-| 23 | **Chunked world paging (XL)** | XL | 16×16×16 chunks, 64-chunk LRU cache resident in SRAM, dirty chunks flushed to flash. Unlocks **infinite-X-Z** worlds (Y fixed). Big lift — touches gen, render, save. ~500 LOC. |
-| 24 | **Faster terrain gen (precomp height per column)** | S | Cache `height[x][z]` once; tree-aware lookup becomes O(1). Needed once chunks page in mid-game. |
-| 25 | **Biomes** | M | Beach / forest / mountain / plains driven by a second noise channel; per-biome tree density + surface block. ~150 LOC. |
-
-## Living world
-
-| Phase | Description | Effort | Why |
-|---|---|---|---|
-| 26 | **Z-buffer for sprite overlays** | S | 32 KB depth buffer (uint16 per pixel). Enables proper sprite vs world occlusion. Required for mobs + future overlays. |
-| 27 | **Passive mobs** | L | 8×8 billboarded sprites (sheep, pig, chicken). Simple wandering AI. 4–8 mobs simultaneously. ~400 LOC. |
-| 28 | **Day/night mob behaviour** | S | Mobs return to "home" at sundown, scatter at dawn. ~80 LOC. |
-| 29 | **Hostile mobs + HP** | L | Slime-style cube monsters spawn at night, deal contact damage. Player HP + low-HP red-tint vignette. ~350 LOC. |
-| 30 | **Hunger + food blocks** | M | Bread/apple from inventory restores HP. Hunger ticks slowly. Optional toggle. ~200 LOC. |
-| 31 | **Bow + arrow** | M | Ranged break/hit. Arrow physics, sprite render. ~250 LOC. |
-
-## Audio (sound stage)
-
-| Phase | Description | Effort | Why |
-|---|---|---|---|
-| 34 | **Procedural ambient music (C418-style)** | M | Slow, sparse, Minecraft-Sweden feel. Drives the relaxing tone the rest of the game wants. Detailed spec below. ~400 LOC. |
-
-### Phase 34 detailed spec
-
-The synth engine in `craft_audio.c` already has 4 voices, square / triangle / noise waveforms, and exponential gain decay. Music adds:
-
-1. **ADSR envelope per voice** — replace the single `gain_dec` multiplier with attack-decay-sustain-release. Soft attacks (50 ms) and long releases (400-800 ms) give the "piano in a cavern" feel. ~40 LOC.
-2. **Pentatonic note table** — C major pentatonic over 3 octaves (~15 notes). Frequencies precomputed at table-init time. ~20 LOC of data.
-3. **Voice budget split**: reserve voices 0-1 for music (melody + pad), voices 2-3 stay for SFX. SFX preempts the round-robin slot only within its own pool. ~30 LOC of refactor.
-4. **Chord scheduler** — looped 4-chord progression (i-VI-III-VII in A minor, or I-V-vi-IV in C major). Each chord lasts 8-16 beats at ~60 BPM. Triggers a sustained triangle-wave pad note (root + fifth) on voice 1. ~50 LOC.
-5. **Melody scheduler** — random walk over pentatonic degrees, biased toward the current chord's root. Phrase structure: 4-bar phrase, 2-bar rest, repeat with variation. Note durations from a weighted set: half / quarter / dotted-eighth. Triggers a soft triangle pluck on voice 0. ~80 LOC.
-6. **Cheap reverb** — single Schroeder allpass + one comb delay. ~2 KB ring buffer of int16 samples. Adds shimmer without devolving into mud. Conditional on `CRAFT_AUDIO_REVERB` so it can be skipped on the device if CPU is tight. ~60 LOC.
-7. **Volume blending** — music gain ramps up over 30 s on world load, ducks to 30 % during SFX, ramps back. ~20 LOC.
-8. **Track variations** — three or four track "moods" picked by world conditions:
-   - Sunny day → bright I-V-vi-IV in C
-   - Night → dim i-VI-III-VII in A minor with sparser melody
-   - Underwater → low-pass-filtered drone, no melody
-   - Cave (player y < 12) → low piano-bell only, very sparse
-   ~80 LOC including pickup logic.
-9. **API additions** (`craft_audio.h`):
-   ```c
-   void craft_audio_music_enable(bool on);     /* user setting */
-   void craft_audio_music_set_mood(int mood);  /* called per frame */
-   ```
-
-**Memory** — adds ~3 KB BSS (reverb ring + note scheduler state). Negligible.
-
-**CPU** — 4 envelopes × 1 mult/sample + reverb (~20 ops/sample) ≈ 300 extra cycles/sample at 22050 Hz = ~6.5 M cycles/sec = 2.3 % of one core. Safe even with everything else running.
-
-**Settings integration** — appears in Phase 19 settings as "Music: On / Off / Quiet" once that ships.
-
-## Multiplayer (long horizon)
-
-| Phase | Description | Effort | Why |
-|---|---|---|---|
-| 32 | **USB-link 2-player explore mode** | XL | Host + client share a world. Network protocol: position updates 10 Hz, block-change events. Other player rendered as billboard. Requires ThumbyOne wiring. ~600 LOC. |
-| 33 | **Co-op survival** | M | Once Phase 32 + 27 ship, co-op survival is mostly UI plumbing. |
-
-## Quality bar checks (recurring, not phases)
-
-- Profile each phase on device — refuse to merge a phase that pushes FPS under 20.
-- Resident-SRAM budget — every phase reports its RAM delta in its README/docs entry. Refuse to merge if it pushes the total past 480 KB (40 KB headroom).
-- Save format compatibility — bump `CRAFT_SAVE_VERSION` and keep deserialise tolerant.
-
-## Recommended next-one queue
-
-**Phase 38 — Crafting (3×3 shaped grid)** (next key phase)
-
-Real Minecraft-style shaped recipes — the arrangement of items in
-the 3×3 grid matters, not just the bag of ingredients. The player
-physically places items in cells, and a recipe match shows an output
-preview that they can take.
-
-### UI layout (fits in 128×128)
-
-```
-+----+----+----+   →   +----+
-|    |    |    |       |    |
-+----+----+----+       +----+
-|    |    |    |       output
-+----+----+----+
-|    |    |    |
-+----+----+----+
-   3×3 grid          arrow + result cell
-```
-
-- Grid cells 16×16, arrow + output cell on the right, hotbar still
-  visible at the bottom so the player can see what they'll place.
-- D-pad navigates 10 positions (9 grid cells + 1 output cell), wraps.
-- A on a grid cell: places one of the active hotbar block into that
-  cell (debits inventory by 1).
-- B on a grid cell: removes the block, refunds to inventory.
-- A on the output cell: if a recipe matches, consumes the cells'
-  contents from inventory (already debited on placement) and adds
-  the output to inventory. Clears the grid.
-- MENU or B-from-output: close crafting, return remaining cells to
-  inventory.
-
-### Recipe representation
-
-```c
-typedef struct {
-    BlockId pattern[9];   /* 0..8 row-major; BLK_AIR = empty cell    */
-    BlockId output;
-    uint8_t output_count;
-    uint8_t bbox_w, bbox_h;
-} CraftRecipe;
-```
-
-Matching: the player's grid is reduced to its bounding box (smallest
-rectangle containing all non-AIR cells). That bounding rectangle is
-compared cell-by-cell to each recipe's `pattern` clipped to its
-declared `bbox_w × bbox_h`. So a recipe whose pattern is 2×2 can be
-placed anywhere on the 3×3 grid — exactly like Minecraft.
-
-Mirrored recipes can be added as a second entry if needed (e.g. axe
-left-handed vs right-handed).
-
-### v1 recipe set
-
-| Recipe | Pattern | Output |
+| Phase | Description | Effort |
 |---|---|---|
-| Planks | `[W . .]` `[. . .]` `[. . .]` | 4 PLANK |
-| Smooth stone | `[C C]` `[C C]` | 1 STONE |
-| Apple from leaves | `[L]` `[L]` `[L]` (vertical) | 1 APPLE |
-| Wooden sword | `[. S .]` `[. P .]` `[. P .]` | 1 SWORD |
-| Stone pickaxe | `[S S S]` `[. P .]` `[. P .]` | 1 PICKAXE |
+| Phase 31 | **Bow + arrow** — ranged combat; arrow projectile + AABB hit + sprite. Needs string (from spider?) + feather (from chicken) — implies mob drops | M |
+| — | **Mob loot drops** — sheep → wool, pig → raw pork, chicken → raw chicken + feather, slime → slimeball. Enables cooked-food economy + bow recipe | M |
+| — | **Diamond tier** — `BLK_DIAMOND_ORE` (deep stone, iron pick required), `BLK_DIAMOND` item, diamond tools (5 dmg sword, mines anything) | M |
+| — | **Hostile variety** — zombies (walk-not-jump slimes that take more hits), maybe a flying or ranged variant | L |
 
-(W=wood, P=plank, S=stone, C=cobble, L=leaves)
+### Tier 4 — building variety
 
-### New item types
+| Phase | Description | Effort |
+|---|---|---|
+| — | **Doors + ladders** — door needs an `is_open` flag bit per cell; ladder lets you climb vertical walls | S+M |
+| — | **Decorative blocks** — bookshelf (bookcase tex), bricks (8 cobble in furnace?), wool from sheep | S |
+| — | **Stairs / slabs** — half-block geometry; requires raycaster work since current engine assumes full cubes | XL |
 
-- `BLK_SWORD` — non-placeable inventory item. When held in active
-  hotbar slot, player attack damage rises from 1 → 3 (one-shots a
-  slime).
-- `BLK_PICKAXE` — non-placeable. When held, stone/cobble breaks
-  give double drops in survival (proxy for "faster mining" since
-  break is already instant in our system).
+### Tier 5 — multiplayer
 
-Both render in inventory + hotbar with their own procedural icons
-(stone-blade sword, T-shape pickaxe).
+| Phase | Description | Effort |
+|---|---|---|
+| Phase 32 | **USB-link 2-player explore** — host + client share a world via the ThumbyOne USB-link path. Sync block changes + player positions at 10 Hz. Other player drawn as billboard | XL |
+| Phase 33 | **Co-op survival** — once 32 + mob drops land, mostly just UI plumbing | M |
 
-### Effort
+## Recommended next-three queue
 
-- 3×3 grid UI + nav: ~120 LOC (parallel to existing inventory page)
-- Recipe matching with bounding box: ~80 LOC
-- Recipe table + output preview: ~40 LOC
-- BLK_SWORD + BLK_PICKAXE plumbing (textures, names, special-case
-  in player attack/break): ~80 LOC
-- Menu wiring: ~20 LOC
-- **Total ~340 LOC, 1 turn**
+1. **Slice A — Furnace UI** (biggest gameplay unlock — graduates the
+   iron-ingot recipe to real smelting and opens cooked food + glass +
+   smooth stone)
+2. **Slice B — Chest storage** (overflow problem starts to bite as
+   the player accumulates more than 8 block types)
+3. **Slice C — Light propagation** (torches earn their keep; sets up
+   future cave biome)
 
-Beyond crafting:
-- **Phase 21** save slots (multiple worlds)
-- **Phase 13** ambient occlusion
-- **Phase 25** biomes
-- **Tool items + smelting** (extends Phase 38)
-- **Phase 32+** USB-link multiplayer
+## Quality bar (recurring, not phases)
 
-Performance fallback: if on-device FPS is still under 25 after the SRAM-renderer pass already in v1, the cheap next move is interlaced rendering (render half the rows per frame, fill the rest from the previous frame buffer). That halves cost on average for some shimmer on fast yaw — usually a good trade.
+- **Profile each phase on device** — refuse a phase that pushes FPS
+  under 20
+- **Resident SRAM budget** — current ~415 KB of 520 KB. Refuse a
+  phase that pushes past 480 KB (40 KB headroom for stack)
+- **Save format** — bump `CRAFT_SAVE_VERSION` and keep deserialise
+  tolerant when changing the format
+- **Loop discipline** — terrain Y-fill loops must be fused or
+  explicitly bounds-checked (see `feedback_thumbycraft_loop_memset`
+  memory entry for why)

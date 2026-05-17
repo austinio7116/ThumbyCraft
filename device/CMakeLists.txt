@@ -28,6 +28,35 @@ set(CRAFT_ROOT  ${CMAKE_CURRENT_LIST_DIR}/..)
 set(SRC         ${CRAFT_ROOT}/src)
 set(DEVICE      ${CMAKE_CURRENT_LIST_DIR})
 
+# Bake the procedural texture atlas to const flash data — frees ~32 KB
+# of SRAM that the lightmap would otherwise have to fight for. Built
+# as a native host tool via a sub-CMake invocation so the cross
+# toolchain doesn't apply.
+include(ExternalProject)
+ExternalProject_Add(thumbycraft_baker
+    SOURCE_DIR ${CRAFT_ROOT}/tools
+    BINARY_DIR ${CMAKE_BINARY_DIR}/baker
+    CMAKE_ARGS
+        -DCMAKE_BUILD_TYPE=Release
+        -DCMAKE_C_COMPILER=cc
+        -DCMAKE_SYSTEM_NAME=
+        -DCMAKE_SYSTEM_PROCESSOR=
+        -DCMAKE_C_FLAGS=
+        -DCMAKE_EXE_LINKER_FLAGS=
+    INSTALL_COMMAND ""
+    BUILD_ALWAYS 1
+    BUILD_BYPRODUCTS ${CMAKE_BINARY_DIR}/baker/bake_textures
+)
+set(CRAFT_BAKED_C ${CMAKE_BINARY_DIR}/generated/craft_textures_baked.c)
+add_custom_command(
+    OUTPUT ${CRAFT_BAKED_C}
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}/generated
+    COMMAND ${CMAKE_BINARY_DIR}/baker/bake_textures ${CRAFT_BAKED_C}
+    DEPENDS thumbycraft_baker
+    COMMENT "Baking craft_textures atlas to flash"
+)
+add_custom_target(generate_craft_textures DEPENDS ${CRAFT_BAKED_C})
+
 set(CRAFT_DEVICE_SOURCES
     ${DEVICE}/craft_device_main.c
     ${DEVICE}/craft_lcd_gc9107.c
@@ -47,7 +76,9 @@ set(CRAFT_DEVICE_SOURCES
     ${SRC}/craft_menu.c
     ${SRC}/craft_mobs.c
     ${SRC}/craft_particles.c
+    ${SRC}/craft_torches.c
     ${SRC}/craft_main.c
+    ${CRAFT_BAKED_C}
 )
 
 # Standalone target. In slot mode, ThumbyOne's top-level CMakeLists
@@ -72,6 +103,7 @@ if (NOT THUMBYONE_SLOT_MODE)
     target_link_libraries(thumbycraft
         pico_stdlib
         pico_multicore
+        pico_rand
         hardware_spi
         hardware_dma
         hardware_pwm
@@ -89,7 +121,9 @@ if (NOT THUMBYONE_SLOT_MODE)
         PICO_HEAP_SIZE=0x10000      # 64 KB
         PICO_STACK_SIZE=0x1000      # 4 KB per core (default 2 KB doubled)
         PICO_CORE1_STACK_SIZE=0x1000
+        CRAFT_TEXTURES_BAKED=1
     )
+    add_dependencies(thumbycraft generate_craft_textures)
 
     # USB CDC stdio is unreliable on Thumby Color — leave it off.
     pico_enable_stdio_usb(thumbycraft 0)
@@ -105,9 +139,13 @@ else()
         ${SRC}
         ${DEVICE}
     )
-    target_compile_definitions(thumbycraft_slot PUBLIC THUMBYONE_SLOT_MODE=1)
+    target_compile_definitions(thumbycraft_slot PUBLIC
+        THUMBYONE_SLOT_MODE=1
+        CRAFT_TEXTURES_BAKED=1
+    )
     target_compile_options(thumbycraft_slot PRIVATE
         -O3 -ffast-math
         -Wno-unused-parameter -Wno-unused-function -Wno-unused-but-set-variable
     )
+    add_dependencies(thumbycraft_slot generate_craft_textures)
 endif()

@@ -22,6 +22,7 @@ void craft_audio_place(BlockId blk);
 void craft_audio_step(void);
 void craft_audio_step_on(BlockId blk);   /* material-aware footstep */
 void craft_audio_jump(void);
+void craft_audio_pickaxe_ting(void);     /* "needs pickaxe" feedback */
 
 /* Fill `out` with `n_samples` of int16 mono PCM. Always succeeds —
  * never blocks. Returns the number of samples written. */
@@ -40,5 +41,6 @@ void craft_audio_music_enable(bool on);
 bool craft_audio_music_is_enabled(void);
 void craft_audio_music_set_volume(float vol);   /* 0..1, default 0.5 */
 void craft_audio_music_tick(float dt);          /* call per game frame */
+void craft_audio_music_set_sun(float sun_y);    /* +1 noon, -1 midnight — picks day vs night style */
 
 #endif

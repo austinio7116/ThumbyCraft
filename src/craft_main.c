@@ -18,6 +18,7 @@
 #include "craft_menu.h"
 #include "craft_mobs.h"
 #include "craft_particles.h"
+#include "craft_torches.h"
 
 #include <string.h>
 
@@ -50,7 +51,11 @@ void craft_main_init(uint16_t *fb, uint32_t seed) {
     craft_world_init();
     craft_blocks_build_textures();
     craft_audio_init();
-    craft_audio_set_ambient(0.04f);
+    /* Ambient "wind" hiss disabled — was barely audible at the
+     * original mixer level but the 3× loudness boost made it an
+     * obvious continuous hiss. Leave the API in place in case we
+     * want zone-based ambient layers later. */
+    craft_audio_set_ambient(0.0f);
     craft_audio_music_enable(true);
     craft_audio_music_set_volume(0.5f);
     /* Window-loaded around the world origin; spawn point picks a
@@ -65,7 +70,7 @@ void craft_main_init(uint16_t *fb, uint32_t seed) {
      * either from the pause menu. */
     s_player.invert_y = true;
     craft_player_set_mode(&s_player, CRAFT_MODE_SURVIVAL);
-    craft_mobs_spawn_hostile(&s_player, 3);
+    craft_mobs_spawn_hostile(&s_player, 4);
 }
 
 bool craft_main_load(const uint8_t *blob, size_t n) {
@@ -149,6 +154,9 @@ static void handle_menu_result(CraftMenuResult r) {
             break;
         }
         case CRAFT_MENU_RESULT_INVENTORY:
+        case CRAFT_MENU_RESULT_CRAFT:
+        case CRAFT_MENU_RESULT_RECIPES:
+        case CRAFT_MENU_RESULT_CONTROLS:
             /* Page switch handled inside the menu itself — nothing
              * for the host to do here. */
             break;
@@ -169,6 +177,7 @@ void craft_main_step(const CraftInput *in, float dt, int fps) {
         craft_render_stars(&s_player.cam, s_fb);
         craft_render_celestials(&s_player.cam, s_fb);
         craft_mobs_render(&s_player.cam, s_fb);
+        craft_torches_render(&s_player.cam, s_fb);
         craft_particles_render(&s_player.cam, s_fb);
         craft_render_pick_outline(&s_player.cam, s_fb);
         craft_hud_draw(s_fb, &s_player, fps);
@@ -189,6 +198,7 @@ void craft_main_step(const CraftInput *in, float dt, int fps) {
     craft_particles_tick(dt);
     craft_mobs_tick(dt, &s_player);
     craft_mobs_day_night_tick(dt, craft_render_sun_y(), &s_player);
+    craft_audio_music_set_sun(craft_render_sun_y());
     craft_audio_music_tick(dt);
     craft_blocks_animate_water(s_world_time);
     if (s_player.request_menu) {
@@ -205,6 +215,7 @@ void craft_main_step(const CraftInput *in, float dt, int fps) {
     craft_render_stars(&s_player.cam, s_fb);
     craft_render_celestials(&s_player.cam, s_fb);
     craft_mobs_render(&s_player.cam, s_fb);
+        craft_torches_render(&s_player.cam, s_fb);
     craft_particles_render(&s_player.cam, s_fb);
     craft_render_pick_outline(&s_player.cam, s_fb);
     craft_hud_draw(s_fb, &s_player, fps);
@@ -231,6 +242,7 @@ void craft_main_tick(const CraftInput *in, float dt) {
     craft_particles_tick(dt);
     craft_mobs_tick(dt, &s_player);
     craft_mobs_day_night_tick(dt, craft_render_sun_y(), &s_player);
+    craft_audio_music_set_sun(craft_render_sun_y());
     craft_audio_music_tick(dt);
     craft_blocks_animate_water(s_world_time);
     if (s_player.request_menu) {
@@ -253,6 +265,7 @@ void craft_main_draw_hud(int fps) {
     craft_render_stars(&s_player.cam, s_fb);
     craft_render_celestials(&s_player.cam, s_fb);
     craft_mobs_render(&s_player.cam, s_fb);
+        craft_torches_render(&s_player.cam, s_fb);
     craft_particles_render(&s_player.cam, s_fb);
     craft_render_pick_outline(&s_player.cam, s_fb);
     craft_hud_draw(s_fb, &s_player, fps);

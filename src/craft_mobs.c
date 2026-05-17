@@ -56,8 +56,8 @@ static const int mob_hp_table[MOB_TYPE_COUNT] = {
 /* Aggro range — slime starts chasing when player within this distance. */
 #define SLIME_AGGRO_DIST   12.0f
 #define SLIME_CONTACT_DIST 0.9f
-#define DAY_NIGHT_CAP      6      /* max alive hostile mobs */
-#define NIGHT_SPAWN_GAP    5.0f   /* sec between spawn attempts at night */
+#define NIGHT_SPAWN_GAP    4.0f   /* sec between spawn attempts at night */
+#define DAY_SPAWN_GAP     20.0f   /* sec between spawn attempts during the day */
 
 static float s_day_night_t;
 
@@ -152,7 +152,7 @@ void craft_mobs_spawn_around(Vec3 centre, uint32_t seed) {
     s_rng ^= seed;
     for (int i = 0; i < CRAFT_MAX_MOBS; i++) craft_mobs[i].alive = false;
     int placed = 0;
-    for (int tries = 0; tries < 60 && placed < CRAFT_MAX_MOBS; tries++) {
+    for (int tries = 0; tries < 60 && placed < CRAFT_PASSIVE_MAX; tries++) {
         int dx = (int)(xs() & 0x1F) - 16;
         int dz = (int)(xs() & 0x1F) - 16;
         int x  = (int)centre.x + dx;
@@ -174,7 +174,12 @@ void craft_mobs_spawn_around(Vec3 centre, uint32_t seed) {
 }
 
 
+/* Stash the last sun_y the day/night tick saw so spawn_hostile can
+ * decide whether daytime spawns need to be sky-shielded. */
+static float s_last_sun_y = -1.0f;
+
 void craft_mobs_spawn_hostile(CraftPlayer *p, int n) {
+    bool is_day = s_last_sun_y > 0.0f;
     int placed = 0;
     for (int tries = 0; tries < 80 && placed < n; tries++) {
         /* Spawn beyond visible range so they emerge instead of popping
@@ -185,6 +190,12 @@ void craft_mobs_spawn_hostile(CraftPlayer *p, int n) {
         int z = (int)(p->cam.pos.z + sinf(angle) * dist);
         int y = find_ground(x, z);
         if (y < 0) continue;
+        /* Hostile spawn rule: only allowed if the spawn cell is in
+         * shadow or it's currently night. At day, a sky-exposed
+         * surface tile is direct sunlight — skip it.
+         * `y+1` is the cell the mob's feet occupy (one above the
+         * ground block). */
+        if (is_day && craft_world_sky_exposed(x, y + 1, z)) continue;
         /* Find a free slot. */
         for (int i = 0; i < CRAFT_MAX_MOBS; i++) {
             if (craft_mobs[i].alive) continue;
@@ -271,28 +282,19 @@ int craft_mobs_pick(const CraftCamera *cam, float max_dist) {
 
 void craft_mobs_day_night_tick(float dt, float sun_y, CraftPlayer *p) {
     if (p->mode != CRAFT_MODE_SURVIVAL) return;
+    s_last_sun_y = sun_y;
     s_day_night_t += dt;
-    /* Night = sun below horizon by more than a touch. */
+    /* Top up hostile count toward CRAFT_HOSTILE_MAX. Faster at night
+     * (sun below horizon), slower during the day. No daylight
+     * despawn — slimes are tough enough to roam in sunlight. */
     bool night = sun_y < -0.10f;
-    if (night) {
-        if (s_day_night_t < NIGHT_SPAWN_GAP) return;
-        s_day_night_t = 0.0f;
-        /* Count live hostiles. */
-        int alive_h = 0;
-        for (int i = 0; i < CRAFT_MAX_MOBS; i++)
-            if (craft_mobs[i].alive && craft_mobs[i].type == MOB_SLIME) alive_h++;
-        if (alive_h < DAY_NIGHT_CAP) craft_mobs_spawn_hostile(p, 1);
-    } else if (sun_y > 0.15f) {
-        /* Daylight despawn — pop one slime per tick at low chance. */
-        if (s_day_night_t < 8.0f) return;
-        s_day_night_t = 0.0f;
-        for (int i = 0; i < CRAFT_MAX_MOBS; i++) {
-            if (craft_mobs[i].alive && craft_mobs[i].type == MOB_SLIME) {
-                craft_mobs[i].alive = false;
-                break;
-            }
-        }
-    }
+    float gap  = night ? NIGHT_SPAWN_GAP : DAY_SPAWN_GAP;
+    if (s_day_night_t < gap) return;
+    s_day_night_t = 0.0f;
+    int alive_h = 0;
+    for (int i = 0; i < CRAFT_MAX_MOBS; i++)
+        if (craft_mobs[i].alive && craft_mobs[i].type == MOB_SLIME) alive_h++;
+    if (alive_h < CRAFT_HOSTILE_MAX) craft_mobs_spawn_hostile(p, 1);
 }
 
 /* --- AI ----------------------------------------------------------- */

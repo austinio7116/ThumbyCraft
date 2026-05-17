@@ -119,8 +119,7 @@ bool craft_save_deserialise(const uint8_t *in, size_t n,
         uint32_t idx = pack & 0x00FFFFFFu;
         uint8_t  blk = (uint8_t)(pack >> 24);
         if (idx < CRAFT_WORLD_VOXELS) {
-            craft_world_blocks[idx] =
-                (craft_world_blocks[idx] & 0xF0) | (blk & 0x0F);
+            craft_world_blocks[idx] = blk;
         }
     }
     craft_world_dirty = 0;

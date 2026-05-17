@@ -21,6 +21,28 @@ find_package(SDL2 REQUIRED)
 set(CRAFT_ROOT ${CMAKE_CURRENT_LIST_DIR}/..)
 set(SRC ${CRAFT_ROOT}/src)
 
+# Bake the procedural texture atlas to const data — mirrors the
+# device path so host + device exercise identical code (and host can
+# still iterate on texture code by re-running the baker).
+include(ExternalProject)
+ExternalProject_Add(thumbycraft_baker
+    SOURCE_DIR ${CRAFT_ROOT}/tools
+    BINARY_DIR ${CMAKE_BINARY_DIR}/baker
+    CMAKE_ARGS -DCMAKE_BUILD_TYPE=Release
+    INSTALL_COMMAND ""
+    BUILD_ALWAYS 1
+    BUILD_BYPRODUCTS ${CMAKE_BINARY_DIR}/baker/bake_textures
+)
+set(CRAFT_BAKED_C ${CMAKE_BINARY_DIR}/generated/craft_textures_baked.c)
+add_custom_command(
+    OUTPUT ${CRAFT_BAKED_C}
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}/generated
+    COMMAND ${CMAKE_BINARY_DIR}/baker/bake_textures ${CRAFT_BAKED_C}
+    DEPENDS thumbycraft_baker
+    COMMENT "Baking craft_textures atlas"
+)
+add_custom_target(generate_craft_textures DEPENDS ${CRAFT_BAKED_C})
+
 add_executable(thumbycraft_host
     ${CMAKE_CURRENT_LIST_DIR}/host_main.c
     ${SRC}/craft_world.c
@@ -35,8 +57,12 @@ add_executable(thumbycraft_host
     ${SRC}/craft_menu.c
     ${SRC}/craft_mobs.c
     ${SRC}/craft_particles.c
+    ${SRC}/craft_torches.c
     ${SRC}/craft_main.c
+    ${CRAFT_BAKED_C}
 )
+add_dependencies(thumbycraft_host generate_craft_textures)
+target_compile_definitions(thumbycraft_host PRIVATE CRAFT_TEXTURES_BAKED=1)
 
 target_include_directories(thumbycraft_host PRIVATE
     ${SRC}

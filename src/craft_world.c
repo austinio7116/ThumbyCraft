@@ -18,12 +18,15 @@
  */
 #include "craft_world.h"
 #include "craft_gen.h"
+#include "craft_torches.h"
 #include <string.h>
 
 uint8_t  craft_world_blocks[CRAFT_WORLD_VOXELS];
 uint32_t craft_world_dirty;
 int      craft_world_origin_x;
 int      craft_world_origin_z;
+uint8_t  craft_world_lightmap[CRAFT_LIGHTMAP_BYTES];
+uint8_t  craft_world_skyheight[CRAFT_WORLD_X * CRAFT_WORLD_Z];
 
 #define CRAFT_SHIFT      16    /* slide step in world units */
 #define CRAFT_EDGE_MARGIN 16   /* shift triggers within this many cells of edge */
@@ -91,29 +94,183 @@ static inline int local_idx(int lx, int wy, int lz) {
     return (wy * CRAFT_WORLD_Z + lz) * CRAFT_WORLD_X + lx;
 }
 
+/* --- Lightmap --------------------------------------------------- */
+
+/* 2 bits per cell — 4 cells per byte. Levels 0..CRAFT_LIGHT_MAX. */
+static inline uint8_t light_get(int idx) {
+    return (craft_world_lightmap[idx >> 2] >> ((idx & 3) * 2)) & 3;
+}
+/* Write only when the new level is brighter than what's already there
+ * — lets the BFS naturally take the max across overlapping torches. */
+static inline void light_set_max(int idx, uint8_t level) {
+    int b = idx >> 2;
+    int shift = (idx & 3) * 2;
+    uint8_t cur = (craft_world_lightmap[b] >> shift) & 3;
+    if (level > cur) {
+        craft_world_lightmap[b] = (uint8_t)(
+            (craft_world_lightmap[b] & ~(3u << shift)) | ((uint32_t)level << shift)
+        );
+    }
+}
+
+/* True if a torch's light can pass through this block — air, water,
+ * glass, and the torch itself. Anything else blocks propagation. */
+static inline bool light_transparent(BlockId b) {
+    return b == BLK_AIR || b == BLK_WATER ||
+           b == BLK_GLASS || b == BLK_TORCH;
+}
+
+/* Map BFS hop distance → light level. With CRAFT_LIGHT_MAX=3 and
+ * CRAFT_LIGHT_RADIUS=6: dist 0,1 → 3; 2,3 → 2; 4,5 → 1; ≥6 → 0.
+ * Gives a four-step falloff over a 6-block radius. */
+static inline int light_level_for_dist(int dist) {
+    int level = CRAFT_LIGHT_MAX - (dist >> 1);
+    return level < 0 ? 0 : level;
+}
+
+/* BFS flood from a torch at local (sx, sy, sz). Each visited cell is
+ * marked with the *maximum* level it has seen so overlapping torches
+ * compose by max(). Cells are re-enqueued only when a brighter level
+ * arrives via a different path. */
+#define LIGHT_BFS_MAX 1024
+typedef struct __attribute__((packed)) {
+    int16_t x, y, z;
+    uint8_t dist;
+} LightQNode;
+
+static void light_flood_from(int sx, int sy, int sz) {
+    if ((unsigned)sx >= CRAFT_WORLD_X) return;
+    if ((unsigned)sy >= CRAFT_WORLD_Y) return;
+    if ((unsigned)sz >= CRAFT_WORLD_Z) return;
+
+    LightQNode q[LIGHT_BFS_MAX];
+    int qh = 0, qt = 0;
+
+    int s_idx = local_idx(sx, sy, sz);
+    light_set_max(s_idx, (uint8_t)CRAFT_LIGHT_MAX);
+    q[qt++] = (LightQNode){ (int16_t)sx, (int16_t)sy, (int16_t)sz, 0 };
+
+    static const int8_t dxs[6] = { 1, -1, 0, 0, 0, 0 };
+    static const int8_t dys[6] = { 0, 0, 1, -1, 0, 0 };
+    static const int8_t dzs[6] = { 0, 0, 0, 0, 1, -1 };
+
+    while (qh < qt) {
+        LightQNode n = q[qh++];
+        int next_level = light_level_for_dist(n.dist + 1);
+        if (next_level == 0) continue;     /* nothing brighter to propagate */
+        for (int i = 0; i < 6; i++) {
+            int nx = n.x + dxs[i];
+            int ny = n.y + dys[i];
+            int nz = n.z + dzs[i];
+            if ((unsigned)nx >= CRAFT_WORLD_X) continue;
+            if ((unsigned)ny >= CRAFT_WORLD_Y) continue;
+            if ((unsigned)nz >= CRAFT_WORLD_Z) continue;
+            int n_idx = local_idx(nx, ny, nz);
+            BlockId b = (BlockId)craft_world_blocks[n_idx];
+            if (!light_transparent(b)) continue;
+            if (light_get(n_idx) >= next_level) continue;  /* already as bright or brighter */
+            light_set_max(n_idx, (uint8_t)next_level);
+            if (qt < LIGHT_BFS_MAX) {
+                q[qt++] = (LightQNode){
+                    (int16_t)nx, (int16_t)ny, (int16_t)nz,
+                    (uint8_t)(n.dist + 1)
+                };
+            }
+        }
+    }
+}
+
+/* --- Sky-height ------------------------------------------------- */
+/* Counts as "blocks sky" anything that's not transparent. Glass
+ * lets sunlight through; water shouldn't (Minecraft attenuates
+ * water but for cheapness we treat it as opaque to sky here so
+ * deep ocean floors are dark, which is the right vibe). */
+static inline bool blocks_sky(BlockId b) {
+    return b != BLK_AIR && b != BLK_GLASS && b != BLK_TORCH;
+}
+
+static void compute_skyheight_column(int lx, int lz) {
+    int sh = 0;
+    for (int wy = CRAFT_WORLD_Y - 1; wy >= 0; wy--) {
+        BlockId b = (BlockId)craft_world_blocks[local_idx(lx, wy, lz)];
+        if (blocks_sky(b)) { sh = wy; break; }
+    }
+    craft_world_skyheight[lz * CRAFT_WORLD_X + lx] = (uint8_t)sh;
+}
+
+static void compute_skyheight_all(void) {
+    for (int lz = 0; lz < CRAFT_WORLD_Z; lz++) {
+        for (int lx = 0; lx < CRAFT_WORLD_X; lx++) {
+            compute_skyheight_column(lx, lz);
+        }
+    }
+}
+
+void craft_world_rebuild_lightmap(void) {
+    memset(craft_world_lightmap, 0, sizeof craft_world_lightmap);
+    for (int lz = 0; lz < CRAFT_WORLD_Z; lz++) {
+        for (int lx = 0; lx < CRAFT_WORLD_X; lx++) {
+            for (int wy = 0; wy < CRAFT_WORLD_Y; wy++) {
+                if (craft_world_blocks[local_idx(lx, wy, lz)] == BLK_TORCH) {
+                    light_flood_from(lx, wy, lz);
+                }
+            }
+        }
+    }
+}
+
 BlockId craft_world_get(int wx, int wy, int wz) {
     if ((unsigned)wy >= CRAFT_WORLD_Y) return BLK_AIR;
     int lx = wx - craft_world_origin_x;
     int lz = wz - craft_world_origin_z;
     if ((unsigned)lx >= CRAFT_WORLD_X) return BLK_AIR;
     if ((unsigned)lz >= CRAFT_WORLD_Z) return BLK_AIR;
-    return (BlockId)(craft_world_blocks[local_idx(lx, wy, lz)] & 0x0F);
+    /* Full byte is block id now — BLK_COUNT exceeds 16 once items
+     * land in the enum, so the old 4-bit mask had to go. */
+    return (BlockId)craft_world_blocks[local_idx(lx, wy, lz)];
 }
 
 void craft_world_set(int wx, int wy, int wz, BlockId blk) {
     if ((unsigned)wy >= CRAFT_WORLD_Y) return;
-    /* Always record the mod so it survives a window shift. We could
-     * avoid storing cells that match the procedural baseline, but the
-     * caller doesn't know the seed, and recomputing here per-set is
-     * not worth the saved entries for typical play. */
+    BlockId prev = craft_world_get(wx, wy, wz);
     mod_set(wx, wy, wz, blk);
     int lx = wx - craft_world_origin_x;
     int lz = wz - craft_world_origin_z;
     if ((unsigned)lx < CRAFT_WORLD_X && (unsigned)lz < CRAFT_WORLD_Z) {
-        uint8_t *cell = &craft_world_blocks[local_idx(lx, wy, lz)];
-        *cell = (*cell & 0xF0) | ((uint8_t)blk & 0x0F);
+        craft_world_blocks[local_idx(lx, wy, lz)] = (uint8_t)blk;
     }
     craft_world_dirty = 1;
+    /* Torch place/remove or anything that changes solid→transparent
+     * needs a lightmap rebuild. Cheap (~few ms) so just rebuild on
+     * any structural change involving torches. */
+    /* Sky-height column update: cheap, one column scan, always do it. */
+    if ((unsigned)lx < CRAFT_WORLD_X && (unsigned)lz < CRAFT_WORLD_Z) {
+        compute_skyheight_column(lx, lz);
+    }
+
+    /* Lightmap maintenance.
+     *  - Torch place/break needs both the torch list and the lightmap
+     *    rebuilt.
+     *  - Any other transparency change (solid → air, or vice versa)
+     *    affects how light propagates: breaking a wall might expose a
+     *    torch-lit room beyond it; placing a wall blocks light. So
+     *    rebuild the lightmap there too.
+     *  - Pure same-transparency changes (e.g. dirt → grass, stone →
+     *    cobble) don't touch propagation — skip the rebuild to keep
+     *    the build/place loop fast. */
+    bool torch_change   = (blk == BLK_TORCH || prev == BLK_TORCH);
+    bool prev_blocks    = !light_transparent(prev);
+    bool new_blocks     = !light_transparent(blk);
+    bool transp_changed = (prev_blocks != new_blocks);
+    if (torch_change) {
+        if (prev == BLK_TORCH && blk != BLK_TORCH) {
+            craft_torches_forget_orient(wx, wy, wz);
+        }
+        craft_torches_rebuild();
+        craft_world_rebuild_lightmap();
+    } else if (transp_changed) {
+        craft_world_rebuild_lightmap();
+    }
 }
 
 BlockId craft_world_block_at(int wx, int wy, int wz, uint32_t seed) {
@@ -125,6 +282,7 @@ BlockId craft_world_block_at(int wx, int wy, int wz, uint32_t seed) {
 /* --- Lifecycle --------------------------------------------------- */
 void craft_world_init(void) {
     memset(craft_world_blocks, 0, sizeof craft_world_blocks);
+    memset(craft_world_lightmap, 0, sizeof craft_world_lightmap);
     memset(s_mods, 0, sizeof s_mods);
     s_mod_count = 0;
     craft_world_dirty = 0;
@@ -164,25 +322,125 @@ void craft_world_load_around(int player_wx, int player_wz, uint32_t seed) {
     craft_world_origin_x = player_wx - CRAFT_WORLD_X / 2;
     craft_world_origin_z = player_wz - CRAFT_WORLD_Z / 2;
     window_load(seed);
+    compute_skyheight_all();
+    craft_torches_rebuild();
+    craft_world_rebuild_lightmap();
     craft_world_dirty = 0;
+}
+
+/* Regenerate a single column's contents into the resident buffer.
+ * `lx`, `lz` are local buffer indices; `wx`, `wz` are absolute world
+ * coords (caller computes these consistent with origin). Applies mod
+ * overrides on top of the procedural gen. */
+static void regen_one_column(int lx, int lz, int wx, int wz, uint32_t seed) {
+    uint8_t col[CRAFT_WORLD_Y];
+    craft_gen_column(wx, wz, seed, col);
+    for (int wy = 0; wy < CRAFT_WORLD_Y; wy++) {
+        int m = mod_get(wx, wy, wz);
+        if (m >= 0) col[wy] = (uint8_t)m;
+        craft_world_blocks[local_idx(lx, wy, lz)] = col[wy];
+    }
+}
+
+/* Slide the buffer by dx along X: memmove the cells already in
+ * memory, then regenerate the freshly-exposed strip. Origin updates
+ * to the new value. */
+static void shift_x(int dx, uint32_t seed) {
+    int adx = (dx > 0) ? dx : -dx;
+    if (adx >= CRAFT_WORLD_X) {
+        /* No overlap — caller should full-regen instead. */
+        return;
+    }
+    /* X is the innermost (fastest-varying) buffer index, so each
+     * Y/Z row is a contiguous run of CRAFT_WORLD_X bytes. */
+    for (int wy = 0; wy < CRAFT_WORLD_Y; wy++) {
+        for (int lz = 0; lz < CRAFT_WORLD_Z; lz++) {
+            uint8_t *row = &craft_world_blocks[
+                (wy * CRAFT_WORLD_Z + lz) * CRAFT_WORLD_X];
+            if (dx > 0) {
+                /* New origin > old: cells slide toward index 0. */
+                memmove(row, row + dx, CRAFT_WORLD_X - dx);
+            } else {
+                memmove(row + (-dx), row, CRAFT_WORLD_X + dx);
+            }
+        }
+    }
+    craft_world_origin_x += dx;
+
+    int new_lx0 = (dx > 0) ? (CRAFT_WORLD_X - dx) : 0;
+    int new_lx1 = (dx > 0) ? CRAFT_WORLD_X : -dx;
+    for (int lx = new_lx0; lx < new_lx1; lx++) {
+        int wx = lx + craft_world_origin_x;
+        for (int lz = 0; lz < CRAFT_WORLD_Z; lz++) {
+            int wz = lz + craft_world_origin_z;
+            regen_one_column(lx, lz, wx, wz, seed);
+        }
+    }
+}
+
+/* Slide the buffer by dz along Z. Z spans whole rows of X cells, so
+ * memmove operates on contiguous (W × dz) blocks per Y layer. */
+static void shift_z(int dz, uint32_t seed) {
+    int adz = (dz > 0) ? dz : -dz;
+    if (adz >= CRAFT_WORLD_Z) return;
+    for (int wy = 0; wy < CRAFT_WORLD_Y; wy++) {
+        uint8_t *layer = &craft_world_blocks[
+            wy * CRAFT_WORLD_Z * CRAFT_WORLD_X];
+        size_t row_bytes = CRAFT_WORLD_X;
+        if (dz > 0) {
+            memmove(layer,
+                    layer + dz * row_bytes,
+                    (CRAFT_WORLD_Z - dz) * row_bytes);
+        } else {
+            memmove(layer + (-dz) * row_bytes,
+                    layer,
+                    (CRAFT_WORLD_Z + dz) * row_bytes);
+        }
+    }
+    craft_world_origin_z += dz;
+
+    int new_lz0 = (dz > 0) ? (CRAFT_WORLD_Z - dz) : 0;
+    int new_lz1 = (dz > 0) ? CRAFT_WORLD_Z : -dz;
+    for (int lz = new_lz0; lz < new_lz1; lz++) {
+        int wz = lz + craft_world_origin_z;
+        for (int lx = 0; lx < CRAFT_WORLD_X; lx++) {
+            int wx = lx + craft_world_origin_x;
+            regen_one_column(lx, lz, wx, wz, seed);
+        }
+    }
 }
 
 void craft_world_maybe_shift(int player_wx, int player_wz, uint32_t seed) {
     int lx = player_wx - craft_world_origin_x;
     int lz = player_wz - craft_world_origin_z;
 
-    /* Compute shift amount in CRAFT_SHIFT-sized steps so we don't
-     * shift every single block of player motion. */
     int dx = 0, dz = 0;
-    while (lx < CRAFT_EDGE_MARGIN)              { dx -= CRAFT_SHIFT; lx += CRAFT_SHIFT; }
+    while (lx < CRAFT_EDGE_MARGIN)                  { dx -= CRAFT_SHIFT; lx += CRAFT_SHIFT; }
     while (lx >= CRAFT_WORLD_X - CRAFT_EDGE_MARGIN) { dx += CRAFT_SHIFT; lx -= CRAFT_SHIFT; }
-    while (lz < CRAFT_EDGE_MARGIN)              { dz -= CRAFT_SHIFT; lz += CRAFT_SHIFT; }
+    while (lz < CRAFT_EDGE_MARGIN)                  { dz -= CRAFT_SHIFT; lz += CRAFT_SHIFT; }
     while (lz >= CRAFT_WORLD_Z - CRAFT_EDGE_MARGIN) { dz += CRAFT_SHIFT; lz -= CRAFT_SHIFT; }
     if (dx == 0 && dz == 0) return;
 
-    craft_world_origin_x += dx;
-    craft_world_origin_z += dz;
-    /* Full regen is simpler than a memmove + strip-fill and only
-     * happens at chunk boundaries. ~50 ms one-time stutter. */
-    window_load(seed);
+    /* No overlap → full regen. Happens only on huge teleports. */
+    int adx = (dx > 0) ? dx : -dx;
+    int adz = (dz > 0) ? dz : -dz;
+    if (adx >= CRAFT_WORLD_X || adz >= CRAFT_WORLD_Z) {
+        craft_world_origin_x += dx;
+        craft_world_origin_z += dz;
+        window_load(seed);
+        return;
+    }
+
+    /* Partial regen: memmove the overlap, regen only the new strip.
+     * X and Z handled independently. For a single-axis 16-cell shift
+     * this drops the work from ~30 ms (full 4096-column regen) to
+     * ~7 ms (one 1024-column strip) — fits inside one frame. */
+    if (dx != 0) shift_x(dx, seed);
+    if (dz != 0) shift_z(dz, seed);
+
+    /* Sky-height, lightmap, and torch list are all local-indexed —
+     * rebuild from the contents of the new window. Few ms total. */
+    compute_skyheight_all();
+    craft_torches_rebuild();
+    craft_world_rebuild_lightmap();
 }

@@ -49,7 +49,10 @@ int  craft_mobs_pick(const CraftCamera *cam, float max_dist);
  * craft_render_sun_y. */
 void craft_mobs_day_night_tick(float dt, float sun_y, CraftPlayer *p);
 
-#define CRAFT_MAX_MOBS 6
+/* Pool sized so passive and hostile spawns don't fight for slots. */
+#define CRAFT_PASSIVE_MAX  6
+#define CRAFT_HOSTILE_MAX  6
+#define CRAFT_MAX_MOBS    (CRAFT_PASSIVE_MAX + CRAFT_HOSTILE_MAX)
 
 extern CraftMob craft_mobs[CRAFT_MAX_MOBS];
 

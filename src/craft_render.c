@@ -209,6 +209,11 @@ INLINE_HOT TraceHit trace_ray(Vec3 origin, Vec3 dir, bool stop_at_water) {
 
         BlockId blk = craft_world_get(vx, vy, vz);
         if (blk == BLK_AIR) continue;
+        /* Torches are smaller-than-cube objects rendered in a
+         * separate 3D post-pass. The raycaster sees the cell as
+         * empty so the player can see through it and the torch
+         * cuboid sits properly inside it. */
+        if (blk == BLK_TORCH) continue;
         if (blk == BLK_WATER) {
             if (!stop_at_water) {
                 h.passed_water = true;
@@ -353,7 +358,84 @@ void craft_render_strip(const CraftCamera *cam, uint16_t *fb,
                 if (tu < 0) tu = 0; else if (tu >= CRAFT_TEX_SIZE) tu = CRAFT_TEX_SIZE - 1;
                 if (tv < 0) tv = 0; else if (tv >= CRAFT_TEX_SIZE) tv = CRAFT_TEX_SIZE - 1;
                 uint16_t c = tex[tv * CRAFT_TEX_SIZE + tu];
-                c = shade(c, s_face_shade_lit[h.face]);
+                /* Sky vs cave brightness, with torch overlay.
+                 *  - Air cell adjacent to face is sky-exposed → use
+                 *    the day/night-dimmed s_face_shade_lit table so
+                 *    the surface tracks the sun.
+                 *  - Air cell is buried under at least one solid
+                 *    cell (a cave or under a roof) → use a permanent
+                 *    "cave dim" base independent of time of day.
+                 *  - If a torch reaches the air cell, floor the
+                 *    final brightness so the torch is visible. */
+                /* Depth below sky uses the cell's OWN column —
+                 * preserves tree shadow shape (the previous 3×3
+                 * neighbour min pulled shadow edges into full sky
+                 * and made shadows look narrow). The horizontal
+                 * neighbour scan still applies but only as a "cave
+                 * mouth lift": when our column is well below sky
+                 * (depth ≥ 4 = inside a cave) AND a neighbour
+                 * column has open sky at our Y, lift to depth 2
+                 * (shallow-shadow tier). This brightens cave
+                 * entrances without affecting tree shadows whose
+                 * own column is only slightly buried. */
+                int face_shade_v;
+                int lx = h.fx - craft_world_origin_x;
+                int lz = h.fz - craft_world_origin_z;
+                int eff_depth;
+                if ((unsigned)lx >= CRAFT_WORLD_X || (unsigned)lz >= CRAFT_WORLD_Z) {
+                    eff_depth = -1;  /* off-window = sky */
+                } else {
+                    int own_sh = craft_world_skyheight[lz * CRAFT_WORLD_X + lx];
+                    eff_depth = own_sh - h.fy;
+                    if (eff_depth >= 4) {
+                        /* Look for a sky-open neighbour at our Y to
+                         * lift cave-mouth darkness. Capped at 2 so
+                         * we never get full sky brightness from a
+                         * neighbour — only relief, not exposure. */
+                        for (int dz = -1; dz <= 1; dz++) {
+                            int nlz = lz + dz;
+                            if ((unsigned)nlz >= CRAFT_WORLD_Z) continue;
+                            for (int dx = -1; dx <= 1; dx++) {
+                                int nlx = lx + dx;
+                                if ((unsigned)nlx >= CRAFT_WORLD_X) continue;
+                                int n_sh = craft_world_skyheight[nlz * CRAFT_WORLD_X + nlx];
+                                if (n_sh < h.fy && eff_depth > 2) eff_depth = 2;
+                            }
+                        }
+                    }
+                }
+                if (eff_depth <= 0) {
+                    face_shade_v = s_face_shade_lit[h.face];
+                } else {
+                    /* Shadow falloff. Each tier is a fraction of
+                     * current sky brightness so shadows fade with the
+                     * sun (under a tree at midnight is still dark).
+                     * Tiers extended so trees with tall canopies
+                     * (ground 4-6 below leaves) stay in the bright
+                     * shadow band rather than dropping to cave. */
+                    int shade_factor;
+                    if      (eff_depth <= 2) shade_factor = 180;  /* tree leaf shadow */
+                    else if (eff_depth <= 5) shade_factor = 130;  /* under canopy floor */
+                    else if (eff_depth <= 9) shade_factor = 70;   /* upper cave / deep shade */
+                    else                     shade_factor = 0;    /* deep cave */
+                    int shaded = (int)s_face_shade_lit[h.face] * shade_factor >> 8;
+                    /* Deep-cave floor: constant ~16 % so caves never
+                     * go fully black during daylight and stay only
+                     * mildly darker at night. */
+                    int deep_cave = ((int)face_shade[h.face] * 40) >> 8;
+                    face_shade_v = shaded > deep_cave ? shaded : deep_cave;
+                }
+                /* Torch light — gradient floor. Level 0 = no torch
+                 * reaches here; 1/2/3 give progressively brighter
+                 * minimums. The cave/sky base above still wins if
+                 * it's already brighter than the torch floor. */
+                int torch_level = craft_world_light_level(h.fx, h.fy, h.fz);
+                if (torch_level > 0) {
+                    static const int TORCH_FLOOR[4] = { 0, 110, 165, 220 };
+                    int floor_v = TORCH_FLOOR[torch_level];
+                    if (face_shade_v < floor_v) face_shade_v = floor_v;
+                }
+                c = shade(c, face_shade_v);
 
                 if (h.passed_water) {
                     int r1 = (c >> 11) & 0x1F, g1 = (c >> 5) & 0x3F, b1 = c & 0x1F;
