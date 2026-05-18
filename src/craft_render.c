@@ -28,6 +28,7 @@
 #define INLINE_HOT static inline __attribute__((always_inline))
 
 static bool  s_fog_enabled = true;
+static bool  s_clouds_enabled = true;
 static float s_sun_y = 1.0f;          /* sin(sun_angle): +1 noon, -1 midnight */
 static float s_cloud_drift = 0.0f;    /* world units of east drift since boot */
 static int   s_brightness_q8 = 256;   /* 0..256, applied to face_shade */
@@ -35,6 +36,8 @@ static int   s_sky_top_r, s_sky_top_g, s_sky_top_b;       /* RGB565 components *
 static int   s_sky_horizon_r, s_sky_horizon_g, s_sky_horizon_b;
 
 void craft_render_set_fog(bool on) { s_fog_enabled = on; }
+void craft_render_set_clouds(bool on) { s_clouds_enabled = on; }
+bool craft_render_get_clouds(void) { return s_clouds_enabled; }
 float craft_render_sun_y(void) { return s_sun_y; }
 
 /* Recompute the sky / brightness lookup for the new sun position.
@@ -502,7 +505,7 @@ void craft_render_strip(const CraftCamera *cam, uint16_t *fb,
             uint8_t z_q = 255;
             if (!h.hit) {
                 out = sky_at(py);
-                out = cloud_overlay(out, cam->pos, dir);
+                if (s_clouds_enabled) out = cloud_overlay(out, cam->pos, dir);
                 /* zbuf sky = far sentinel (255 default). */
             } else {
                 const uint16_t *tex = craft_block_texture(h.blk, h.face);

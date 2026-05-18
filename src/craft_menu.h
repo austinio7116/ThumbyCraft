@@ -29,6 +29,8 @@ typedef enum {
     CRAFT_MENU_RESULT_INVENTORY,   /* enter inventory sub-screen (Phase 17) */
     CRAFT_MENU_RESULT_INVERT_Y,    /* toggle player.invert_y */
     CRAFT_MENU_RESULT_MUSIC,       /* toggle background music */
+    CRAFT_MENU_RESULT_MUSIC_VOL,   /* slider; left/right ±10% */
+    CRAFT_MENU_RESULT_SFX_VOL,     /* slider; left/right ±10% */
     CRAFT_MENU_RESULT_GAME_MODE,   /* toggle creative <-> survival */
     CRAFT_MENU_RESULT_CRAFT,       /* enter 3×3 crafting sub-page */
     CRAFT_MENU_RESULT_RECIPES,     /* enter recipe-book sub-page */

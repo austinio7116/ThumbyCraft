@@ -500,6 +500,12 @@ void craft_world_clear(void) {
     craft_world_dirty = 1;
 }
 
+void craft_world_reset_mods(void) {
+    memset(s_mods, 0, sizeof s_mods);
+    s_mod_count = 0;
+    s_dirty_q_n = 0;
+}
+
 /* Fill the entire window using craft_gen_column (column-batched)
  * + per-cell mod overrides. Roughly 100× faster than the original
  * per-cell loop because the tree-scan no longer happens once per Y. */

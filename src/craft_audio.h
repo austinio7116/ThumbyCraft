@@ -39,7 +39,17 @@ void craft_audio_set_ambient(float gain);
  * defaults off so the caller must opt in. */
 void craft_audio_music_enable(bool on);
 bool craft_audio_music_is_enabled(void);
-void craft_audio_music_set_volume(float vol);   /* 0..1, default 0.5 */
+/* Music + SFX bus volumes. Range 0.0 (silent) to 1.0 (unity).
+ * Default 1.0 for both. Anything above unity clips on the hard-clamp. */
+void  craft_audio_music_set_volume(float vol);
+float craft_audio_music_get_volume(void);
+void  craft_audio_sfx_set_volume(float vol);
+float craft_audio_sfx_get_volume(void);
+/* Player altitude (0..1, where 0 = bottom of world, 1 = top). Drives
+ * the per-loop pitch shift: deep = bright/high pitches, sky = deep/low.
+ * The shift is re-rolled each music loop with ±a few semitones of
+ * jitter, so the same area still varies between loops. */
+void craft_audio_music_set_altitude(float y_norm);
 void craft_audio_music_tick(float dt);          /* call per game frame */
 void craft_audio_music_set_sun(float sun_y);    /* +1 noon, -1 midnight — picks day vs night style */
 

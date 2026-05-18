@@ -35,6 +35,8 @@ static const MenuItem ITEMS[] = {
     { "Toggle fly",    CRAFT_MENU_RESULT_FLY_TOGGLE, true  },
     { "Invert Y",      CRAFT_MENU_RESULT_INVERT_Y,   false },
     { "Music",         CRAFT_MENU_RESULT_MUSIC,      false },
+    { "Music vol",     CRAFT_MENU_RESULT_MUSIC_VOL,  false },
+    { "SFX vol",       CRAFT_MENU_RESULT_SFX_VOL,    false },
     { "New world",     CRAFT_MENU_RESULT_NEW_WORLD,  true  },
     { "Settings",      CRAFT_MENU_RESULT_SETTINGS,   true  },
 };
@@ -188,17 +190,42 @@ static void scroll_to_keep_visible(int sel, int total, int visible, int *scroll)
 }
 
 static CraftMenuResult tick_main_page(const CraftInput *in, const CraftPlayer *p) {
-    bool dpad_now = in->up || in->down;
+    /* Slider items respond to LEFT/RIGHT for direct ±10% adjustment;
+     * the change is applied here so the result-dispatch path doesn't
+     * have to thread direction info to the caller. */
+    const MenuItem *cur = &ITEMS[s_sel];
+    bool is_slider = (cur->result == CRAFT_MENU_RESULT_MUSIC_VOL) ||
+                     (cur->result == CRAFT_MENU_RESULT_SFX_VOL);
+    bool nav_now    = in->up || in->down;
+    bool adjust_now = is_slider && (in->left || in->right);
+    bool dpad_now   = nav_now || adjust_now;
+
+    int slider_step = 0;
     if (dpad_now && !s_dpad_was_pressed) {
-        if (in->up)   s_sel = (s_sel + ITEM_COUNT - 1) % ITEM_COUNT;
-        if (in->down) s_sel = (s_sel + 1) % ITEM_COUNT;
+        if (in->up)    s_sel = (s_sel + ITEM_COUNT - 1) % ITEM_COUNT;
+        if (in->down)  s_sel = (s_sel + 1) % ITEM_COUNT;
+        if (adjust_now) slider_step = in->right ? +1 : -1;
         s_dpad_repeat_t = DPAD_INITIAL_DELAY;
     } else if (dpad_now) {
         s_dpad_repeat_t -= 1.0f / 30.0f;
         if (s_dpad_repeat_t <= 0.0f) {
             if (in->up)   s_sel = (s_sel + ITEM_COUNT - 1) % ITEM_COUNT;
             if (in->down) s_sel = (s_sel + 1) % ITEM_COUNT;
+            if (adjust_now) slider_step = in->right ? +1 : -1;
             s_dpad_repeat_t = DPAD_REPEAT;
+        }
+    }
+    if (slider_step) {
+        if (cur->result == CRAFT_MENU_RESULT_MUSIC_VOL) {
+            float v = craft_audio_music_get_volume() + 0.10f * slider_step;
+            if (v < 0.0f) v = 0.0f;
+            if (v > 1.0f) v = 1.0f;
+            craft_audio_music_set_volume(v);
+        } else { /* SFX_VOL */
+            float v = craft_audio_sfx_get_volume() + 0.10f * slider_step;
+            if (v < 0.0f) v = 0.0f;
+            if (v > 1.0f) v = 1.0f;
+            craft_audio_sfx_set_volume(v);
         }
     }
     s_dpad_was_pressed = dpad_now;
@@ -959,6 +986,23 @@ static void draw_main_page(uint16_t *fb, const CraftPlayer *p) {
                             (p->mode == CRAFT_MODE_SURVIVAL)
                                 ? rgb565(255, 140, 100)
                                 : rgb565(140, 200, 255));
+        } else if (ITEMS[i].result == CRAFT_MENU_RESULT_MUSIC_VOL ||
+                   ITEMS[i].result == CRAFT_MENU_RESULT_SFX_VOL) {
+            float v = (ITEMS[i].result == CRAFT_MENU_RESULT_MUSIC_VOL)
+                          ? craft_audio_music_get_volume()
+                          : craft_audio_sfx_get_volume();
+            int pct = (int)(v * 100.0f + 0.5f);
+            char buf[8];
+            int n = 0;
+            if (pct >= 100) { buf[n++] = '0' + (pct / 100); pct %= 100; buf[n++] = '0' + (pct / 10); buf[n++] = '0' + (pct % 10); }
+            else if (pct >= 10) { buf[n++] = '0' + (pct / 10); buf[n++] = '0' + (pct % 10); }
+            else { buf[n++] = '0' + pct; }
+            buf[n++] = '%';
+            buf[n] = '\0';
+            int sw = craft_font_width(buf);
+            craft_font_draw(fb, buf, x0 + panel_w - sw - 6, item_y,
+                            is_sel ? rgb565(120, 220, 255)
+                                   : rgb565(180, 180, 200));
         }
         item_y += 10;
     }

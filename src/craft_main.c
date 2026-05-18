@@ -77,7 +77,7 @@ void craft_main_init(uint16_t *fb, uint32_t seed) {
      * want zone-based ambient layers later. */
     craft_audio_set_ambient(0.0f);
     craft_audio_music_enable(true);
-    craft_audio_music_set_volume(0.5f);
+    craft_audio_music_set_volume(1.0f);
     /* Window-loaded around the world origin; spawn point picks a
      * grass tile inside the initial window. */
     craft_world_load_around(0, 0, seed);
@@ -218,6 +218,22 @@ static void handle_menu_result(CraftMenuResult r) {
 
             uint32_t ns = next_seed();
             s_seed = ns;
+
+            /* Re-key the flash chunk store so records from the prior
+             * world are rejected, AND clear in-SRAM state that's
+             * keyed by world coords (mods, chests, furnaces, water,
+             * drops, particles). Without this, the previous world's
+             * starter chest + any player edits would re-apply on top
+             * of the new procedural terrain — that's the "chest in
+             * the sky" / accumulating-chests behaviour. */
+            craft_chunk_store_init(ns);
+            craft_world_reset_mods();
+            craft_chests_init();
+            craft_furnace_init();
+            craft_water_init();
+            craft_drops_init();
+            craft_particles_init();
+
             craft_world_load_around(0, 0, ns);
             Vec3 sp = craft_gen_spawn();
             craft_player_init(&s_player, sp);
@@ -293,6 +309,7 @@ void craft_main_step(const CraftInput *in, float dt, int fps) {
     craft_water_tick(dt);
     craft_mobs_day_night_tick(dt, craft_render_sun_y(), &s_player);
     craft_audio_music_set_sun(craft_render_sun_y());
+    craft_audio_music_set_altitude(s_player.cam.pos.y / (float)CRAFT_WORLD_Y);
     craft_audio_music_tick(dt);
     craft_blocks_animate_water(s_world_time);
     if (s_player.request_menu) {
@@ -379,6 +396,7 @@ void craft_main_tick(const CraftInput *in, float dt) {
     craft_water_tick(dt);
     craft_mobs_day_night_tick(dt, craft_render_sun_y(), &s_player);
     craft_audio_music_set_sun(craft_render_sun_y());
+    craft_audio_music_set_altitude(s_player.cam.pos.y / (float)CRAFT_WORLD_Y);
     craft_audio_music_tick(dt);
     craft_blocks_animate_water(s_world_time);
     if (s_player.request_menu) {

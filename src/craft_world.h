@@ -108,6 +108,11 @@ void craft_world_chunks_force_persist_window(void);
  * into one stutter on window shift / Save. */
 void craft_world_persist_tick(void);
 
+/* Wipe in-SRAM mod hash + pending dirty queue. Called by NEW_WORLD
+ * after re-keying the chunk store so a stale entry from the previous
+ * world can't survive the regen. */
+void craft_world_reset_mods(void);
+
 /* Get/set use *absolute world coordinates*. Out-of-window get
  * returns BLK_AIR (the renderer treats that as sky-equivalent at
  * window edge); out-of-window set still records in the mod table

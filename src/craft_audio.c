@@ -110,8 +110,8 @@ static int     s_delay_pos;
  * each note's release contributes a long decaying smear that fills
  * the gaps between notes and gives the perceived sustain Debussy's
  * piano writing relies on. Feedback at 0.55 yields a ~3-4 s tail. */
-#define REVERB_WET    0.38f
-#define REVERB_FEED   0.45f
+#define REVERB_WET    0.28f
+#define REVERB_FEED   0.30f
 
 static float freq_to_inc(float hz) {
     return hz / (float)CRAFT_AUDIO_RATE;
@@ -340,19 +340,103 @@ void craft_audio_set_ambient(float g) {
 }
 
 /* --- Music ------------------------------------------------------- */
+static void reroll_pitch_shift(void);
+
+/* Playback direction: +1 = forwards, -1 = reverse. Re-rolled at every
+ * loop wrap so each pass through the sequence is its own coin flip. */
+static int      s_music_dir = +1;
+static uint32_t s_music_rng = 0xBADF00Du;
+
+/* Position the cursor at real-time offset `t` (within [0, period)) and
+ * fast-forward next_idx past any events that should have already fired
+ * for the current direction — without this the catch-up loop inside
+ * music_tick would dump every prior note in one frame. */
+static void music_seek_to(float t) {
+    s_music.seq_t = t;
+    if (s_music_dir > 0) {
+        s_music.next_idx = 0;
+        while (s_music.next_idx < CDL_SEQ_LEN &&
+               cdl_seq[s_music.next_idx].t < t) {
+            s_music.next_idx++;
+        }
+    } else {
+        s_music.next_idx = CDL_SEQ_LEN - 1;
+        while (s_music.next_idx >= 0 &&
+               (CDL_SEQ_PERIOD - cdl_seq[s_music.next_idx].t) < t) {
+            s_music.next_idx--;
+        }
+    }
+}
+
+/* Pick a new direction + a new starting offset within the loop. */
+static void reroll_dir_and_start(bool random_start) {
+    s_music_rng = s_music_rng * 1103515245u + 12345u;
+    s_music_dir = (s_music_rng & 0x100u) ? -1 : +1;
+    float t0 = 0.0f;
+    if (random_start) {
+        s_music_rng = s_music_rng * 1103515245u + 12345u;
+        float u = (float)((s_music_rng >> 8) & 0xFFFFu) / 65535.0f;
+        t0 = u * CDL_SEQ_PERIOD;
+    }
+    music_seek_to(t0);
+}
+
 void craft_audio_music_enable(bool on) {
     s_music.enabled = on;
     if (on) {
-        s_music.seq_t    = 0.0f;
-        s_music.next_idx = 0;
         if (!s_sine_ready) sine_init();
+        reroll_dir_and_start(true);
+        reroll_pitch_shift();
     }
 }
 bool craft_audio_music_is_enabled(void) { return s_music.enabled; }
 void craft_audio_music_set_volume(float v) {
     if (v < 0) v = 0;
-    if (v > 1) v = 1;
+    if (v > 1.0f) v = 1.0f;
     s_music.target_gain = v;
+}
+float craft_audio_music_get_volume(void) { return s_music.target_gain; }
+
+static float s_sfx_gain = 1.0f;
+void craft_audio_sfx_set_volume(float v) {
+    if (v < 0) v = 0;
+    if (v > 1.0f) v = 1.0f;
+    s_sfx_gain = v;
+}
+float craft_audio_sfx_get_volume(void) { return s_sfx_gain; }
+
+/* Semitone transpose for the CDL music track. Randomised at every loop
+ * wrap, biased by player altitude — deep underground = bright/crystal
+ * (high semitones), high mountains = deep/calm (low semitones).
+ * Range 0..24 (= up to +2 octaves); multiplier 2^(n/12) precomputed
+ * so the note-trigger path is just a multiply. Top note (~1 kHz) at
+ * +24 = ~4 kHz, safely under 11 kHz Nyquist. */
+static int      s_pitch_semis = 0;
+static float    s_pitch_mult  = 1.0f;
+static float    s_alt_norm    = 0.5f;        /* 0=deep, 1=top of world */
+static uint32_t s_pitch_rng   = 0xC0FFEEu;
+
+void craft_audio_music_set_altitude(float y_norm) {
+    if (y_norm < 0.0f) y_norm = 0.0f;
+    if (y_norm > 1.0f) y_norm = 1.0f;
+    s_alt_norm = y_norm;
+}
+
+/* Pick a fresh pitch shift for the next loop. Centre is a narrow
+ * band that slides with altitude (deep = high, sky = low); jitter is
+ * wide so adjacent altitudes share most of their pitch range and
+ * height nudges rather than dictates the result. */
+static void reroll_pitch_shift(void) {
+    s_pitch_rng = s_pitch_rng * 1664525u + 1013904223u;
+    int   jitter = (int)((s_pitch_rng >> 16) & 0x3Fu) - 32;   /* -32..+31 */
+    if (jitter > 5)  jitter = 5;
+    if (jitter < -5) jitter = -5;
+    float center = 5.0f + (1.0f - s_alt_norm) * 14.0f;        /* 5..19 */
+    int   n      = (int)(center + 0.5f) + jitter;
+    if (n < 0)  n = 0;
+    if (n > 24) n = 24;
+    s_pitch_semis = n;
+    s_pitch_mult  = powf(2.0f, (float)n / 12.0f);
 }
 
 /* Exponential envelope: per-sample coef chosen so that the envelope
@@ -430,8 +514,12 @@ static int alloc_music_voice(void) {
 
 static void fire_cdl_event(const CDLNote *n) {
     int voice = alloc_music_voice();
+    float shifted[4];
+    int nh = (int)n->n_hz;
+    if (nh > 4) nh = 4;
+    for (int i = 0; i < nh; i++) shifted[i] = n->hz[i] * s_pitch_mult;
     trigger_music_voice(voice,
-                        n->hz, (int)n->n_hz,
+                        shifted, nh,
                         n->vel,
                         n->attack,
                         n->sustain,
@@ -446,17 +534,32 @@ void craft_audio_music_tick(float dt) {
     s_music.t     += dt;
     s_music.seq_t += dt;
 
-    /* Fire every event whose time has arrived. */
-    while (s_music.next_idx < CDL_SEQ_LEN &&
-           cdl_seq[s_music.next_idx].t <= s_music.seq_t) {
-        fire_cdl_event(&cdl_seq[s_music.next_idx]);
-        s_music.next_idx++;
+    /* Fire every event whose time has arrived. In forward mode events
+     * fire when cdl_seq[i].t <= seq_t and i marches up; in reverse mode
+     * we mirror the time axis (each event's effective trigger is
+     * period − t) and i marches down. */
+    if (s_music_dir > 0) {
+        while (s_music.next_idx < CDL_SEQ_LEN &&
+               cdl_seq[s_music.next_idx].t <= s_music.seq_t) {
+            fire_cdl_event(&cdl_seq[s_music.next_idx]);
+            s_music.next_idx++;
+        }
+    } else {
+        while (s_music.next_idx >= 0 &&
+               (CDL_SEQ_PERIOD - cdl_seq[s_music.next_idx].t) <= s_music.seq_t) {
+            fire_cdl_event(&cdl_seq[s_music.next_idx]);
+            s_music.next_idx--;
+        }
     }
 
-    /* Loop the sequence — wrap back to the start once the period ends. */
+    /* Loop the sequence — wrap back to the start once the period ends.
+     * Re-roll direction and pitch so each loop is its own surprise; do
+     * NOT randomise the start point on wrap (that's reserved for game
+     * start / new world via music_enable). */
     if (s_music.seq_t >= CDL_SEQ_PERIOD) {
         s_music.seq_t -= CDL_SEQ_PERIOD;
-        s_music.next_idx = 0;
+        reroll_dir_and_start(false);
+        reroll_pitch_shift();
     }
 
     float target = s_music.target_gain;
@@ -482,7 +585,13 @@ static inline float voice_sample(Voice *v) {
                 break;
             case ENV_RELEASE:
                 v->gain *= v->release_coef;
-                if (v->gain < 0.0005f) { v->on = false; v->gain = 0.0f; }
+                /* Lower cutoff than before — at 0.0005 the snap-to-zero
+                 * produced a sample-level step of ~16 / 32767 = 1.5 dB
+                 * which is an audible micro-click per voice-end. With
+                 * the 6-voice pool firing many voice-ends per minute,
+                 * those clicks added up to perceived crackle. 0.00005
+                 * is below the int16 quantisation noise floor. */
+                if (v->gain < 0.00005f) { v->on = false; v->gain = 0.0f; }
                 break;
             default:
                 v->on = false;
@@ -491,7 +600,7 @@ static inline float voice_sample(Voice *v) {
         }
     } else {
         v->gain *= v->gain_dec;
-        if (v->gain < 0.0005f) v->on = false;
+        if (v->gain < 0.00005f) v->on = false;
     }
 
     /* Waveform — sine voices may have multiple oscillators (chord
@@ -551,27 +660,34 @@ int craft_audio_render(int16_t *out, int n) {
         s_delay_ring[s_delay_pos] = (int16_t)(feedback_sample * 32767.0f);
         s_delay_pos = (s_delay_pos + 1) & DELAY_MASK;
 
-        /* SFX voices direct (no reverb). */
+        /* SFX voices direct (no reverb), scaled by sfx volume bus. */
         float sfx_mix = 0.0f;
         for (int j = SFX_VOICE_FIRST; j <= SFX_VOICE_LAST; j++) {
             if (voices[j].on) sfx_mix += voice_sample(&voices[j]);
         }
+        sfx_mix *= s_sfx_gain;
 
         /* Ambient noise — quieter than v1. */
         float noise = ((int32_t)(xs(&ambient_state) & 0xFFFF) - 32768) / 32768.0f;
         ambient_lp += (noise - ambient_lp) * 0.03f;
 
         float mix = music_dry + wet * REVERB_WET + sfx_mix + ambient_lp * ambient_gain;
-        /* Low-shelf bass boost — extracts the low band with a one-pole
-         * LP (~350 Hz corner) and adds it back at +6 dB. Compensates
-         * for the PWM speaker's natural roll-off below ~300 Hz so the
-         * bass register becomes audible without transposing notes
-         * away from their intended pitch. */
-        static float s_bass_lp;
-        s_bass_lp += (mix - s_bass_lp) * 0.10f;   /* alpha ≈ 350 Hz @ 22050 */
-        mix += s_bass_lp * 1.0f;
-        mix *= 2.4f;
-        mix = mix / sqrtf(1.0f + mix * mix);
+        /* Bass shelf removed. The soft-clipper's intermodulation
+         * products (difference frequencies of the parallel thirds —
+         * |349-415|=66 Hz, |698-830|=132 Hz etc.) land squarely in
+         * the bass band, and the shelf was amplifying them as
+         * audible low-frequency rumble. The music itself carries
+         * almost no energy below 200 Hz so there's no real bass
+         * being suppressed by removing the boost. */
+        /* Gold-standard pipeline: linear sum + hard clamp, no soft-
+         * clip, no boost. The soft-clipper's nonlinearity was
+         * generating all the audible IMD; replacing it with a hard
+         * clamp means the signal is mathematically linear for
+         * everything below ±1, with rare hard-clip events only on
+         * the loudest peaks (same approach the pure-sine reference
+         * WAV uses, which sounded clean to the user). */
+        if (mix >  1.0f) mix =  1.0f;
+        if (mix < -1.0f) mix = -1.0f;
         /* Output scale: 32000 ≈ 98% of int16 max. */
         out[i] = (int16_t)(mix * 32000.0f);
     }

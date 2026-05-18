@@ -56,6 +56,12 @@ CraftRayHit craft_render_pick(const CraftCamera *cam);
 /* Toggle distance fog on/off (perf knob — fog adds ~5% per pixel). */
 void craft_render_set_fog(bool on);
 
+/* Toggle the procedural cloud overlay on/off. When off, sky pixels
+ * are pure gradient — cheaper, and avoids the bilinear-noise cost
+ * for users who don't want the cloud texture. */
+void craft_render_set_clouds(bool on);
+bool craft_render_get_clouds(void);
+
 /* Drive the day/night cycle. `world_time` is seconds since world
  * start (or current cycle position — wraps every 240 s by the
  * convention craft_main uses). Updates sun position, sky colours,
