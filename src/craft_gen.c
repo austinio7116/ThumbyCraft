@@ -109,19 +109,9 @@ static float flatland_factor(int x, int z, uint32_t seed) {
     return (n - 0.55f) / 0.23f;
 }
 
-/* River strength in [0, 1] using Minecraft-style edge detection on
- * a VERY low-frequency noise (0.003 → features span ~300 blocks so
- * the river traces a long winding path instead of disconnected
- * stubs). Where the noise sits within a narrow band on either side
- * of 0.5, we get a river — strength tapers from 1 at the centre to
- * 0 at the edges, giving deep mid-channel and shallow banks. */
-static float river_strength(int x, int z, uint32_t seed) {
-    float n = fbm((float)x * 0.003f, (float)z * 0.003f, seed ^ 0x7E417A11u);
-    float dist = fabsf(n - 0.5f);
-    const float band = 0.055f;            /* river half-width in noise units */
-    if (dist >= band) return 0.0f;
-    return 1.0f - dist / band;            /* 1 = centre, 0 = bank edge */
-}
+/* River shape is inlined in height_at — see below. The two
+ * concentric zones (channel + bank slope) share the same noise
+ * sample, so it's cheaper to compute it once in-place. */
 
 void craft_gen_invalidate_height_cache(void) {
     /* No-op kept for the public API. An earlier 11 KB cache was
@@ -147,25 +137,49 @@ static int height_at(int x, int z, uint32_t seed) {
     float m = mountain_factor(x, z, seed) * (1.0f - f);
     height += (int)(m * 22.0f);
 
-    /* River carving — runs anywhere the river noise is in band, but
-     * the carve is gated so it can't cut canyons through hills. If
-     * the natural surface is far above water, the river attempt is
-     * silently suppressed; only lowlands (or flatland biomes that
-     * have flattened the terrain to lowland height) get rivers. */
-    if (height <= CRAFT_WATER_LEVEL + 2) {
-        float rs = river_strength(x, z, seed);
-        if (rs > 0.0f && m < 0.2f) {
-            /* Bed depth tapers with river strength: 3 cells at the
-             * centre line, 1 cell at the bank. */
-            int depth = 1 + (int)(rs * 2.5f);
-            if (depth > 3) depth = 3;
-            int river_h = CRAFT_WATER_LEVEL - depth;
-            /* Never drop more than 4 below the natural surface — the
-             * cap prevents the river noise from gouging a deep
-             * trench when it crosses a mildly raised cell. */
-            int min_h = height - 4;
-            if (river_h < min_h) river_h = min_h;
-            if (river_h < height) height = river_h;
+    /* River carving + BANK SLOPE.
+     *
+     * Two concentric zones controlled by the same low-frequency noise:
+     *
+     *   |n − 0.5| < RIVER_HALF (0.055)  — carved channel below water.
+     *     Bed depth tapers 1→3 cells across the half-width.
+     *
+     *   RIVER_HALF ≤ |n − 0.5| < BANK_HALF (0.115) — bank slope.
+     *     Natural terrain is pulled DOWN toward water level
+     *     progressively as we approach the channel edge, eliminating
+     *     the previous sheer cliff between river and bank.
+     *
+     * Both zones gate on mountain_factor < 0.2 (mountains shrug off
+     * rivers) AND natural height ≤ WL+6 (we only slope down terrain
+     * that's already in the river's neighbourhood — true hilly
+     * terrain crossing the river noise simply has no river there). */
+    {
+        float n = fbm((float)x * 0.003f, (float)z * 0.003f,
+                      seed ^ 0x7E417A11u);
+        float dist = fabsf(n - 0.5f);
+        const float river_half = 0.055f;
+        const float bank_half  = 0.115f;
+        if (dist < bank_half && m < 0.2f && height <= CRAFT_WATER_LEVEL + 6) {
+            if (dist < river_half) {
+                /* Carved channel. */
+                float rs = 1.0f - dist / river_half;
+                int depth = 1 + (int)(rs * 2.5f);
+                if (depth > 3) depth = 3;
+                int river_h = CRAFT_WATER_LEVEL - depth;
+                int min_h = height - 4;
+                if (river_h < min_h) river_h = min_h;
+                if (river_h < height) height = river_h;
+            } else {
+                /* Bank slope — lerp height toward WATER_LEVEL as we
+                 * approach the channel edge. bank_t = 0 at the outer
+                 * edge of the bank, 1 at the river edge. */
+                float bank_t = (bank_half - dist) / (bank_half - river_half);
+                int target = CRAFT_WATER_LEVEL;
+                if (height > target) {
+                    int new_h = height - (int)((height - target) * bank_t + 0.5f);
+                    if (new_h < height) height = new_h;
+                }
+            }
         }
     }
 
@@ -680,21 +694,38 @@ void craft_gen_world(uint32_t seed) {
 }
 
 Vec3 craft_gen_spawn(void) {
-    /* Centre of the currently loaded window. */
+    /* Search outward from the window centre for a grass/sand column
+     * with two clear cells of headroom — that's what the player AABB
+     * needs (PLAYER_HEIGHT=1.7 m, so feet at gy+1 and y0..y1 range
+     * covers cells gy+1 and gy+2). Previously we returned the first
+     * grass we found, which let the player spawn under a tree trunk
+     * or inside a hut wall and be permanently stuck. */
     int cx = craft_world_origin_x + CRAFT_WORLD_X / 2;
     int cz = craft_world_origin_z + CRAFT_WORLD_Z / 2;
     for (int radius = 0; radius < CRAFT_WORLD_X / 2; radius++) {
         for (int dz = -radius; dz <= radius; dz++) {
             for (int dx = -radius; dx <= radius; dx++) {
                 int x = cx + dx, z = cz + dz;
+                /* Find topmost grass/sand cell. */
+                int gy = -1;
                 for (int y = CRAFT_WORLD_Y - 2; y > 0; y--) {
                     BlockId blk = craft_world_get(x, y, z);
                     if (blk == BLK_GRASS || blk == BLK_SAND) {
-                        return v3((float)x + 0.5f,
-                                  (float)y + 1.0f + 1.6f,
-                                  (float)z + 0.5f);
+                        gy = y;
+                        break;
                     }
                 }
+                if (gy < 0) continue;
+                /* Headroom check — both cells the player will occupy
+                 * must be non-solid. craft_block_solid lets torches
+                 * and water count as passable; trees, walls, chests
+                 * etc. all block. */
+                BlockId head1 = craft_world_get(x, gy + 1, z);
+                BlockId head2 = craft_world_get(x, gy + 2, z);
+                if (craft_block_solid(head1) || craft_block_solid(head2)) continue;
+                return v3((float)x + 0.5f,
+                          (float)gy + 1.0f + 1.6f,
+                          (float)z + 0.5f);
             }
         }
     }

@@ -13,6 +13,7 @@
 #include "craft_save.h"
 #include "craft_world.h"
 #include "craft_gen.h"
+#include "craft_chunk_store.h"
 
 #include <string.h>
 
@@ -44,96 +45,107 @@ static float getf(const uint8_t *p) {
     uint32_t u = get32(p); float f; memcpy(&f, &u, 4); return f;
 }
 
-#define HEADER_SIZE (4 + 4 + 4 + 4 + 1 + CRAFT_HOTBAR_SLOTS + 12 + 4 + 4 + 4)
+/* Fixed-size record (v2 format).
+ *
+ *   off  size  field
+ *     0     4  magic
+ *     4     4  version
+ *     8     4  seed
+ *    12     1  mode
+ *    13     1  hp
+ *    14     1  hotbar_idx
+ *    15     1  _pad
+ *    16  HOTBAR  hotbar[]                   (= 8 bytes)
+ *   24      4  cam.pos.x
+ *   28      4  cam.pos.y
+ *   32      4  cam.pos.z
+ *   36      4  cam.yaw
+ *   40      4  cam.pitch
+ *   44   N*4  inventory[BLK_COUNT]          (4N bytes)
+ *  END      4  crc32
+ *
+ * BLK_COUNT = 26 today → record size = 44 + 26*4 + 4 = 152 bytes.
+ * Comfortably fits in any sane buffer. */
+#define HDR_OFF_MAGIC      0
+#define HDR_OFF_VERSION    4
+#define HDR_OFF_SEED       8
+#define HDR_OFF_MODE       12
+#define HDR_OFF_HP         13
+#define HDR_OFF_HOTBARIDX  14
+#define HDR_OFF_PAD        15
+#define HDR_OFF_HOTBAR     16
+#define HDR_OFF_CAM        (HDR_OFF_HOTBAR + CRAFT_HOTBAR_SLOTS)
+#define HDR_OFF_INVENTORY  (HDR_OFF_CAM + 5 * 4)
+#define SAVE_RECORD_BYTES  (HDR_OFF_INVENTORY + BLK_COUNT * 4 + 4)
 
 size_t craft_save_serialise(uint32_t seed,
                             const CraftPlayer *p,
                             uint8_t *out, size_t out_cap) {
-    if (out_cap < HEADER_SIZE + 4) return 0;
+    if (out_cap < SAVE_RECORD_BYTES) return 0;
 
-    size_t off = HEADER_SIZE;
-    uint32_t count = 0;
-    for (int y = 0; y < CRAFT_WORLD_Y; y++) {
-        for (int z = 0; z < CRAFT_WORLD_Z; z++) {
-            for (int x = 0; x < CRAFT_WORLD_X; x++) {
-                BlockId base = craft_gen_block_at(x, y, z, seed);
-                BlockId cur  = craft_world_get(x, y, z);
-                if (cur == base) continue;
-                if (off + 4 + 4 > out_cap) return 0;  /* leave room for CRC */
-                uint32_t idx = (uint32_t)(y * CRAFT_WORLD_Z + z) * CRAFT_WORLD_X
-                             + (uint32_t)x;
-                uint32_t pack = (idx & 0x00FFFFFFu) | ((uint32_t)cur << 24);
-                put32(out + off, pack);
-                off += 4;
-                count++;
-            }
-        }
+    put32(out + HDR_OFF_MAGIC,     CRAFT_SAVE_MAGIC);
+    put32(out + HDR_OFF_VERSION,   CRAFT_SAVE_VERSION);
+    put32(out + HDR_OFF_SEED,      seed);
+    out[HDR_OFF_MODE]      = (uint8_t)p->mode;
+    out[HDR_OFF_HP]        = (uint8_t)p->hp;
+    out[HDR_OFF_HOTBARIDX] = (uint8_t)p->hotbar_idx;
+    out[HDR_OFF_PAD]       = 0;
+    for (int i = 0; i < CRAFT_HOTBAR_SLOTS; i++) {
+        out[HDR_OFF_HOTBAR + i] = (uint8_t)p->hotbar[i];
     }
-
-    /* Header. */
-    put32(out + 0,  CRAFT_SAVE_MAGIC);
-    put32(out + 4,  CRAFT_SAVE_VERSION);
-    put32(out + 8,  seed);
-    put32(out + 12, count);
-    out[16] = (uint8_t)p->hotbar_idx;
-    for (int i = 0; i < CRAFT_HOTBAR_SLOTS; i++) out[17 + i] = (uint8_t)p->hotbar[i];
-    int o = 17 + CRAFT_HOTBAR_SLOTS;
-    putf(out + o + 0,  p->cam.pos.x);
-    putf(out + o + 4,  p->cam.pos.y);
-    putf(out + o + 8,  p->cam.pos.z);
-    putf(out + o + 12, p->cam.yaw);
-    putf(out + o + 16, p->cam.pitch);
-    put32(out + o + 20, 0);
-
-    uint32_t c = crc32(out, off);
-    put32(out + off, c);
-    off += 4;
-    return off;
+    putf(out + HDR_OFF_CAM +  0, p->cam.pos.x);
+    putf(out + HDR_OFF_CAM +  4, p->cam.pos.y);
+    putf(out + HDR_OFF_CAM +  8, p->cam.pos.z);
+    putf(out + HDR_OFF_CAM + 12, p->cam.yaw);
+    putf(out + HDR_OFF_CAM + 16, p->cam.pitch);
+    for (int i = 0; i < BLK_COUNT; i++) {
+        put32(out + HDR_OFF_INVENTORY + i * 4, (uint32_t)p->inventory[i]);
+    }
+    uint32_t c = crc32(out, SAVE_RECORD_BYTES - 4);
+    put32(out + SAVE_RECORD_BYTES - 4, c);
+    return SAVE_RECORD_BYTES;
 }
 
 bool craft_save_deserialise(const uint8_t *in, size_t n,
                             uint32_t *out_seed, CraftPlayer *p) {
-    if (n < HEADER_SIZE + 4) return false;
-    if (get32(in + 0) != CRAFT_SAVE_MAGIC)   return false;
-    if (get32(in + 4) != CRAFT_SAVE_VERSION) return false;
-    uint32_t stored_crc = get32(in + n - 4);
-    if (crc32(in, n - 4) != stored_crc)      return false;
+    if (n < SAVE_RECORD_BYTES)                return false;
+    if (get32(in + HDR_OFF_MAGIC)   != CRAFT_SAVE_MAGIC)   return false;
+    if (get32(in + HDR_OFF_VERSION) != CRAFT_SAVE_VERSION) return false;
+    uint32_t stored_crc = get32(in + SAVE_RECORD_BYTES - 4);
+    if (crc32(in, SAVE_RECORD_BYTES - 4) != stored_crc)    return false;
 
-    uint32_t seed  = get32(in + 8);
-    uint32_t count = get32(in + 12);
-    if (HEADER_SIZE + (size_t)count * 4 + 4 > n) return false;
+    uint32_t seed = get32(in + HDR_OFF_SEED);
 
-    /* Re-load the current window from the seed so mods will apply
-     * via the mod table when craft_world_load_around runs. The
-     * existing save format predates infinite world — for now we just
-     * load around (0,0) and the player respawns at the spawn point.
-     * TODO: bump save version and persist player position + full mod
-     * table on save/load. */
-    craft_world_load_around(0, 0, seed);
+    /* CRITICAL: re-init the chunk store with the saved seed BEFORE
+     * world_load_around runs. The chunk store rejects any flash
+     * record whose stored seed doesn't match s_world_seed, so if
+     * boot ran chunk_store_init with a random seed, every saved
+     * chunk would be rejected and the player's edits would appear
+     * lost on reload. */
+    craft_chunk_store_init(seed);
 
-    /* Apply deltas. */
-    size_t off = HEADER_SIZE;
-    for (uint32_t i = 0; i < count; i++) {
-        uint32_t pack = get32(in + off);
-        off += 4;
-        uint32_t idx = pack & 0x00FFFFFFu;
-        uint8_t  blk = (uint8_t)(pack >> 24);
-        if (idx < CRAFT_WORLD_VOXELS) {
-            craft_world_blocks[idx] = blk;
-        }
-    }
-    craft_world_dirty = 0;
-
-    /* Hotbar + camera. */
-    p->hotbar_idx = in[16];
+    /* Restore player state. */
+    p->mode       = (CraftGameMode)in[HDR_OFF_MODE];
+    p->hp         = in[HDR_OFF_HP];
+    p->hotbar_idx = in[HDR_OFF_HOTBARIDX];
     if (p->hotbar_idx >= CRAFT_HOTBAR_SLOTS) p->hotbar_idx = 0;
-    for (int i = 0; i < CRAFT_HOTBAR_SLOTS; i++) p->hotbar[i] = in[17 + i];
-    int o = 17 + CRAFT_HOTBAR_SLOTS;
-    p->cam.pos.x = getf(in + o + 0);
-    p->cam.pos.y = getf(in + o + 4);
-    p->cam.pos.z = getf(in + o + 8);
-    p->cam.yaw   = getf(in + o + 12);
-    p->cam.pitch = getf(in + o + 16);
+    for (int i = 0; i < CRAFT_HOTBAR_SLOTS; i++) {
+        p->hotbar[i] = (BlockId)in[HDR_OFF_HOTBAR + i];
+    }
+    p->cam.pos.x = getf(in + HDR_OFF_CAM +  0);
+    p->cam.pos.y = getf(in + HDR_OFF_CAM +  4);
+    p->cam.pos.z = getf(in + HDR_OFF_CAM +  8);
+    p->cam.yaw   = getf(in + HDR_OFF_CAM + 12);
+    p->cam.pitch = getf(in + HDR_OFF_CAM + 16);
+    for (int i = 0; i < BLK_COUNT; i++) {
+        p->inventory[i] = (int)get32(in + HDR_OFF_INVENTORY + i * 4);
+    }
+
+    /* World comes back via the chunk store — load_around regenerates
+     * the procedural terrain around the player's restored position
+     * and restore_window pulls in any persisted mods. */
+    craft_world_load_around((int)p->cam.pos.x, (int)p->cam.pos.z, seed);
+
     if (out_seed) *out_seed = seed;
     return true;
 }

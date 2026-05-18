@@ -135,10 +135,12 @@ bool craft_main_load(const uint8_t *blob, size_t n) {
 }
 
 size_t craft_main_save(uint8_t *out, size_t cap) {
-    /* Flush window mods to flash too — even if the player saved the
-     * blob to flash separately, the chunk store gives them an
-     * unbounded edit-history per chunk that survives power-cycles. */
-    craft_world_chunks_persist_window();
+    /* Force-persist every chunk in the window that has mods. The
+     * regular dirty-queue drain only catches chunks marked dirty;
+     * the force variant also re-persists chunks that have mods in
+     * the hash but aren't currently dirty, guaranteeing the chunk
+     * store on flash matches the in-memory state at save time. */
+    craft_world_chunks_force_persist_window();
     return craft_save_serialise(s_seed, &s_player, out, cap);
 }
 
@@ -204,17 +206,25 @@ static void handle_menu_result(CraftMenuResult r) {
             break;
         }
         case CRAFT_MENU_RESULT_NEW_WORLD: {
+            /* Capture settings BEFORE player_init memsets them away. The
+             * previous version of this code captured AFTER init and so
+             * always read the freshly-zeroed defaults — that's why
+             * settings appeared to reset on every new world. */
+            CraftGameMode mode_was = s_player.mode;
+            bool          inv_was  = s_player.invert_y;
+            bool          music_was = craft_audio_music_is_enabled();
+
             uint32_t ns = next_seed();
             s_seed = ns;
             craft_world_load_around(0, 0, ns);
             Vec3 sp = craft_gen_spawn();
             craft_player_init(&s_player, sp);
             craft_mobs_spawn_around(sp, ns);
-            /* Preserve current mode + invert preference across regen. */
-            CraftGameMode mode_was = s_player.mode;
-            bool inv_was = s_player.invert_y;
+
+            /* Restore preserved settings. */
             craft_player_set_mode(&s_player, mode_was);
             s_player.invert_y = inv_was;
+            craft_audio_music_enable(music_was);
             if (mode_was == CRAFT_MODE_SURVIVAL)
                 craft_mobs_spawn_hostile(&s_player, 3);
             s_world_time = 60.0f;

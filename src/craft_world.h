@@ -94,6 +94,14 @@ int craft_world_mod_count(void);
 void craft_world_chunks_persist_window(void);
 void craft_world_chunks_restore_window(void);
 
+/* Stronger variant for the Save path: persists EVERY in-window chunk
+ * that has any mods in the SRAM hash, not just chunks marked dirty.
+ * Slower than chunks_persist_window (one flash op per modified chunk
+ * regardless of dirty state) but guarantees the chunk store reflects
+ * the current in-memory state — belt-and-braces against any case
+ * where the dirty queue might have got out of sync. */
+void craft_world_chunks_force_persist_window(void);
+
 /* Drain at most one dirty chunk from the in-SRAM queue to flash.
  * Cheap no-op when nothing is dirty. Call from the main loop on a
  * timer so flash hitches spread across seconds instead of bundling

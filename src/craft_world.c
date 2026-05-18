@@ -225,6 +225,43 @@ void craft_world_persist_tick(void) {
     dirty_drop_at(0);
 }
 
+void craft_world_chunks_force_persist_window(void) {
+    /* Walk the mod hash and gather the set of (cx, cz) keys whose
+     * mods sit inside the current window. Then persist each one
+     * exactly once. This catches the case where a chunk's mods are
+     * in the SRAM hash but the chunk is no longer in the dirty queue
+     * (because a previous persist drained it) AND the on-flash copy
+     * could be stale for some other reason. Save path uses this for
+     * extra safety. */
+    int cx0, cx1, cz0, cz1;
+    window_chunk_range(&cx0, &cx1, &cz0, &cz1);
+    /* Bitset of unique chunks (max 8x8 = 64 chunks in a 64x64 window). */
+    int n_x = cx1 - cx0 + 1;
+    int n_z = cz1 - cz0 + 1;
+    /* Cap at 64 — bigger windows would need a different structure. */
+    if (n_x * n_z > 64) return;
+    bool present[64] = {0};
+    for (int i = 0; i < MOD_TABLE_SIZE; i++) {
+        ModEntry *e = &s_mods[i];
+        if (!(e->flags & 1)) continue;
+        int cx = chunk_of(e->wx);
+        int cz = chunk_of(e->wz);
+        if (cx < cx0 || cx > cx1 || cz < cz0 || cz > cz1) continue;
+        int idx = (cz - cz0) * n_x + (cx - cx0);
+        present[idx] = true;
+    }
+    for (int dz = 0; dz < n_z; dz++) {
+        for (int dx = 0; dx < n_x; dx++) {
+            if (!present[dz * n_x + dx]) continue;
+            int cx = cx0 + dx;
+            int cz = cz0 + dz;
+            persist_chunk(cx, cz);
+            int q = dirty_find(cx, cz);
+            if (q >= 0) dirty_drop_at(q);
+        }
+    }
+}
+
 void craft_world_chunks_restore_window(void) {
     int cx0, cx1, cz0, cz1;
     window_chunk_range(&cx0, &cx1, &cz0, &cz1);

@@ -1,27 +1,33 @@
 /*
  * ThumbyCraft — world persistence.
  *
- * Format (all little-endian):
+ * Format v2 (all little-endian, single fixed-size record):
  *   magic        u32  'TCFT' = 0x54434654
- *   version      u32  current = 1
- *   seed         u32  for terrain regeneration
- *   block_count  u32  number of delta entries that follow
+ *   version      u32  current = 2
+ *   seed         u32  identifies the world
+ *   mode         u8
+ *   hp           u8
  *   hotbar_idx   u8
+ *   _pad         u8
  *   hotbar[8]    u8
  *   cam_pos      3 × f32
  *   cam_yaw      f32
  *   cam_pitch    f32
- *   reserved     u32 (padding)
- *   delta[N]     each: u32 packed_xyz | (block << 24)
- *   crc32        u32  over header + payload
+ *   inventory[BLK_COUNT] u32   — counts per item id
+ *   crc32        u32  over everything above
  *
- * Deltas are computed against a freshly regenerated terrain from the
- * same seed — only blocks the player actually changed are written.
- * That keeps saves tiny (a few KB) and fits in one flash sector.
+ * Why no world deltas?  The chunk store (craft_chunk_store.c) already
+ * persists per-chunk player edits to flash on every dirty-chunk
+ * drain, so the world survives power cycles without involving the
+ * save blob. craft_main_save flushes the dirty queue before this
+ * serialise runs so it's always coherent. The save blob is now just
+ * the player's transient state + seed for regen.
  *
- * The platform layer (host or device) is responsible for the actual
- * read/write of the blob; the engine just hands it bytes via the
- * craft_save_sink interface.
+ * The OLD v1 format tried to record every changed cell in a 4 KB
+ * buffer; with the infinite-world refactor the bookkeeping coords
+ * stopped matching and every cell looked "modified" → buffer
+ * overflow → permanent "Save failed". v2 fixes this by sidestepping
+ * the problem: there's no world data in the save at all.
  */
 #ifndef CRAFT_SAVE_H
 #define CRAFT_SAVE_H
@@ -31,7 +37,7 @@
 #include "craft_player.h"
 
 #define CRAFT_SAVE_MAGIC   0x54434654u
-#define CRAFT_SAVE_VERSION 1u
+#define CRAFT_SAVE_VERSION 2u
 #define CRAFT_SAVE_MAX_BYTES (4096 - 32)   /* one flash sector minus header */
 
 /* Returns bytes written into `out` (≤ out_cap), or 0 on error.
