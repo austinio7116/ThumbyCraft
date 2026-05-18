@@ -100,6 +100,17 @@ const char *craft_block_name(BlockId blk) {
         case BLK_LEVER_ON:        return "lever (on)";
         case BLK_REDSTONE_WIRE:
         case BLK_REDSTONE_WIRE_ON: return "wire";
+        case BLK_LADDER:        return "ladder";
+        case BLK_TRAPDOOR_OFF:
+        case BLK_TRAPDOOR_ON:   return "trapdoor";
+        case BLK_DOOR_OFF:
+        case BLK_DOOR_ON:       return "door";
+        case BLK_PRESSURE_PAD:  return "pressure pad";
+        case BLK_PISTON_OFF:
+        case BLK_PISTON_ON:     return "piston";
+        case BLK_PISTON_ARM:    return "piston arm";
+        case BLK_TNT:           return "TNT";
+        case BLK_TNT_FUSED:     return "TNT!";
         default:                return "?";
     }
 }
@@ -832,38 +843,223 @@ void craft_blocks_build_textures(void) {
     solid_block_tex(BLK_DIAMOND_BLOCK,  130, 240, 250);
     solid_block_tex(BLK_REDSTONE_BLOCK, 210,  40,  40);
 
-    /* LEVER — cobble-style base square with a small wood handle.
-     * The OFF and ON variants flip the handle to one side or the
-     * other and tint it brighter when ON. Same texture on every
-     * face for simplicity (a real lever has facing, but voxel cells
-     * with rotation get expensive). */
+    /* LEVER — high-contrast: dark stone base plate at the bottom,
+     * a chunky wood handle running diagonally to a bright ball-tip.
+     * ON state mirrors the handle and lights the tip bright red so
+     * it reads as "pulled". Same texture on every face. */
     for (int on = 0; on < 2; on++) {
         BlockId blk = on ? BLK_LEVER_ON : BLK_LEVER_OFF;
         uint16_t *side = &craft_textures[(blk * 3 + 1) * CRAFT_TEX_PIXELS];
-        speckle(side, 0x1EFE7u + on * 7u, 105, 105, 115, 35);
-        /* Base plate, rows 11..15. */
-        for (int y = 11; y < CRAFT_TEX_SIZE; y++) {
+        /* Dark stone backdrop. */
+        for (int i = 0; i < CRAFT_TEX_PIXELS; i++) side[i] = rgb565(60, 60, 70);
+        /* Mounting plate — solid grey block at the bottom centre. */
+        uint16_t plate    = rgb565(160, 160, 170);
+        uint16_t plate_d  = rgb565(95, 95, 105);
+        for (int y = 10; y < CRAFT_TEX_SIZE; y++) {
             for (int x = 3; x < 13; x++) {
-                side[y * CRAFT_TEX_SIZE + x] = rgb565(90, 90, 100);
+                bool edge = (y == 10 || y == 15 || x == 3 || x == 12);
+                side[y * CRAFT_TEX_SIZE + x] = edge ? plate_d : plate;
             }
         }
-        /* Handle — wood diagonal, leaning one way OFF, the other ON,
-         * tip brighter in ON state. */
+        /* Handle — 3-wide diagonal stalk to make it readable. */
+        uint16_t wood   = rgb565(190, 130, 60);
         uint16_t wood_d = rgb565(110, 75, 35);
-        uint16_t wood   = rgb565(150, 100, 50);
-        uint16_t tip    = on ? rgb565(255, 60, 40) : rgb565(50, 30, 30);
-        for (int i = 0; i < 7; i++) {
-            int yy = 11 - i;
-            int xx = on ? (7 + i / 2) : (7 - i / 2);
+        uint16_t tip    = on ? rgb565(255, 80, 60) : rgb565(220, 220, 230);
+        uint16_t tip_d  = on ? rgb565(170, 30, 20) : rgb565(150, 150, 160);
+        for (int i = 0; i < 6; i++) {
+            int yy = 10 - i;
+            int xx = on ? (7 + i) : (7 - i);
             if (yy < 0 || yy >= CRAFT_TEX_SIZE) continue;
-            if (xx < 0 || xx >= CRAFT_TEX_SIZE) continue;
-            side[yy * CRAFT_TEX_SIZE + xx] = (i & 1) ? wood : wood_d;
+            for (int dx = -1; dx <= 1; dx++) {
+                int x = xx + dx;
+                if (x < 0 || x >= CRAFT_TEX_SIZE) continue;
+                side[yy * CRAFT_TEX_SIZE + x] = (dx == 0) ? wood : wood_d;
+            }
         }
-        int tx = on ? 10 : 4;
+        /* Ball tip — 3×3 cluster at the top of the handle. */
+        int tx = on ? 12 : 2;
         int ty = 4;
-        side[ty * CRAFT_TEX_SIZE + tx] = tip;
-        if (tx + 1 < CRAFT_TEX_SIZE) side[ty * CRAFT_TEX_SIZE + tx + 1] = tip;
-        if (ty + 1 < CRAFT_TEX_SIZE) side[(ty + 1) * CRAFT_TEX_SIZE + tx] = tip;
+        for (int dy = -1; dy <= 1; dy++) {
+            for (int dx = -1; dx <= 1; dx++) {
+                int x = tx + dx, y = ty + dy;
+                if ((unsigned)x >= CRAFT_TEX_SIZE) continue;
+                if ((unsigned)y >= CRAFT_TEX_SIZE) continue;
+                bool centre = (dx == 0 && dy == 0);
+                side[y * CRAFT_TEX_SIZE + x] = centre ? tip : tip_d;
+            }
+        }
+        memcpy(&craft_textures[(blk * 3 + 0) * CRAFT_TEX_PIXELS],
+               side, sizeof(uint16_t) * CRAFT_TEX_PIXELS);
+        memcpy(&craft_textures[(blk * 3 + 2) * CRAFT_TEX_PIXELS],
+               side, sizeof(uint16_t) * CRAFT_TEX_PIXELS);
+    }
+
+    /* LADDER — wooden rails + rungs on a dark backdrop (rendered as
+     * a 2D vertical sprite via craft_torches, like wire). */
+    {
+        uint16_t *side = &craft_textures[(BLK_LADDER * 3 + 1) * CRAFT_TEX_PIXELS];
+        for (int i = 0; i < CRAFT_TEX_PIXELS; i++) side[i] = rgb565(20, 20, 25);
+        uint16_t rail = rgb565(140, 90, 40);
+        uint16_t rung = rgb565(170, 115, 55);
+        for (int y = 0; y < CRAFT_TEX_SIZE; y++) {
+            side[y * CRAFT_TEX_SIZE + 3] = rail;
+            side[y * CRAFT_TEX_SIZE + 12] = rail;
+        }
+        for (int ry = 1; ry < CRAFT_TEX_SIZE; ry += 4) {
+            for (int x = 4; x < 12; x++) {
+                side[ry * CRAFT_TEX_SIZE + x] = rung;
+            }
+        }
+        memcpy(&craft_textures[(BLK_LADDER * 3 + 0) * CRAFT_TEX_PIXELS],
+               side, sizeof(uint16_t) * CRAFT_TEX_PIXELS);
+        memcpy(&craft_textures[(BLK_LADDER * 3 + 2) * CRAFT_TEX_PIXELS],
+               side, sizeof(uint16_t) * CRAFT_TEX_PIXELS);
+    }
+
+    /* TRAPDOOR — horizontal wood planks with iron strapping. Open
+     * variant uses the same texture (we only render closed cells as
+     * cubes; open cells are passable + invisible for v1). */
+    for (int variant = 0; variant < 2; variant++) {
+        BlockId blk = (variant == 0) ? BLK_TRAPDOOR_OFF : BLK_TRAPDOOR_ON;
+        uint16_t *side = &craft_textures[(blk * 3 + 1) * CRAFT_TEX_PIXELS];
+        uint16_t plank = rgb565(150, 100, 50);
+        uint16_t plank_d = rgb565(110, 70, 35);
+        uint16_t iron = rgb565(90, 90, 100);
+        for (int y = 0; y < CRAFT_TEX_SIZE; y++) {
+            for (int x = 0; x < CRAFT_TEX_SIZE; x++) {
+                uint16_t c = ((y / 3) & 1) ? plank : plank_d;
+                side[y * CRAFT_TEX_SIZE + x] = c;
+            }
+        }
+        for (int x = 1; x < 15; x++) {
+            side[2  * CRAFT_TEX_SIZE + x] = iron;
+            side[13 * CRAFT_TEX_SIZE + x] = iron;
+        }
+        memcpy(&craft_textures[(blk * 3 + 0) * CRAFT_TEX_PIXELS],
+               side, sizeof(uint16_t) * CRAFT_TEX_PIXELS);
+        memcpy(&craft_textures[(blk * 3 + 2) * CRAFT_TEX_PIXELS],
+               side, sizeof(uint16_t) * CRAFT_TEX_PIXELS);
+    }
+
+    /* DOOR — vertical plank face with hinge band on one side.
+     * Closed = solid wall; open = passable (same texture either way). */
+    for (int variant = 0; variant < 2; variant++) {
+        BlockId blk = (variant == 0) ? BLK_DOOR_OFF : BLK_DOOR_ON;
+        uint16_t *side = &craft_textures[(blk * 3 + 1) * CRAFT_TEX_PIXELS];
+        uint16_t plank = rgb565(155, 110, 60);
+        uint16_t plank_d = rgb565(110, 75, 35);
+        uint16_t iron = rgb565(85, 85, 95);
+        uint16_t knob = rgb565(220, 200, 60);
+        for (int y = 0; y < CRAFT_TEX_SIZE; y++) {
+            for (int x = 0; x < CRAFT_TEX_SIZE; x++) {
+                uint16_t c = ((x / 3) & 1) ? plank : plank_d;
+                side[y * CRAFT_TEX_SIZE + x] = c;
+            }
+        }
+        /* Hinge strap on left edge. */
+        for (int y = 0; y < CRAFT_TEX_SIZE; y++) {
+            side[y * CRAFT_TEX_SIZE + 0] = iron;
+            side[y * CRAFT_TEX_SIZE + 1] = iron;
+        }
+        /* Knob. */
+        side[7 * CRAFT_TEX_SIZE + 13] = knob;
+        side[8 * CRAFT_TEX_SIZE + 13] = knob;
+        memcpy(&craft_textures[(blk * 3 + 0) * CRAFT_TEX_PIXELS],
+               side, sizeof(uint16_t) * CRAFT_TEX_PIXELS);
+        memcpy(&craft_textures[(blk * 3 + 2) * CRAFT_TEX_PIXELS],
+               side, sizeof(uint16_t) * CRAFT_TEX_PIXELS);
+    }
+
+    /* PRESSURE PAD — flat stone slab, rendered as 2D sprite via the
+     * torch system (same path as wires). */
+    {
+        uint16_t *side = &craft_textures[(BLK_PRESSURE_PAD * 3 + 1) * CRAFT_TEX_PIXELS];
+        for (int i = 0; i < CRAFT_TEX_PIXELS; i++) side[i] = rgb565(20, 20, 25);
+        uint16_t pad = rgb565(150, 150, 160);
+        uint16_t pad_d = rgb565(110, 110, 120);
+        for (int y = 4; y < 13; y++) {
+            for (int x = 2; x < 14; x++) {
+                bool edge = (y == 4 || y == 12 || x == 2 || x == 13);
+                side[y * CRAFT_TEX_SIZE + x] = edge ? pad_d : pad;
+            }
+        }
+        memcpy(&craft_textures[(BLK_PRESSURE_PAD * 3 + 0) * CRAFT_TEX_PIXELS],
+               side, sizeof(uint16_t) * CRAFT_TEX_PIXELS);
+        memcpy(&craft_textures[(BLK_PRESSURE_PAD * 3 + 2) * CRAFT_TEX_PIXELS],
+               side, sizeof(uint16_t) * CRAFT_TEX_PIXELS);
+    }
+
+    /* PISTON — iron-banded stone block with a bright square on the
+     * face that pushes (one side gets a different texture, but for
+     * v1 every face shows the same — orientation goes through the
+     * lever pipeline later). Active variant brightens the face. */
+    for (int variant = 0; variant < 2; variant++) {
+        BlockId blk = (variant == 0) ? BLK_PISTON_OFF : BLK_PISTON_ON;
+        uint16_t *side = &craft_textures[(blk * 3 + 1) * CRAFT_TEX_PIXELS];
+        speckle(side, 0xD15700u + variant, 120, 120, 130, 35);
+        uint16_t band = rgb565(85, 85, 100);
+        for (int x = 0; x < CRAFT_TEX_SIZE; x++) {
+            side[1 * CRAFT_TEX_SIZE + x]  = band;
+            side[14 * CRAFT_TEX_SIZE + x] = band;
+        }
+        for (int y = 0; y < CRAFT_TEX_SIZE; y++) {
+            side[y * CRAFT_TEX_SIZE + 1]  = band;
+            side[y * CRAFT_TEX_SIZE + 14] = band;
+        }
+        uint16_t face = variant ? rgb565(220, 180, 90) : rgb565(170, 130, 60);
+        for (int y = 5; y < 11; y++) {
+            for (int x = 5; x < 11; x++) {
+                side[y * CRAFT_TEX_SIZE + x] = face;
+            }
+        }
+        memcpy(&craft_textures[(blk * 3 + 0) * CRAFT_TEX_PIXELS],
+               side, sizeof(uint16_t) * CRAFT_TEX_PIXELS);
+        memcpy(&craft_textures[(blk * 3 + 2) * CRAFT_TEX_PIXELS],
+               side, sizeof(uint16_t) * CRAFT_TEX_PIXELS);
+    }
+
+    /* PISTON_ARM — thinner extension shape; same iron band. */
+    {
+        uint16_t *side = &craft_textures[(BLK_PISTON_ARM * 3 + 1) * CRAFT_TEX_PIXELS];
+        for (int i = 0; i < CRAFT_TEX_PIXELS; i++) side[i] = rgb565(140, 140, 150);
+        uint16_t band = rgb565(85, 85, 100);
+        for (int y = 0; y < CRAFT_TEX_SIZE; y++) {
+            side[y * CRAFT_TEX_SIZE + 0] = band;
+            side[y * CRAFT_TEX_SIZE + 15] = band;
+        }
+        for (int x = 0; x < CRAFT_TEX_SIZE; x++) {
+            side[0 * CRAFT_TEX_SIZE + x] = band;
+            side[15 * CRAFT_TEX_SIZE + x] = band;
+        }
+        memcpy(&craft_textures[(BLK_PISTON_ARM * 3 + 0) * CRAFT_TEX_PIXELS],
+               side, sizeof(uint16_t) * CRAFT_TEX_PIXELS);
+        memcpy(&craft_textures[(BLK_PISTON_ARM * 3 + 2) * CRAFT_TEX_PIXELS],
+               side, sizeof(uint16_t) * CRAFT_TEX_PIXELS);
+    }
+
+    /* TNT — red-and-white striped block. Fused variant adds a glowing
+     * core and brighter stripes to read as "about to explode". */
+    for (int variant = 0; variant < 2; variant++) {
+        BlockId blk = (variant == 0) ? BLK_TNT : BLK_TNT_FUSED;
+        uint16_t *side = &craft_textures[(blk * 3 + 1) * CRAFT_TEX_PIXELS];
+        uint16_t red    = variant ? rgb565(255, 100, 80) : rgb565(200, 50, 40);
+        uint16_t white  = variant ? rgb565(255, 255, 200) : rgb565(220, 220, 220);
+        uint16_t letter = rgb565(20, 20, 25);
+        for (int y = 0; y < CRAFT_TEX_SIZE; y++) {
+            for (int x = 0; x < CRAFT_TEX_SIZE; x++) {
+                bool stripe = (y >= 4 && y < 12);
+                side[y * CRAFT_TEX_SIZE + x] = stripe ? red : white;
+            }
+        }
+        /* "TNT" letters — 3 dark verticals on the red band. */
+        for (int y = 6; y < 10; y++) {
+            side[y * CRAFT_TEX_SIZE + 4]  = letter;
+            side[y * CRAFT_TEX_SIZE + 8]  = letter;
+            side[y * CRAFT_TEX_SIZE + 12] = letter;
+        }
+        side[5  * CRAFT_TEX_SIZE + 8] = letter;     /* T crossbar tops */
+        side[5  * CRAFT_TEX_SIZE + 4] = letter;
+        side[5  * CRAFT_TEX_SIZE + 12] = letter;
         memcpy(&craft_textures[(blk * 3 + 0) * CRAFT_TEX_PIXELS],
                side, sizeof(uint16_t) * CRAFT_TEX_PIXELS);
         memcpy(&craft_textures[(blk * 3 + 2) * CRAFT_TEX_PIXELS],

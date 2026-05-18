@@ -47,6 +47,17 @@ void craft_main_draw_hud(int reported_fps);
 /* Accessor for the seed (e.g. for save). */
 uint32_t craft_main_seed(void);
 
+/* Pointer to the 64×64 RGB565 thumbnail captured the last time the
+ * player opened the pause menu, or NULL if no menu has opened yet
+ * this session. Used by the save layer when committing a slot save. */
+const uint16_t *craft_main_thumb(void);
+
+/* Save slot the next save/load request operates on. The slot picker
+ * (menu) and title page (boot) set this before raising the request
+ * flag; the platform polls both. Default is slot 0. */
+void craft_main_set_save_slot(int slot);
+int  craft_main_save_slot(void);
+
 /* Accessor for the player (HUD draw + save). */
 const CraftPlayer *craft_main_player(void);
 

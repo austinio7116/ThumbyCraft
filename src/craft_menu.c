@@ -13,6 +13,8 @@
 #include "craft_hud.h"
 #include "craft_furnace.h"
 #include "craft_chests.h"
+#include "craft_save.h"
+#include "craft_main.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -45,15 +47,18 @@ static const MenuItem ITEMS[] = {
 /* Menu pages: main pause list + sub-pages. B from a sub-page returns
  * to main; MENU closes the whole menu. */
 typedef enum {
-    PAGE_MAIN      = 0,
-    PAGE_INVENTORY = 1,
-    PAGE_CRAFT     = 2,
-    PAGE_RECIPES   = 3,
-    PAGE_CONTROLS  = 4,
-    PAGE_FURNACE   = 5,
-    PAGE_CHEST     = 6,
+    PAGE_MAIN        = 0,
+    PAGE_INVENTORY   = 1,
+    PAGE_CRAFT       = 2,
+    PAGE_RECIPES     = 3,
+    PAGE_CONTROLS    = 4,
+    PAGE_FURNACE     = 5,
+    PAGE_CHEST       = 6,
+    PAGE_SLOT_PICKER = 7,
 } MenuPage;
 static MenuPage s_page;
+static int     s_picker_sel;        /* 0..3, slot selection on slot picker */
+static bool    s_picker_is_load;    /* true: load, false: save */
 static bool  s_open;
 static int   s_sel;
 static int   s_scroll;          /* first visible item on main page */
@@ -183,6 +188,22 @@ static int     s_inv_scroll;          /* topmost row index */
 static void inv_rebuild_visible(const CraftPlayer *p) {
     s_inv_visible_count = 0;
     for (int b = 1; b < BLK_COUNT; b++) {
+        /* Hide ON-state variants — they're set by redstone, never
+         * by the player, so the inventory only needs one entry per
+         * pair (lever, wire, door, trapdoor, piston, TNT). The
+         * mining-drop table already converts ON → OFF on break. */
+        if (b == BLK_LEVER_ON           ||
+            b == BLK_REDSTONE_WIRE_ON   ||
+            b == BLK_DOOR_ON            ||
+            b == BLK_TRAPDOOR_ON        ||
+            b == BLK_PISTON_ON          ||
+            b == BLK_PISTON_ARM         ||
+            b == BLK_TNT_FUSED          ||
+            b == BLK_REDSTONE_WIRE) {
+            /* BLK_REDSTONE_WIRE also hidden because the inventory
+             * item is BLK_REDSTONE dust — wire is the placed form. */
+            continue;
+        }
         bool owned = (p->mode == CRAFT_MODE_CREATIVE) || (p->inventory[b] > 0);
         if (!owned) continue;
         s_inv_visible[s_inv_visible_count++] = (BlockId)b;
@@ -276,6 +297,20 @@ static CraftMenuResult tick_main_page(const CraftInput *in, const CraftPlayer *p
             s_page = PAGE_CONTROLS;
             s_controls_scroll = 0;
             s_dpad_was_pressed = in->up || in->down;
+            return CRAFT_MENU_RESULT_NONE;
+        }
+        if (item->result == CRAFT_MENU_RESULT_SAVE) {
+            s_page = PAGE_SLOT_PICKER;
+            s_picker_is_load = false;
+            s_picker_sel = craft_main_save_slot();   /* default to current */
+            s_dpad_was_pressed = in->up || in->down || in->left || in->right;
+            return CRAFT_MENU_RESULT_NONE;
+        }
+        if (item->result == CRAFT_MENU_RESULT_LOAD) {
+            s_page = PAGE_SLOT_PICKER;
+            s_picker_is_load = true;
+            s_picker_sel = craft_main_save_slot();
+            s_dpad_was_pressed = in->up || in->down || in->left || in->right;
             return CRAFT_MENU_RESULT_NONE;
         }
         if (item->close_on_confirm) s_open = false;
@@ -501,6 +536,52 @@ static const CraftRecipe RECIPES[] = {
     { { BLK_AIR, BLK_STICK,  BLK_AIR,
         BLK_AIR, BLK_COBBLE, BLK_AIR,
         BLK_AIR, BLK_AIR,    BLK_AIR }, BLK_LEVER_OFF, 1, "Lever" },
+
+    /* --- Ladder (3 sticks in an H pattern → 3 ladders, like MC) --- */
+    { { BLK_STICK, BLK_AIR,   BLK_STICK,
+        BLK_STICK, BLK_STICK, BLK_STICK,
+        BLK_STICK, BLK_AIR,   BLK_STICK }, BLK_LADDER, 3, "Ladders" },
+
+    /* --- Trapdoor (6 planks in a 2-row plate, vanilla shape) --- */
+    { { BLK_AIR,   BLK_AIR,   BLK_AIR,
+        BLK_PLANK, BLK_PLANK, BLK_PLANK,
+        BLK_PLANK, BLK_PLANK, BLK_PLANK }, BLK_TRAPDOOR_OFF, 2, "Trapdoor" },
+
+    /* --- Door (6 planks in a 2-column slab, gives 1 wood door) --- */
+    { { BLK_PLANK, BLK_PLANK, BLK_AIR,
+        BLK_PLANK, BLK_PLANK, BLK_AIR,
+        BLK_PLANK, BLK_PLANK, BLK_AIR }, BLK_DOOR_OFF, 1, "Door" },
+
+    /* --- Pressure pad (2 stones, simplified from MC's 2-wood layout) --- */
+    { { BLK_AIR,   BLK_AIR, BLK_AIR,
+        BLK_AIR,   BLK_AIR, BLK_AIR,
+        BLK_STONE, BLK_STONE, BLK_AIR }, BLK_PRESSURE_PAD, 1, "Pressure pad" },
+
+    /* --- Piston (planks roof, cobble + iron + cobble body, redstone
+     * + cobble base — close to vanilla). */
+    { { BLK_PLANK,  BLK_PLANK,      BLK_PLANK,
+        BLK_COBBLE, BLK_IRON_INGOT, BLK_COBBLE,
+        BLK_COBBLE, BLK_REDSTONE,   BLK_COBBLE }, BLK_PISTON_OFF, 1, "Piston" },
+
+    /* --- TNT (4 sand + 5 gunpowder; we don't have gunpowder, sub
+     * redstone dust for explosive payload — diverges from MC but
+     * uses materials the player can already farm). */
+    { { BLK_SAND,     BLK_REDSTONE, BLK_SAND,
+        BLK_REDSTONE, BLK_REDSTONE, BLK_REDSTONE,
+        BLK_SAND,     BLK_REDSTONE, BLK_SAND }, BLK_TNT, 1, "TNT" },
+
+    /* --- Bow (6 sticks in MC's diagonal-with-string layout; we
+     * substitute extra sticks for string since we don't have it). */
+    { { BLK_AIR,   BLK_STICK, BLK_STICK,
+        BLK_STICK, BLK_AIR,   BLK_STICK,
+        BLK_AIR,   BLK_STICK, BLK_STICK }, BLK_BOW, 1, "Bow" },
+
+    /* --- Arrow (iron tip + stick shaft; gives 4 per craft like MC).
+     * MC uses flint+stick+feather → 4 arrows; we sub iron for flint
+     * and skip feathers since we don't farm chickens for them yet. */
+    { { BLK_IRON_INGOT, BLK_AIR, BLK_AIR,
+        BLK_STICK,      BLK_AIR, BLK_AIR,
+        BLK_STICK,      BLK_AIR, BLK_AIR }, BLK_ARROW, 4, "Arrows" },
 };
 #define RECIPE_COUNT ((int)(sizeof(RECIPES)/sizeof(RECIPES[0])))
 
@@ -757,6 +838,128 @@ static const char *CONTROLS_LINES[] = {
 #define CONTROLS_LINE_COUNT ((int)(sizeof(CONTROLS_LINES)/sizeof(CONTROLS_LINES[0])))
 #define CONTROLS_VISIBLE 14
 
+/* Forward declarations of draw primitives defined further down. */
+static void rect(uint16_t *fb, int x, int y, int w, int h, uint16_t c);
+
+/* --- Save / load slot picker ---------------------------------- */
+static CraftMenuResult tick_slot_picker_page(const CraftInput *in) {
+    bool dpad_now = in->up || in->down || in->left || in->right;
+    if (dpad_now && !s_dpad_was_pressed) {
+        int r = s_picker_sel / 2, c = s_picker_sel % 2;
+        if (in->left)  c = (c + 1) & 1;
+        if (in->right) c = (c + 1) & 1;
+        if (in->up)    r = (r + 1) & 1;
+        if (in->down)  r = (r + 1) & 1;
+        s_picker_sel = r * 2 + c;
+        s_dpad_repeat_t = DPAD_INITIAL_DELAY;
+    } else if (dpad_now) {
+        s_dpad_repeat_t -= 1.0f / 30.0f;
+        if (s_dpad_repeat_t <= 0.0f) {
+            int r = s_picker_sel / 2, c = s_picker_sel % 2;
+            if (in->left)  c = (c + 1) & 1;
+            if (in->right) c = (c + 1) & 1;
+            if (in->up)    r = (r + 1) & 1;
+            if (in->down)  r = (r + 1) & 1;
+            s_picker_sel = r * 2 + c;
+            s_dpad_repeat_t = DPAD_REPEAT;
+        }
+    }
+    s_dpad_was_pressed = dpad_now;
+
+    bool b_just_released    = !in->b    && s_input_prev_b;
+    bool menu_just_released = !in->menu && s_input_prev_menu;
+    s_input_prev_a    = in->a;
+    s_input_prev_b    = in->b;
+    s_input_prev_menu = in->menu;
+    if (menu_just_released) { s_open = false; return CRAFT_MENU_RESULT_RESUME; }
+    if (b_just_released)    { s_page = PAGE_MAIN; return CRAFT_MENU_RESULT_NONE; }
+    if (in->a_pressed) {
+        /* Load picker: only accept if slot has data. Save picker:
+         * always allowed (overwriting is the point of the prompt). */
+        if (s_picker_is_load && !craft_save_slot_used(s_picker_sel)) {
+            craft_menu_toast("Empty slot");
+            return CRAFT_MENU_RESULT_NONE;
+        }
+        craft_main_set_save_slot(s_picker_sel);
+        s_open = false;
+        return s_picker_is_load ? CRAFT_MENU_RESULT_LOAD
+                                : CRAFT_MENU_RESULT_SAVE;
+    }
+    return CRAFT_MENU_RESULT_NONE;
+}
+
+/* Upscale a 32×32 RGB565 thumbnail into a `size`×`size` framebuffer
+ * patch via nearest-neighbor. Used by both the slot picker and the
+ * title page. */
+static void draw_thumb_scaled(uint16_t *fb, int x, int y, int size,
+                              const uint16_t *thumb) {
+    if (!thumb || size <= 0) return;
+    for (int dy = 0; dy < size; dy++) {
+        int sy = (dy * CRAFT_SAVE_THUMB_DIM) / size;
+        for (int dx = 0; dx < size; dx++) {
+            int sx = (dx * CRAFT_SAVE_THUMB_DIM) / size;
+            int fx = x + dx, fy = y + dy;
+            if ((unsigned)fx >= CRAFT_FB_W) continue;
+            if ((unsigned)fy >= CRAFT_FB_H) continue;
+            fb[fy * CRAFT_FB_W + fx] =
+                thumb[sy * CRAFT_SAVE_THUMB_DIM + sx];
+        }
+    }
+}
+
+static void draw_slot_picker_page(uint16_t *fb) {
+    int panel_w = 120, panel_h = 116;
+    int x0 = (CRAFT_FB_W - panel_w) / 2;
+    int y0 = 2;
+    rect(fb, x0, y0, panel_w, panel_h, rgb565(30, 30, 40));
+    rect(fb, x0,             y0,                panel_w, 1, rgb565(150, 150, 180));
+    rect(fb, x0,             y0 + panel_h - 1,  panel_w, 1, rgb565(150, 150, 180));
+    rect(fb, x0,             y0,                1, panel_h, rgb565(150, 150, 180));
+    rect(fb, x0 + panel_w-1, y0,                1, panel_h, rgb565(150, 150, 180));
+
+    const char *title = s_picker_is_load ? "Load slot" : "Save slot";
+    int tw = craft_font_width(title);
+    craft_font_draw(fb, title, x0 + (panel_w - tw) / 2, y0 + 3, 0xFFFF);
+    rect(fb, x0 + 6, y0 + 10, panel_w - 12, 1, rgb565(80, 80, 100));
+
+    int tile = 44, gap = 4;
+    int grid_x = x0 + (panel_w - (2 * tile + gap)) / 2;
+    int grid_y = y0 + 16;
+    for (int s = 0; s < 4; s++) {
+        int r = s / 2, c = s % 2;
+        int tx = grid_x + c * (tile + gap);
+        int ty = grid_y + r * (tile + gap);
+        const uint16_t *thumb = craft_save_slot_thumb(s);
+        uint16_t tile_bg = thumb ? rgb565(40, 40, 50) : 0;
+        rect(fb, tx, ty, tile, tile, tile_bg);
+        if (thumb) {
+            draw_thumb_scaled(fb, tx + 2, ty + 2, tile - 4, thumb);
+        } else {
+            const char *lbl = "Empty";
+            int lw = craft_font_width(lbl);
+            craft_font_draw(fb, lbl, tx + (tile - lw) / 2,
+                            ty + tile / 2 - 3, rgb565(140, 140, 160));
+        }
+        if (s == s_picker_sel) {
+            uint16_t hi = 0xFFFF;
+            rect(fb, tx - 1, ty - 1,        tile + 2, 1, hi);
+            rect(fb, tx - 1, ty + tile,     tile + 2, 1, hi);
+            rect(fb, tx - 1, ty - 1,        1, tile + 2, hi);
+            rect(fb, tx + tile, ty - 1,     1, tile + 2, hi);
+        }
+        /* Slot number badge in the corner. */
+        char nb[4]; snprintf(nb, sizeof nb, "%d", s + 1);
+        craft_font_draw(fb, nb, tx + 2, ty + 2, 0xFFFF);
+    }
+
+    /* Hint line at the bottom. */
+    const char *hint = s_picker_is_load ? "A:load  B:back"
+                                        : "A:save  B:back";
+    int hw = craft_font_width(hint);
+    craft_font_draw(fb, hint, x0 + (panel_w - hw) / 2,
+                    y0 + panel_h - 9, rgb565(180, 180, 200));
+}
+
 static CraftMenuResult tick_controls_page(const CraftInput *in) {
     bool dpad_now = in->up || in->down;
     if (dpad_now && !s_dpad_was_pressed) {
@@ -825,17 +1028,25 @@ static CraftMenuResult tick_furnace_page(const CraftInput *in,
                                          CraftPlayer *pmut) {
     CraftFurnace *f = craft_furnace_at(s_furnace_wx, s_furnace_wy, s_furnace_wz);
 
-    /* D-pad — left/right cycle the three slot positions. */
+    /* D-pad — up/down swaps INPUT(0) ↔ FUEL(1); left/right swaps
+     * INPUT(0) ↔ OUTPUT(2). FUEL and OUTPUT are reached by going
+     * through INPUT. */
     bool dpad_now = in->up || in->down || in->left || in->right;
     if (dpad_now && !s_dpad_was_pressed) {
-        if (in->left  && s_furnace_sel > 0) s_furnace_sel--;
-        if (in->right && s_furnace_sel < 2) s_furnace_sel++;
+        if (in->up || in->down) {
+            s_furnace_sel = (s_furnace_sel == 1) ? 0 : 1;
+        } else if (in->left || in->right) {
+            s_furnace_sel = (s_furnace_sel == 2) ? 0 : 2;
+        }
         s_dpad_repeat_t = DPAD_INITIAL_DELAY;
     } else if (dpad_now) {
         s_dpad_repeat_t -= 1.0f / 30.0f;
         if (s_dpad_repeat_t <= 0.0f) {
-            if (in->left  && s_furnace_sel > 0) s_furnace_sel--;
-            if (in->right && s_furnace_sel < 2) s_furnace_sel++;
+            if (in->up || in->down) {
+                s_furnace_sel = (s_furnace_sel == 1) ? 0 : 1;
+            } else if (in->left || in->right) {
+                s_furnace_sel = (s_furnace_sel == 2) ? 0 : 2;
+            }
             s_dpad_repeat_t = DPAD_REPEAT;
         }
     }
@@ -1022,6 +1233,8 @@ CraftMenuResult craft_menu_tick(const CraftInput *in, const CraftPlayer *p) {
         return tick_furnace_page(in, (CraftPlayer *)p);
     if (s_page == PAGE_CHEST)
         return tick_chest_page(in, (CraftPlayer *)p);
+    if (s_page == PAGE_SLOT_PICKER)
+        return tick_slot_picker_page(in);
     return tick_main_page(in, p);
 }
 
@@ -1644,6 +1857,7 @@ void craft_menu_draw(uint16_t *fb, const CraftPlayer *p) {
     else if (s_page == PAGE_CONTROLS)  draw_controls_page(fb, p);
     else if (s_page == PAGE_FURNACE)   draw_furnace_page(fb, p);
     else if (s_page == PAGE_CHEST)     draw_chest_page(fb, p);
+    else if (s_page == PAGE_SLOT_PICKER) draw_slot_picker_page(fb);
     else                               draw_main_page(fb, p);
     /* Hotbar always visible at full brightness over the dimmed bg
      * so the active-slot indicator stays legible while the player

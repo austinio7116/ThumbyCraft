@@ -10,6 +10,8 @@
 #include "craft_font.h"
 #include "craft_menu.h"
 #include "craft_world.h"
+#include "craft_mobs.h"
+#include <math.h>
 
 #include <stdio.h>
 #include <string.h>
@@ -104,15 +106,66 @@ static void block_swatch(uint16_t *fb, int x, int y, int size, BlockId blk) {
     }
 }
 
-static void crosshair(uint16_t *fb) {
-    int cx = CRAFT_FB_W / 2;
-    int cy = CRAFT_FB_H / 2 - 6;   /* hotbar takes up the bottom 14 px */
-    uint16_t c = 0xFFFF;
+static void crosshair_at(uint16_t *fb, int cx, int cy, uint16_t c) {
     put(fb, cx,     cy,     c);
     put(fb, cx - 2, cy,     c);
     put(fb, cx + 2, cy,     c);
     put(fb, cx,     cy - 2, c);
     put(fb, cx,     cy + 2, c);
+}
+
+/* Project a world-space point onto the framebuffer using the player's
+ * camera basis. Returns true and writes *px/*py if the point is in
+ * front of the camera. Same math as the world raycaster + mob render
+ * use — kept inline here because the HUD only needs one point. */
+static bool project_to_screen(const CraftPlayer *p, Vec3 t,
+                              int *px, int *py) {
+    float cy = cosf(p->cam.yaw),  sye = sinf(p->cam.yaw);
+    float cp = cosf(p->cam.pitch), sp = sinf(p->cam.pitch);
+    Vec3 fwd   = (Vec3){ sye * cp, sp, cy * cp };
+    Vec3 right = (Vec3){ cy, 0.0f, -sye };
+    Vec3 up    = (Vec3){
+        fwd.y * right.z - fwd.z * right.y,
+        fwd.z * right.x - fwd.x * right.z,
+        fwd.x * right.y - fwd.y * right.x
+    };
+    float rx = t.x - p->cam.pos.x;
+    float ry = t.y - p->cam.pos.y;
+    float rz = t.z - p->cam.pos.z;
+    float zf = rx * fwd.x + ry * fwd.y + rz * fwd.z;
+    if (zf <= 0.05f) return false;
+    float tan_h  = tanf(p->cam.fov * 0.5f);
+    float focal_h = (CRAFT_FB_W * 0.5f) / tan_h;
+    float focal_v = (CRAFT_FB_H * 0.5f) / tan_h;
+    float xs = (rx * right.x + ry * right.y + rz * right.z) / zf;
+    float ys = (rx * up.x    + ry * up.y    + rz * up.z   ) / zf;
+    *px = (int)(CRAFT_FB_W * 0.5f + xs * focal_h);
+    *py = (int)(CRAFT_FB_H * 0.5f - ys * focal_v);
+    return true;
+}
+
+static void crosshair(uint16_t *fb, const CraftPlayer *p) {
+    int cx = CRAFT_FB_W / 2;
+    int cy = CRAFT_FB_H / 2 - 6;   /* hotbar takes up the bottom 14 px */
+    uint16_t c = 0xFFFF;
+    /* When drawing the bow with a locked target, project the target
+     * onto the screen and slide the crosshair there so the player
+     * can visualise the aim. Tinted yellow to signal "locked". */
+    if (p->bow_drawing && p->bow_target_mob >= 0 &&
+        craft_mobs[p->bow_target_mob].alive) {
+        const CraftMob *m = &craft_mobs[p->bow_target_mob];
+        Vec3 tgt = { m->pos.x, m->pos.y + 0.5f, m->pos.z };
+        int tx, ty;
+        if (project_to_screen(p, tgt, &tx, &ty)) {
+            if (tx >= 2 && tx < CRAFT_FB_W - 2 &&
+                ty >= 2 && ty < CRAFT_FB_H - 2) {
+                cx = tx;
+                cy = ty;
+                c  = rgb565(255, 220, 70);
+            }
+        }
+    }
+    crosshair_at(fb, cx, cy, c);
 }
 
 void craft_hud_draw_hotbar(uint16_t *fb, const CraftPlayer *p) {
@@ -145,7 +198,7 @@ void craft_hud_draw_hotbar(uint16_t *fb, const CraftPlayer *p) {
 }
 
 void craft_hud_draw(uint16_t *fb, const CraftPlayer *p, int fps) {
-    crosshair(fb);
+    crosshair(fb, p);
     craft_hud_draw_hotbar(fb, p);
 
     /* Re-derive the hotbar geometry locally so the label + count
@@ -171,11 +224,12 @@ void craft_hud_draw(uint16_t *fb, const CraftPlayer *p, int fps) {
         snprintf(buf, sizeof buf, "%d", fps);
         craft_font_draw(fb, buf, CRAFT_FB_W - craft_font_width(buf) - 2, 1, 0xFFE0);
     }
-    /* World position coords (top-right, under the FPS counter). */
+    /* World position coords (top-right, under the FPS counter).
+     * Show X, Y, Z so the player can see how deep they are. */
     {
         char buf[24];
-        snprintf(buf, sizeof buf, "%d,%d",
-                 (int)p->cam.pos.x, (int)p->cam.pos.z);
+        snprintf(buf, sizeof buf, "%d,%d,%d",
+                 (int)p->cam.pos.x, (int)p->cam.pos.y, (int)p->cam.pos.z);
         craft_font_draw(fb, buf,
                         CRAFT_FB_W - craft_font_width(buf) - 2, 8,
                         rgb565(180, 220, 255));
@@ -224,6 +278,14 @@ void craft_hud_draw(uint16_t *fb, const CraftPlayer *p, int fps) {
             craft_font_draw(fb, rs, (CRAFT_FB_W - rw) / 2,
                             CRAFT_FB_H / 2 + 8, 0xFFFF);
         }
+    }
+    /* Boss-spider victory banner — green, mirrored from the death
+     * banner but lasts ~5 s without freezing input. */
+    if (p->win_banner_t > 0.0f) {
+        const char *msg = "YOU WIN!";
+        int w = craft_font_width_2x(msg);
+        craft_font_draw_2x(fb, msg, (CRAFT_FB_W - w) / 2,
+                           CRAFT_FB_H / 2 - 8, rgb565(80, 240, 90));
     }
 
     /* Toast — centred near bottom (above hotbar). */

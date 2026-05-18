@@ -10,8 +10,12 @@ worlds.
 ![screenshot — drop one in `docs/` when you have it](docs/screenshot.png)
 
 ```
-~30 fps  ·  64³ block window over an infinite world  ·  4 hostile + 3 passive mob types
-furnaces + chests + bow combat  ·  drifting clouds  ·  flash-backed buildings  ·  280 MHz dual-core M33
+~30 fps  ·  64³ block window over an infinite world  ·  5 hostile + 3 passive mob types
++ a giant boss spider  ·  redstone circuits, TNT, pistons, doors, ladders, trapdoors
+furnaces + chests + auto-aim bow combat  ·  4-slot save + screenshot title screen
+Debussy Clair de Lune soundtrack — replays in a random key each loop and occasionally
+plays backwards, with pitch sliding toward bright in caves and deep on mountaintops
+drifting clouds  ·  flash-backed buildings  ·  280 MHz dual-core M33
 ```
 
 ---
@@ -24,7 +28,9 @@ A **prebuilt firmware** ships with the repo at the root —
 1. Hold **D-pad DOWN** while powering on the Thumby Color to enter
    BOOTSEL mode — it appears as a USB drive `RPI-RP2350`
 2. Drag `firmware_thumbycraft.uf2` onto the drive
-3. Power-cycle. You're playing.
+3. Power-cycle. You'll see a title screen with up to 4 save slots
+   (showing the screenshot of each saved world) plus a "New World"
+   tile. Pick one and you're in.
 
 To build from source, see [Build](#build) below.
 
@@ -86,16 +92,21 @@ hole you dug is still there.
 - **Drifting clouds** — soft procedural cloud layer scrolling slowly
   east across the sky during the day, turning orange at sunrise and
   sunset
-- **Coal & iron ore** — denser in mountains; mineable with the right
-  pickaxe tier
+- **Ore series** — coal, iron, silver, gold, diamond, redstone.
+  Depth-gated (diamond + redstone deep), denser in mountains.
 
 ### Day & night cycle
 
-A full day is **4 minutes**. The sun arcs across the sky, the sky
-colour shifts, and stars appear at night. Hostile mobs spawn during
-night or in shadows — and **catch fire** in direct sunlight at
-~1 HP / sec, complete with rising flame particles. Be inside or
-shaded by sunrise.
+A full cycle is **5 minutes** — skewed so day occupies 3 minutes and
+night occupies 2 minutes. The sun arcs across the sky, colours shift,
+and stars appear at night. Hostile mobs spawn during night or in
+shadows — and **catch fire** in direct sunlight at ~1 HP / sec, with
+rising flame particles. Be inside or shaded by sunrise.
+
+**First-day grace**: on a freshly-spawned world, no hostile mobs
+appear on the surface until the first sunset. (Caves still spawn them
+from the start — caves are dark.) You get one full day to explore,
+gather, and build a shelter before the night threats begin.
 
 ## Mining & crafting
 
@@ -107,8 +118,13 @@ shaded by sunrise.
 | **Stone** | Wooden pickaxe or better | **Cobblestone** (vanilla rule) |
 | Cobblestone, coal ore | Wooden pickaxe or better | self |
 | Grass | Hands | **Dirt** (vanilla rule) |
-| Iron ore | Stone pickaxe or better | self (smelt for ingot) |
+| Iron ore, silver ore | Stone pickaxe or better | self (smelt for ingot) |
+| Gold ore | Iron pickaxe or better | self (smelt for ingot) |
+| Diamond ore | Iron pickaxe or better | **Diamond gem** (direct drop) |
+| Redstone ore | Iron pickaxe or better | **Redstone dust** (direct drop) |
+| **Storage blocks** (silver/gold/diamond/redstone) | Iron pickaxe or better | self |
 | **Furnace, Chest** | Wooden pickaxe or better | self (chest contents are lost) |
+| **Bedrock** (bottom-most layer y=0) | — | **Indestructible.** Pickaxes refuse with a "ting"; even TNT and creeper explosions skip these cells. |
 
 Hit a block with **A**. If the active hotbar slot has a sword, its
 tier sets your melee damage too (wood / stone / iron = 2 / 3 / 4 HP
@@ -116,31 +132,59 @@ per hit, hands = 1).
 
 ### Crafting
 
-Open **MENU → Craft**. You get a 3×3 shaped grid. Drop blocks into
-cells using the D-pad and **A**, then read the output preview.
+Open **MENU → Craft**. You get a 3×3 shaped grid. Each grid cell
+holds a **stack** with a count. Navigate with D-pad, **A** to place
+the active hotbar item into the selected cell (single press = +1 to
+the stack). **Double-tap A** on a cell to pull every available copy
+of the held resource out of inventory and split it evenly across all
+cells already holding that resource — handy when filling a 3×3
+storage-block recipe. **B** clears a cell. **A on the output** crafts
+once and leaves the grid populated, so repeated A presses keep
+producing while every input cell has stack left. The hotbar shows
+inventory counts during the craft page.
+
 Recipes match canonical Minecraft Java where applicable:
 
 | Output | Recipe |
 |---|---|
 | 4 planks | 1 wood log |
 | 4 sticks | 2 planks vertical |
-| Wood/Stone/Iron pickaxe | 3 head material across top + 2 sticks centre |
-| Wood/Stone/Iron sword | 2 head stacked + 1 stick below |
-| 4 torches | 1 coal + 1 stick |
 | Smooth stone | 4 cobble 2×2 (Thumby densify — see Furnace for vanilla) |
+| **Pickaxes** (wood/stone/iron/silver/gold/diamond) | 3 head material across top + 2 sticks centre |
+| **Swords** (wood/stone/iron/silver/gold/diamond) | 2 head stacked + 1 stick below |
+| **Bow** | 6 sticks in MC's diagonal-with-string shape (we sub sticks for string) |
+| **4 Arrows** | 1 iron ingot tip + 2 stick shafts (no flint/feathers yet) |
+| 4 torches | 1 coal + 1 stick |
 | **Furnace** | 8 cobblestone in a hollow 3×3 ring |
 | **Chest** | 8 planks in a hollow 3×3 ring |
+| **Storage block** (silver/gold/diamond/redstone) | 9 of the material in a 3×3 square |
+| **Lever** | 1 stick on top of 1 cobble |
+| **Redstone wire** | place redstone dust (becomes wire when placed) |
+| **Trapdoor** ×2 | 6 planks in a 2×3 plate |
+| **Door** | 6 planks in a 2-column slab (placed as a 2-cell-tall door) |
+| **Ladder** ×3 | 7 sticks in an H pattern |
+| **Pressure pad** | 2 stones side-by-side |
+| **Piston** | planks roof + cobble/iron/cobble body + cobble/redstone/cobble base |
+| **TNT** | 4 sand + 5 redstone (subs for vanilla gunpowder) |
 
-The recipe book in **MENU → Recipes** shows them all visually.
+The recipe book in **MENU → Recipes** shows them all visually, with
+the input grid + output count side-by-side. Left/right cycles through
+the full list (~33 recipes).
 
 ### Furnace (smelting)
 
 Place a furnace (B), then aim at it and press **B again** to open the
 smelt UI. Three slots:
 
-- **Input** — the raw material (iron ore / sand / cobble)
+- **Input** — any smeltable raw block
 - **Fuel** — coal (80 s burn), wood / plank (15 s), stick (5 s)
 - **Output** — accumulates smelted result
+
+Navigation: **D-pad up/down** swaps the selection between INPUT and
+FUEL. **D-pad left/right** swaps between INPUT and OUTPUT. **A** on
+INPUT/FUEL pushes a stack (up to 8) of the active hotbar item into
+the slot. **A** on OUTPUT pulls the accumulated smelted result back
+into inventory (auto-assigning a free hotbar slot if none holds it).
 
 Smelt time is **10 s per item**. The flame indicator on the left
 fills proportional to remaining fuel; the arrow in the middle fills
@@ -148,7 +192,12 @@ with smelt progress. The furnace ticks while open AND closed — set
 it going and come back later.
 
 Smelt outputs:
-- **Iron ore → Iron ingot** (replaces the in-grid "smelt" hack)
+- **Iron ore → Iron ingot**
+- **Silver ore → Silver ingot**
+- **Gold ore → Gold ingot**
+- **Diamond ore → Diamond** (no pickaxe-tier shortcut needed if you
+  somehow obtained an ore block)
+- **Redstone ore → Redstone dust**
 - **Sand → Glass**
 - **Cobblestone → Smooth stone**
 
@@ -164,8 +213,14 @@ chests still exist as world blocks but show empty when first opened.
 
 ### Tool & sword ladder
 
-Wood → Stone → Iron is the standard progression. Each tier mines
-faster, hits harder, and unlocks the next block type.
+**Wood → Stone → Iron → Silver / Gold → Diamond.** Each tier mines
+faster, hits harder, and unlocks the next block type. Iron picks
+mine gold, diamond, and redstone ores — the silver and gold tiers
+are cosmetic above iron's mining tier (same harvest capability,
+distinct colour), while diamond is the top tier.
+
+Sword damage per hit: wood 2 · stone 3 · iron / silver / gold 4 ·
+**diamond 8** (boss-killer).
 
 ## Combat & mobs
 
@@ -179,21 +234,51 @@ faster, hits harder, and unlocks the next block type.
 - **Creeper** — silent walker; entering 1.8 m range freezes it for a
   **1-second fuse** (visually pulses toward white), then it
   **explodes**: 5 damage within 2.5 m + **destroys nearby blocks**
+- **Boss spider** — giant 3× spider. HP **80**, only takes damage
+  from the **diamond sword** (other weapons flash the hurt animation
+  but deal 0). Spawned by activating a `diamond block` with a
+  redstone circuit (see Redstone section). On death it drops a
+  shower of 9 diamonds and a big green **YOU WIN!** banner pops on
+  screen for 5 s.
 
-All hostiles only spawn **in shadow or at night**. They stay one cell
-away from you (proper Minecraft-style standoff) — they bite from the
+All standard hostiles only spawn **in shadow or at night** — but the
+spawner now ALSO probes random dark cave air pockets (not sky-exposed,
+no torch light), so cave exploration is genuinely dangerous from the
+moment you enter one.
+
+**Mob jumping**: when a hostile is blocked by a 1-block obstacle in
+front of it (and there's clear space above), it hops to keep chasing
+you. The boss spider gets a higher jump (clears 2-block obstacles)
+because its 3× sprite needs the extra height to follow you onto
+ledges.
+
+All hostiles keep one cell of standoff distance — they bite from the
 neighbour block, never enter your cell.
 
-### Bow combat
+### Bow combat (snap auto-aim)
 
-Once you have a bow + arrows (killed a skeleton), put the bow on
-your hotbar and press **A** to fire — an arrow launches forward from
-your chest in the camera direction. Costs 1 arrow per shot.
+Once you have a bow + arrows (killed a skeleton, or crafted from
+iron + sticks), put the bow on your hotbar and **hold A** to enter
+draw mode:
+
+- Yaw **auto-aims** at the nearest hostile within 16 blocks and a
+  ±60° cone — the camera lerps onto the target over ~0.5 s.
+- The **crosshair tracks the locked target** (turns yellow). It's
+  pinned to the mob's chest, so you can see exactly where the lock is.
+- **Pitch stays user-controlled** — D-pad up/down lets you aim
+  vertically for arc shots over walls or to compensate for distance.
+- The bow visibly **draws back** (tilts up and inward) as the draw
+  charges over ~0.4 s.
+- **Release A** to fire. The arrow flies in the camera-forward
+  direction (yaw-locked + your pitch). The crosshair snaps back to
+  centre.
+- Tapping A briefly with the bow does nothing — the bow only fires
+  on release.
 
 **Arrows are recoverable**: any arrow that misses its target —
-embedded in a block, expired in flight, or a skeleton's stray shot
-— drops a collectable arrow item at the landing spot. Walk over it
-to add it back to your inventory.
+embedded in a block, expired in flight, or a skeleton's stray shot —
+drops a collectable arrow item at the landing spot. Walk over it to
+add it back to your inventory.
 
 ### Passive
 
@@ -206,6 +291,89 @@ Anything that lands in the world as a "floating item" — skeleton
 loot, missed arrows — appears as a small spinning cube on the
 ground. Walk within 1.5 m to auto-collect into inventory. Drops
 expire after 90 s if uncollected.
+
+## Redstone circuitry
+
+A small but functional Minecraft-style redstone implementation.
+The propagation tick runs at **5 Hz** with an early-exit when no
+power source exists in the resident window — zero CPU cost when
+your world has no circuits.
+
+### Sources & wire
+
+- **Lever** — placed flat against the surface you aimed at, in any
+  of the 6 cardinal orientations. B-interact toggles between OFF
+  and ON; the ON state emits power into all adjacent cells. Built
+  as a 3D sprite (base plate + handle + ball tip), not a flat
+  texture — visually distinct on walls, ceiling, and floor.
+- **Redstone block** — solid storage block AND a permanent power
+  source. Adjacent wires light up while the block is in place.
+  Wires can also propagate THROUGH redstone blocks, so you can use
+  them as power bridges or always-on triggers.
+- **Redstone wire** — placed by using **redstone dust**
+  (`BLK_REDSTONE`) in the world; the dust converts to a 2D flat
+  "+" sprite on the floor of the cell. Wires carry power from any
+  adjacent powered cell through their network via 6-directional
+  BFS. Powered wires brighten (visible colour change).
+- **Pressure pad** — flat sprite on the floor. While a player or
+  mob stands in the cell containing the pad, it acts as a power
+  source (same as a held-down lever) — power propagates to wires
+  next to it. Released when you step off.
+
+### Driven blocks
+
+Adjacent power drives state on:
+
+- **Doors** — closed solid panel ↔ open thin slab against the
+  hinge wall. Both halves (top + bottom) toggle together.
+- **Trapdoors** — closed ceiling-height slab ↔ open vertical
+  slab against an adjacent wall. Open trapdoors are passable
+  (player falls through).
+- **Sticky pistons** — `PISTON_OFF` ↔ `PISTON_ON` + a `PISTON_ARM`
+  block in the cell facing the head. Orientation is per-placement
+  (any of the 6 cardinal directions): the shaft + head point away
+  from the surface you placed the piston against. The 3-part model
+  (base + shaft + head) extends 1 cell when powered. If the cell in
+  front is a solid block, the piston shoves it one further along
+  (single-block push). On power loss, the head retracts AND drags
+  the front block back with it (sticky pull). You can also place
+  a block on the head face — picking respects the head's flat
+  outer surface so B-placement works.
+- **TNT** — `BLK_TNT` flips to `BLK_TNT_FUSED` (brighter, "primed")
+  on any adjacent power. A 3-second fuse counts down in real time
+  (separate from the propagation tick), then the cell explodes —
+  clears a 3-block-radius spherical chunk of breakable blocks and
+  chain-fires any adjacent TNT.
+
+Doors and trapdoors **without** any adjacent redstone gear are left
+alone by the propagation tick — you can manually B-toggle them in
+isolation and the state persists.
+
+### Boss circuit
+
+Place a diamond block (storage block, 9 diamonds), run a wire next
+to it, place a lever next to the wire (or somewhere connected), and
+flip the lever ON. The diamond block activates exactly once and
+spawns the **giant boss spider** in the cell above it. Bring a
+diamond sword — nothing else damages it. ~10 hits to kill (HP 80 ÷
+8 dmg per diamond-sword swing).
+
+## Interactive blocks
+
+| Block | Source | Behaviour |
+|---|---|---|
+| **Ladder** | 3 ladders per craft (7 sticks in H) | Climb when adjacent or standing in the cell + UP. Renders as 2D rails + 4 rungs against one wall (orientation tracked per-cell). |
+| **Trapdoor** | 2 per craft (6 planks 2×3) | Hatch at the cell ceiling when closed (solid). Vertical slab against hinge wall when open (passable — fall through). B-interact toggles. |
+| **Door** | 1 per craft (6 planks 2-column) | 2 cells tall. Auto-places top half on B. Closed is a thin solid panel; open is a thin slab against the hinge wall (passable). B-interact toggles both halves. |
+| **Pressure pad** | 1 per craft (2 stones) | Acts as a held-down lever while you stand on it. |
+| **Piston** | 1 per craft (cobble + iron + redstone) | Extends an arm block upward when powered (pushes the cell above one further up if it's solid). |
+| **TNT** | 1 per craft (4 sand + 5 redstone dust) | Adjacent power lights the fuse (3 s), then explosion clears a 3-block radius. Chain-reacts with neighbouring TNT. |
+
+All small-shape blocks (ladder, door, trapdoor, pressure pad,
+lever, redstone wire, piston) render via the same multi-cuboid
+sprite system the torches use — picker raycasts directly against
+the cuboids so B-interact and head-face placement work even when
+the cell is non-opaque.
 
 ## Lighting & torches
 
@@ -233,8 +401,29 @@ automatically:
 - Walk back later and your build is exactly where you left it
 - Survives power-cycles (no need to manually save)
 
-You can still do an explicit save: **MENU → Save world**. New worlds:
-**MENU → New world** (generates a fresh seed).
+Explicit save / load: **MENU → Save world** or **Load world** opens
+a **4-slot picker**. Each slot shows a 32×32 thumbnail of the last
+in-game frame before you opened the pause menu (captured + stored
+in flash on every save). Pick a slot to commit / load. Empty slots
+show "Empty"; B cancels.
+
+### Title screen
+
+Power on → **title screen** before the game loop starts:
+
+- "ThumbyCraft" header + a 2×2 grid of the 4 save slots (showing the
+  saved screenshot thumbnails) + a "New World" tile beneath.
+- D-pad navigates, A confirms. Picking a used slot loads it directly
+  into the game; "New World" spawns a fresh random seed; empty slots
+  reject A (you'd have nothing to load).
+
+### New world
+
+**MENU → New world** generates a fresh seed and rebuilds. Carefully
+clears in-SRAM state (mods, chests, furnaces, water, drops,
+particles) AND re-keys the chunk store, so nothing leaks from the
+previous world. Survival/Creative mode, Invert-Y, and music
+preferences carry over.
 
 ## Inventory page
 
@@ -252,23 +441,61 @@ bottom-right** of the screen — picks, swords, bow, arrow, or a tilted
 cube for any held block. Swings forward on **A press** (mine or
 attack), giving you visual feedback for combat and mining.
 
+## Music
+
+The soundtrack is **Debussy's *Clair de Lune*** played as a real MIDI
+timeline through the in-game synth, with a few twists for variety so
+you don't hear the exact same pass twice:
+
+- **Random starting point** on every game start / world load — the
+  cursor seeks to a uniformly random position in the loop.
+- **Random direction per loop**: a coin flip at each loop wrap
+  decides whether the next pass plays forwards or **backwards** (note
+  events fire in mirrored temporal order — same melody, retrograde).
+- **Random key transposition**: each loop also chooses a new
+  semitone shift. The whole piece is replayed in that key.
+- **Altitude follows the pitch**: deep underground biases the music
+  bright/high (crystalline), mountaintops bias it deep/low. The
+  current key glides smoothly toward the altitude target so
+  climbing or descending warps the music over a few seconds.
+- Music volume + SFX volume are independent sliders in **MENU**
+  (0–100% in 10% steps). Music defaults to **50%** — full volume
+  with reverb tails is loud. You can also fully disable music.
+
 ## Tips
 
-- **Mine stone first.** Stone drops cobble — you need cobble to
-  craft a furnace and a stone pick.
+- **You get a free first day.** No surface hostiles until the first
+  sunset. Use it to mine stone + cobble, craft a pick, get a furnace
+  going, build a shelter. Don't burn it on aimless wandering.
+- **Mine stone first.** Stone drops cobble — you need cobble for the
+  furnace and stone pick.
 - **Skeletons are your bow supplier.** Kill one and pick up the
-  drops. Then you can fight from range.
+  drops. Then **hold A** with the bow held — auto-aim takes over,
+  release to fire.
 - **Recover your arrows.** Missed shots aren't lost — walk to where
   they landed.
 - **Light caves before exploring.** Hostiles spawn in unlit cave
   cells day or night.
 - **Build a small shelter before sunset.** A 5×5 plank box with a
-  torch buys you safety until dawn — or find a hut.
+  torch + a door + torches buys you safety until dawn — or find a hut.
 - **Creepers respect water.** Drop into a pond if one's fuse is
   counting — explosions skip water cells.
-- **Smelt instead of crafting cobble→stone in the grid.** The 4-cobble
-  densify recipe works, but the furnace is canonical and unlocks
-  cooked food once that arrives.
+- **Fall damage starts at 10 blocks.** Drops up to 10 cells are free;
+  beyond that, 1 HP per block, capped at 20.
+- **Use ladders to climb out of mineshafts.** Place against any wall,
+  step into the cell, then **hold LB** to climb. Pitch direction
+  decides up vs down (look up to ascend, look down to descend).
+  Climb engages only while LB is held — release to step off
+  horizontally or fall freely. Reaching the ground while descending
+  latches a lockout so the ladder won't immediately re-grab you;
+  release LB + represss with upward pitch to re-engage.
+- **Redstone shopping list:** 1 lever or pressure pad (source) + a
+  line of redstone dust (becomes wire when placed) + the thing you
+  want to drive (door, trapdoor, piston, TNT, or a diamond block).
+- **TNT chain-reacts.** Two TNT blocks side by side detonate one
+  after the other from the same trigger.
+- **Boss spider only takes diamond damage.** Bring a diamond sword
+  before activating the diamond-block circuit, or the boss eats you.
 - **Chests beyond the first 4 in your area are empty.** Stick to a
   small storage hub rather than scattering chests across the map.
 
@@ -475,18 +702,37 @@ A 4-voice procedural synth running entirely in the audio IRQ:
 - **Envelope**: exponential ADSR
 - **Reverb**: single comb-delay (~93 ms, wet 0.28, feedback 0.22)
 
-### Music (Claire-de-Lune-inspired)
+### Music (actual Debussy *Clair de Lune* MIDI playback)
 
-- **Six-chord modal progression** centred on F major:
-  `Fmaj9 → Am9 → Dm9 → Bbmaj7 → Csus4 → Fmaj7add6` with smooth voice
-  leading (each chord shares 2-3 notes with the next)
-- **Day/night switch** driven by `craft_render_sun_y()`:
-  - **Night**: 20 s chords, slow melody every 2.5-5.5 s, 55 % rest,
-    sustained single notes
-  - **Day**: 12 s chords, melody every 0.9-2.2 s; 60 % of events fire
-    long **sequential pentatonic scale runs** (8-15 notes, ascending
-    or descending, wrap into next octave) — the Claire-de-Lune
-    right-hand cascade
+The music is no longer procedural — it's an honest-to-goodness
+playback of the real Debussy *Clair de Lune* MIDI, converted to a
+915-event timeline at build time by `tools/cdl_to_c.py` and embedded
+in flash as `cdl_seq[]`. The runtime engine just walks the timeline
+and triggers a 6-voice polyphonic synth pool per event.
+
+- **Voice pool**: 6 simultaneous sine-tone voices for music (each
+  with its own ADSR), 2 reserved for SFX. The note scheduler picks
+  the oldest released voice on each new trigger so trailing release
+  tails keep ringing under fresh notes (substitute for a sustain
+  pedal).
+- **Random start point** on game start / world load — the playback
+  cursor seeks to a uniformly random offset within the loop so the
+  same world doesn't always open on the same bar.
+- **Random forwards / reverse direction per loop wrap** — each pass
+  through the timeline is a coin flip; reverse plays events in
+  mirrored temporal order (`period − t`).
+- **Altitude-driven pitch**: a target semitone shift slides
+  continuously based on player Y — deep underground reads as bright
+  / crystal (~+15 semitones above the source key), mountaintops as
+  deep / calm (~+5). Pitch glides toward the target over a couple
+  of seconds, so climbing or descending warps the music smoothly
+  instead of jumping.
+- **Slow random walk** at each loop wrap adds ±1 semitone of
+  variation around the altitude band so even standing still produces
+  subtle variety pass-to-pass.
+- **Tools shipped in repo**: `tools/cdl_to_c.py` and the source
+  MIDI live in the tree so you can regenerate the timeline (e.g.,
+  tweak tempo / velocity / split / instrument).
 
 ### SFX
 
@@ -546,12 +792,23 @@ test — always overlays. Tilt + dip animation on swing (driven by
 Two flash layers:
 
 1. **Chunk store** (256 KB, automatic) — every player edit
-2. **Save blob** (16 KB wear-ring, manual) — player state + delta
-   summary, written on **MENU → Save**
+2. **Save flash** (16 KB, manual, 4 slots) — player state +
+   32×32 thumbnail per slot. Layout:
+   - 4 fixed slots × 4 KB sectors at the top of flash
+   - Each slot: magic (4 B) + seq (4 B) + record len (4 B) + the
+     record body + CRC32 (4 B) page-aligned at the start of the
+     sector; 32×32 RGB565 thumbnail at offset 2048 (exactly 2 KB).
+     Max record body is `THUMB_OFFSET − 16` = 2032 bytes — plenty
+     for the current ~300-byte payload (header + hotbar + camera +
+     inventory[BLK_COUNT]).
+   - Slot picker UI shows live thumbnails for filled slots
 
-A new-world action erases the chunk store's records for the old seed
-(records key by `world_seed` so a fresh `get_rand_32()` start cleanly
-shadows the old).
+The title screen and pause menu's save/load both use the same slot
+picker.
+
+A new-world action re-keys the chunk store + clears the in-SRAM
+state (mods, chests, furnaces, water, drops, particles) so nothing
+leaks from the previous world.
 
 Furnace and chest state are in SRAM only — not persisted across
 power-cycles in the current version. Their world blocks (the
@@ -587,7 +844,11 @@ src/                         portable engine (host + device share these)
 ├── craft_chests.{c,h}       chest contents storage
 ├── craft_particles.{c,h}    block-break / explosion / flame puffs
 ├── craft_audio.{c,h}        synth + music + SFX
-├── craft_save.{c,h}         engine-side persistence (diff-vs-base)
+├── craft_audio_cdl_data.h   915-event Clair de Lune timeline (generated)
+├── craft_save.{c,h}         engine-side persistence (multi-slot record)
+├── craft_water.{c,h}        5 Hz cellular water flow sim
+├── craft_redstone.{c,h}     5 Hz power-propagation + driven-block tick
+├── craft_title.{c,h}        boot title screen + slot picker
 ├── craft_font.{c,h}         3×5 bitmap font (Pemsa-derived)
 └── craft_main.{c,h}         game loop, dispatch, mode toggles
 
@@ -601,12 +862,14 @@ device/                      RP2350 platform layer
 ├── craft_lcd_gc9107.{c,h}    SPI + DMA LCD driver
 ├── craft_buttons.{c,h}       GPIO + edge detect
 ├── craft_audio_pwm.{c,h}     PWM + IRQ audio ring
-├── craft_save_flash.{c,h}    16 KB wear-ring saves
+├── craft_save_flash.{c,h}    16 KB, 4-slot saves with thumbnails
 ├── craft_chunk_store_flash.c 256 KB chunk store
 └── CMakeLists.txt
 
-tools/                       build-time host tools
-└── bake_textures.c           procedural atlas baker
+tools/                       build-time host tools + assets
+├── bake_textures.c           procedural atlas baker
+├── cdl_to_c.py               MIDI → CDLNote timeline converter
+└── debussy-clair-de-lune.mid source MIDI for the music
 ```
 
 ## Build
@@ -660,10 +923,32 @@ dominating at ~20 ms across both cores.
 
 ## Roadmap
 
-See [`docs/ROADMAP.md`](docs/ROADMAP.md) for the prioritised feature
-queue (next-three: more tools incl. bow, furnace UI, chest storage),
-the planned biomes / mob loot / armour / multiplayer tiers, and the
-quality bar (BSS budget, FPS floor, save-format discipline).
+Features that exist today (this README's hopefully complete on
+those). Known open items:
+
+- **Closed-door collision**: door visuals are thin slabs, but
+  collision still uses the full cell — you bump invisibly at the
+  cell corners. Needs sub-cell AABB for door/trapdoor cells.
+- **Pressure-pad active-state dip**: the pad sprite is raised
+  above the floor but doesn't visually press down when triggered.
+- **Hut frequency**: huts exist in the generator but are rare —
+  density wants a tweak.
+- **River-cliff masonry**: where the bank-slope cutoff
+  (`mountain_factor < 0.2`) refuses to engage right next to a
+  carved river, you get a 4–5 block sheer dirt cliff with the cave
+  visible through the stone layer underneath. Needs the gate
+  loosened to a continuous lerp, and cave-carving extended to the
+  dirt layer for a clean look.
+- **Mob loot diversification**: passive mobs (sheep / pig /
+  chicken) don't drop anything yet; hostile mobs all share the
+  bow + arrow debug drop.
+- **Per-tier sword durability** and **armour tiers** — currently
+  swords don't wear out and there's no armour slot.
+- **Furnace + chest persistence across reboot**: the world blocks
+  persist (chunk store) but the inventories live in SRAM only.
+
+See [`docs/ROADMAP.md`](docs/ROADMAP.md) for the older queue
+(some items are now shipped).
 
 ---
 

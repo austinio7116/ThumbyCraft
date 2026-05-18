@@ -91,15 +91,24 @@
  * tilted idle view picks up a fake "shadow" along the top face. */
 
 #define PICKAXE_HEAD_PARTS(LIGHT, DARK)                              \
-    /* top row, 3 px wide */                                         \
-    {  0.140f,  0.225f,  0.000f,                                     \
-       0.045f,  0.025f,  0.030f, (DARK)  },                          \
-    /* mid row, 5 px wide — sticks out left + right of the top */    \
-    {  0.140f,  0.175f,  0.000f,                                     \
-       0.075f,  0.025f,  0.030f, (LIGHT) },                          \
-    /* bottom row, 3 px wide */                                      \
-    {  0.140f,  0.125f,  0.000f,                                     \
-       0.045f,  0.025f,  0.030f, (LIGHT) }
+    /* Iconic MC silhouette: a wide flat pick head at the TOP (the   \
+     * thing that does the digging) tapering down to a narrow neck   \
+     * where the handle joins. Reads clearly as a pickaxe even at    \
+     * the held-item viewport's tight scale.                         \
+     *                                                               \
+     * Top row — 7 px wide pick head with two corner "prongs" that   \
+     * stick out past the body. The corners use the dark tint so a   \
+     * tilted view picks up shadow on the pointy ends. */            \
+    {  0.140f,  0.230f,  0.000f, 0.095f, 0.022f, 0.028f, (LIGHT) },  \
+    /* Left prong tip — small dark cube pulled outward beyond the    \
+     * top bar so the head reads as having two distinct points. */   \
+    {  0.060f,  0.245f,  0.000f, 0.020f, 0.018f, 0.024f, (DARK)  },  \
+    /* Right prong tip — mirror of left. */                          \
+    {  0.220f,  0.245f,  0.000f, 0.020f, 0.018f, 0.024f, (DARK)  },  \
+    /* Middle row — narrower body, 4 px wide. */                     \
+    {  0.140f,  0.180f,  0.000f, 0.055f, 0.022f, 0.028f, (LIGHT) },  \
+    /* Neck — 2 px wide where the head joins the handle. */          \
+    {  0.130f,  0.135f,  0.000f, 0.025f, 0.022f, 0.026f, (DARK)  }
 
 /* 7-step handle staircase from (0.07, 0.085) to (-0.215, -0.215).
  * Each cube ~0.025 in X/Y so neighbours overlap slightly and the
@@ -342,6 +351,37 @@ CraftToolModel craft_tool_model(BlockId b) {
         case 22:                return (CraftToolModel)MODEL(parts_bow);   /* BLK_BOW   */
         case 23:                return (CraftToolModel)MODEL(parts_arrow); /* BLK_ARROW */
         case BLK_TORCH:         return (CraftToolModel)MODEL(parts_torch);
+        /* Sprite-system blocks — fetch the cuboid model from
+         * craft_torches and re-centre + scale into held-viewport
+         * coordinates so they appear as miniatures in hand. */
+        case BLK_LADDER:
+        case BLK_DOOR_OFF:
+        case BLK_DOOR_ON:
+        case BLK_TRAPDOOR_OFF:
+        case BLK_TRAPDOOR_ON:
+        case BLK_REDSTONE_WIRE:
+        case BLK_REDSTONE_WIRE_ON:
+        case BLK_PRESSURE_PAD: {
+            extern int craft_torches_block_model(uint8_t b, int orient,
+                                                 CraftToolPart *out,
+                                                 int max_n);
+            static CraftToolPart sprite_buf[8];
+            int n = craft_torches_block_model((uint8_t)b, /*FACE_PZ*/4,
+                                              sprite_buf, 8);
+            /* Sprite parts are in cell-local 0..1 coords; recentre
+             * around the origin and scale to ~0.45 so they fit the
+             * 50×40 held-item viewport with margin. */
+            const float SCALE = 0.45f;
+            for (int i = 0; i < n; i++) {
+                sprite_buf[i].cx = (sprite_buf[i].cx - 0.5f) * SCALE;
+                sprite_buf[i].cy = (sprite_buf[i].cy - 0.5f) * SCALE;
+                sprite_buf[i].cz = (sprite_buf[i].cz - 0.5f) * SCALE;
+                sprite_buf[i].hx *= SCALE;
+                sprite_buf[i].hy *= SCALE;
+                sprite_buf[i].hz *= SCALE;
+            }
+            return (CraftToolModel){ n, sprite_buf };
+        }
         default: {
             CraftToolModel empty = { 0, (const CraftToolPart *)0 };
             return empty;

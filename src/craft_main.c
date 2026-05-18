@@ -29,12 +29,61 @@
 
 #include <string.h>
 
-#define CRAFT_DAY_LENGTH 240.0f      /* 4 minutes */
+#define CRAFT_DAY_LENGTH 300.0f      /* 5 min total cycle. Sun curve
+                                      * in craft_render is skewed so
+                                      * day occupies 180 s (was 120 s
+                                      * in the symmetric 240s cycle)
+                                      * and night stays at 120 s,
+                                      * matching the original. */
 
 static CraftPlayer s_player;
 static uint16_t   *s_fb;
 static uint32_t    s_seed;
 static float       s_world_time = 60.0f;   /* start at "morning" */
+
+/* Pre-menu screenshot — captured at the moment the player opens the
+ * pause menu, downsampled to 64×64 RGB565 so it fits in 8 KB. The
+ * save layer reads from here when the player commits a slot save.
+ * Captured eagerly on menu-open so the snapshot reflects the last
+ * in-game frame, not the menu overlay. */
+#define CRAFT_THUMB_W 32
+#define CRAFT_THUMB_H 32
+static uint16_t s_thumb[CRAFT_THUMB_W * CRAFT_THUMB_H];
+static bool     s_thumb_valid;
+
+static void capture_thumb_from_fb(void) {
+    if (!s_fb) return;
+    /* 4×4 average down 128×128 → 32×32. RGB565 needs unpack/pack. */
+    for (int y = 0; y < CRAFT_THUMB_H; y++) {
+        for (int x = 0; x < CRAFT_THUMB_W; x++) {
+            int sx = x * 4, sy = y * 4;
+            int r = 0, g = 0, b = 0;
+            for (int dy = 0; dy < 4; dy++) {
+                for (int dx = 0; dx < 4; dx++) {
+                    uint16_t c = s_fb[(sy + dy) * CRAFT_FB_W + (sx + dx)];
+                    r += (c >> 11) & 0x1F;
+                    g += (c >> 5)  & 0x3F;
+                    b +=  c        & 0x1F;
+                }
+            }
+            r >>= 4; g >>= 4; b >>= 4;
+            s_thumb[y * CRAFT_THUMB_W + x] =
+                (uint16_t)((r << 11) | (g << 5) | b);
+        }
+    }
+    s_thumb_valid = true;
+}
+
+const uint16_t *craft_main_thumb(void) {
+    return s_thumb_valid ? s_thumb : NULL;
+}
+
+static int s_save_slot = 0;
+void craft_main_set_save_slot(int slot) {
+    if ((unsigned)slot >= 4) slot = 0;
+    s_save_slot = slot;
+}
+int craft_main_save_slot(void) { return s_save_slot; }
 
 /* Flags the platform polls + clears. */
 static bool s_save_req;
@@ -78,7 +127,7 @@ void craft_main_init(uint16_t *fb, uint32_t seed) {
      * want zone-based ambient layers later. */
     craft_audio_set_ambient(0.0f);
     craft_audio_music_enable(true);
-    craft_audio_music_set_volume(1.0f);
+    craft_audio_music_set_volume(0.5f);
     /* Window-loaded around the world origin; spawn point picks a
      * grass tile inside the initial window. */
     craft_world_load_around(0, 0, seed);
@@ -111,17 +160,20 @@ void craft_main_init(uint16_t *fb, uint32_t seed) {
              * viewport and combat without having to craft them. */
             c->slots[ 0].blk = BLK_BOW;             c->slots[ 0].n = 1;
             c->slots[ 1].blk = BLK_ARROW;           c->slots[ 1].n = 32;
-            c->slots[ 2].blk = BLK_PICKAXE_IRON;    c->slots[ 2].n = 1;
-            c->slots[ 3].blk = BLK_PICKAXE_DIAMOND; c->slots[ 3].n = 1;
-            c->slots[ 4].blk = BLK_SWORD_DIAMOND;   c->slots[ 4].n = 1;
-            c->slots[ 5].blk = BLK_DIAMOND_BLOCK;   c->slots[ 5].n = 4;
-            c->slots[ 6].blk = BLK_REDSTONE;        c->slots[ 6].n = 32;
-            c->slots[ 7].blk = BLK_LEVER_OFF;       c->slots[ 7].n = 4;
+            c->slots[ 2].blk = BLK_PICKAXE_DIAMOND; c->slots[ 2].n = 1;
+            c->slots[ 3].blk = BLK_SWORD_DIAMOND;   c->slots[ 3].n = 1;
+            c->slots[ 4].blk = BLK_DIAMOND_BLOCK;   c->slots[ 4].n = 4;
+            c->slots[ 5].blk = BLK_REDSTONE;        c->slots[ 5].n = 32;
+            c->slots[ 6].blk = BLK_LEVER_OFF;       c->slots[ 6].n = 4;
+            c->slots[ 7].blk = BLK_PRESSURE_PAD;    c->slots[ 7].n = 4;
             c->slots[ 8].blk = BLK_TORCH;           c->slots[ 8].n = 16;
             c->slots[ 9].blk = BLK_FURNACE;         c->slots[ 9].n = 1;
-            c->slots[10].blk = BLK_CHEST;           c->slots[10].n = 1;
-            c->slots[11].blk = BLK_STICK;           c->slots[11].n = 16;
+            c->slots[10].blk = BLK_PISTON_OFF;      c->slots[10].n = 4;
+            c->slots[11].blk = BLK_TNT;             c->slots[11].n = 8;
             c->slots[12].blk = BLK_IRON_INGOT;      c->slots[12].n = 8;
+            c->slots[13].blk = BLK_LADDER;          c->slots[13].n = 8;
+            c->slots[14].blk = BLK_DOOR_OFF;        c->slots[14].n = 4;
+            c->slots[15].blk = BLK_TRAPDOOR_OFF;    c->slots[15].n = 4;
         }
     }
     /* Defaults — start in survival with invert-Y on. Player can flip
@@ -311,6 +363,7 @@ void craft_main_step(const CraftInput *in, float dt, int fps) {
     craft_furnace_tick(dt);
     craft_water_tick(dt);
     craft_redstone_tick(dt);
+    craft_redstone_tick_fuses(dt);
     craft_mobs_day_night_tick(dt, craft_render_sun_y(), &s_player);
     craft_audio_music_set_sun(craft_render_sun_y());
     craft_audio_music_set_altitude(s_player.cam.pos.y / (float)CRAFT_WORLD_Y);
@@ -318,6 +371,10 @@ void craft_main_step(const CraftInput *in, float dt, int fps) {
     craft_blocks_animate_water(s_world_time);
     if (s_player.request_menu) {
         s_player.request_menu = false;
+        /* Grab a 64×64 thumbnail of the last in-game frame before
+         * the menu overlays it — the slot picker reads from this
+         * when the player commits a save. */
+        capture_thumb_from_fb();
         craft_menu_open(in);
     }
     if (s_player.request_furnace_open) {
@@ -363,7 +420,7 @@ void craft_main_step(const CraftInput *in, float dt, int fps) {
      * the hotbar must remain visible over the held-item viewport so
      * you can see which slot you're holding. */
     craft_render_held_item(s_player.hotbar[s_player.hotbar_idx],
-                           s_fb, s_held_swing_t);
+                           s_fb, s_held_swing_t, s_player.bow_draw_t);
     craft_hud_draw(s_fb, &s_player, fps);
     s_player.cam.pos.y += s_player.step_lag;
 }
@@ -399,6 +456,7 @@ void craft_main_tick(const CraftInput *in, float dt) {
     craft_furnace_tick(dt);
     craft_water_tick(dt);
     craft_redstone_tick(dt);
+    craft_redstone_tick_fuses(dt);
     craft_mobs_day_night_tick(dt, craft_render_sun_y(), &s_player);
     craft_audio_music_set_sun(craft_render_sun_y());
     craft_audio_music_set_altitude(s_player.cam.pos.y / (float)CRAFT_WORLD_Y);
@@ -406,6 +464,10 @@ void craft_main_tick(const CraftInput *in, float dt) {
     craft_blocks_animate_water(s_world_time);
     if (s_player.request_menu) {
         s_player.request_menu = false;
+        /* Grab a 64×64 thumbnail of the last in-game frame before
+         * the menu overlays it — the slot picker reads from this
+         * when the player commits a save. */
+        capture_thumb_from_fb();
         craft_menu_open(in);
     }
     if (s_player.request_furnace_open) {
@@ -460,7 +522,7 @@ void craft_main_draw_hud(int fps) {
     /* Held item overlay sits under the hotbar — the active-slot
      * indicator must stay visible on top of the viewport. */
     craft_render_held_item(s_player.hotbar[s_player.hotbar_idx],
-                           s_fb, s_held_swing_t);
+                           s_fb, s_held_swing_t, s_player.bow_draw_t);
     craft_hud_draw(s_fb, &s_player, fps);
     if (craft_menu_is_open()) craft_menu_draw(s_fb, &s_player);
     /* Restore logical cam y so next tick's physics is correct. */

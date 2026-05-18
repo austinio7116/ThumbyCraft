@@ -32,4 +32,15 @@ void craft_redstone_rescan(void);
  * powered. Pass the previous block id and the new one. */
 void craft_redstone_note_change(BlockId prev_blk, BlockId new_blk);
 
+/* The player ticks each frame to report whether they're standing on
+ * a pressure pad. If so, the redstone tick treats that cell as a
+ * power source (like a held-down lever). Pass any negative wy to
+ * clear an existing report. */
+void craft_redstone_note_pressure(int wx, int wy, int wz);
+
+/* Tick the TNT fuse timers — separate from the 5 Hz propagation
+ * tick because the fuse counts in real seconds. Call every frame
+ * with dt; this scans the small s_fuses[] list. */
+void craft_redstone_tick_fuses(float dt);
+
 #endif

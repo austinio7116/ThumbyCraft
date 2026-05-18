@@ -374,6 +374,17 @@ static void mob_die_with_loot(CraftMob *m) {
         craft_drops_spawn(BLK_BOW, p);
         craft_drops_spawn(BLK_ARROW, (Vec3){ p.x + 0.15f, p.y, p.z });
         craft_drops_spawn(BLK_ARROW, (Vec3){ p.x - 0.15f, p.y, p.z });
+    } else if (m->type == MOB_BOSS_SPIDER) {
+        /* Boss loot: a shower of diamonds scattered around the body
+         * so the player can scoop them up by walking over the area. */
+        for (int i = 0; i < 9; i++) {
+            float a = (float)i * 0.6981317f;   /* 40° spread */
+            float r = 0.6f + (i & 1) * 0.4f;
+            Vec3 d = { p.x + cosf(a) * r, p.y + (i & 1) * 0.3f,
+                       p.z + sinf(a) * r };
+            craft_drops_spawn(BLK_DIAMOND, d);
+        }
+        craft_player_signal_win();
     }
 }
 
@@ -387,6 +398,12 @@ static int find_ground(int x, int z) {
     }
     return -1;
 }
+
+/* Last sun_y observed by the day/night tick, and a one-shot latch
+ * that flips on the first observed sunset. Surface hostile spawns
+ * are gated on the latch — first-day grace. Reset on new world. */
+static float s_last_sun_y = -1.0f;
+static bool  s_first_night_seen = false;
 
 void craft_mobs_spawn_around(Vec3 centre, uint32_t seed) {
     s_rng ^= seed;
@@ -414,12 +431,33 @@ void craft_mobs_spawn_around(Vec3 centre, uint32_t seed) {
         placed++;
     }
     s_day_night_t = 0.0f;
+    s_first_night_seen = false;
 }
 
 
-/* Stash the last sun_y the day/night tick saw so spawn_hostile can
- * decide whether daytime spawns need to be sky-shielded. */
-static float s_last_sun_y = -1.0f;
+/* (s_last_sun_y + s_first_night_seen now declared earlier so
+ * craft_mobs_spawn_around can reset them.) */
+
+/* Probe for an air pocket in a cave: random Y between bedrock and
+ * just below the surface, requires air + solid floor + no sky
+ * exposure + no torch light. Returns the y of the AIR cell (mob
+ * feet) or -1. */
+static int find_dark_cave_air(int x, int z) {
+    int surface = find_ground(x, z);
+    if (surface < 5) return -1;
+    int range = surface - 4;
+    if (range <= 0) return -1;
+    for (int attempt = 0; attempt < 6; attempt++) {
+        int y = 2 + (int)(xs() % (uint32_t)range);
+        if (craft_world_get(x, y, z) != BLK_AIR) continue;
+        if (!craft_block_solid(craft_world_get(x, y - 1, z))) continue;
+        if (craft_world_sky_exposed(x, y, z)) continue;
+        /* Torch light makes a cell "lit" — don't spawn there. */
+        if (craft_world_light_level(x, y, z) > 0) continue;
+        return y;
+    }
+    return -1;
+}
 
 void craft_mobs_spawn_hostile(CraftPlayer *p, int n) {
     bool is_day = s_last_sun_y > 0.0f;
@@ -431,14 +469,28 @@ void craft_mobs_spawn_hostile(CraftPlayer *p, int n) {
         float dist  = 12.0f + frand() * 8.0f;
         int x = (int)(p->cam.pos.x + cosf(angle) * dist);
         int z = (int)(p->cam.pos.z + sinf(angle) * dist);
-        int y = find_ground(x, z);
-        if (y < 0) continue;
-        /* Hostile spawn rule: only allowed if the spawn cell is in
-         * shadow or it's currently night. At day, a sky-exposed
-         * surface tile is direct sunlight — skip it.
-         * `y+1` is the cell the mob's feet occupy (one above the
-         * ground block). */
-        if (is_day && craft_world_sky_exposed(x, y + 1, z)) continue;
+        /* Half the attempts go cave-spelunking — pick a dark unlit
+         * air pocket somewhere below the surface. Falls through to
+         * the surface path if no cave cell qualifies. */
+        bool try_cave = (xs() & 1) != 0;
+        int y = -1;
+        if (try_cave) {
+            int cy = find_dark_cave_air(x, z);
+            if (cy >= 0) {
+                y = cy - 1;   /* surface code uses y+1 for feet; align */
+            }
+        }
+        if (y < 0) {
+            /* First-day grace: no surface hostiles until the sun has
+             * crossed below the horizon at least once. Caves still
+             * spawn (try_cave above ran first and bypassed this). */
+            if (!s_first_night_seen) continue;
+            y = find_ground(x, z);
+            if (y < 0) continue;
+            /* Surface rule: day-shadowed cells only. Caves bypass
+             * this — they're already dark by definition. */
+            if (is_day && craft_world_sky_exposed(x, y + 1, z)) continue;
+        }
         /* Find a free slot. */
         for (int i = 0; i < CRAFT_MAX_MOBS; i++) {
             if (craft_mobs[i].alive) continue;
@@ -559,6 +611,7 @@ int craft_mobs_pick(const CraftCamera *cam, float max_dist) {
 void craft_mobs_day_night_tick(float dt, float sun_y, CraftPlayer *p) {
     if (p->mode != CRAFT_MODE_SURVIVAL) return;
     s_last_sun_y = sun_y;
+    if (!s_first_night_seen && sun_y < -0.10f) s_first_night_seen = true;
     s_day_night_t += dt;
     /* Top up hostile count toward CRAFT_HOSTILE_MAX. Faster at night
      * (sun below horizon), slower during the day. No daylight
@@ -592,6 +645,10 @@ static void ai_decide(CraftMob *m) {
     }
 }
 
+/* Forward declaration — defined below, used by slime/spider/creeper
+ * proximity-damage gates. */
+static bool has_los(Vec3 from, Vec3 to);
+
 /* Slime AI override: chase player when in range, contact-damage on
  * proximity. Falls back to wandering when player is far. */
 static void slime_ai(CraftMob *m, CraftPlayer *p, float dt) {
@@ -616,8 +673,16 @@ static void slime_ai(CraftMob *m, CraftPlayer *p, float dt) {
         }
         m->ai_timer = 0.5f;
     }
-    /* Contact damage — fires while sitting at stand-off range. */
-    if (dist < SLIME_CONTACT_DIST + 0.10f) {
+    /* Contact damage — fires while sitting at stand-off range.
+     * Gate on 3D distance (include Y), not just horizontal — without
+     * dy a cave mob spawned in an air pocket directly below the
+     * player reads dist=0 and bites you through any number of stone
+     * blocks. Also require rough line-of-sight so attackers can't
+     * damage through walls just because they're horizontally close. */
+    float dy_s = p->cam.pos.y - m->pos.y - 0.8f;   /* approx mob chest */
+    float dist3 = sqrtf(dist * dist + dy_s * dy_s);
+    if (dist3 < SLIME_CONTACT_DIST + 0.10f &&
+        has_los(v3(m->pos.x, m->pos.y + 0.8f, m->pos.z), p->cam.pos)) {
         craft_player_take_damage(p, 1);
     }
 }
@@ -716,7 +781,11 @@ static void spider_ai(CraftMob *m, CraftPlayer *p, float dt) {
         }
         m->ai_timer = 0.3f;
     }
-    if (dist < SPIDER_CONTACT_DIST + 0.10f) {
+    /* 3D distance + line-of-sight gate (same fix as slime). */
+    float dy_sp = p->cam.pos.y - m->pos.y - 0.8f;
+    float dist3 = sqrtf(dist * dist + dy_sp * dy_sp);
+    if (dist3 < SPIDER_CONTACT_DIST + 0.10f &&
+        has_los(v3(m->pos.x, m->pos.y + 0.8f, m->pos.z), p->cam.pos)) {
         craft_player_take_damage(p, 2);
     }
 }
@@ -733,7 +802,9 @@ static void creeper_ai(CraftMob *m, CraftPlayer *p, float dt) {
         m->vel.x = 0; m->vel.z = 0;
         m->fuse_t -= dt;
         if (m->fuse_t <= 0.0f) {
-            /* Boom — damage, particles, block destruction. */
+            /* Boom — damage, particles, block destruction, sound. */
+            extern void craft_audio_explode(void);
+            craft_audio_explode();
             Vec3 ctr = v3(m->pos.x, m->pos.y + 0.7f, m->pos.z);
             if (dist < CREEPER_BLAST_DIST) {
                 craft_player_take_damage(p, CREEPER_BLAST_DAMAGE);
@@ -758,6 +829,7 @@ static void creeper_ai(CraftMob *m, CraftPlayer *p, float dt) {
                         if (fx*fx + fy*fy + fz*fz > CREEPER_BLAST_DIST * CREEPER_BLAST_DIST)
                             continue;
                         int wx = cx + dxi, wy = cy + dy, wz = cz + dz;
+                        if (wy <= 0) continue;   /* spare bedrock */
                         BlockId b = craft_world_get(wx, wy, wz);
                         if (b == BLK_AIR || b == BLK_WATER) continue;
                         craft_world_set(wx, wy, wz, BLK_AIR);
@@ -773,7 +845,14 @@ static void creeper_ai(CraftMob *m, CraftPlayer *p, float dt) {
         if (m->ai_timer <= 0.0f) ai_decide(m);
         return;
     }
-    if (dist < CREEPER_FUSE_DIST) {
+    /* Fuse only when actually adjacent — same 3D + LOS gate as
+     * slime/spider so a creeper in a cave below can't ignite. */
+    float dy_c = p->cam.pos.y - m->pos.y - 0.7f;
+    float dist3 = sqrtf(dist * dist + dy_c * dy_c);
+    if (dist3 < CREEPER_FUSE_DIST &&
+        has_los(v3(m->pos.x, m->pos.y + 0.7f, m->pos.z), p->cam.pos)) {
+        extern void craft_audio_fuse(void);
+        craft_audio_fuse();
         m->fuse_t = CREEPER_FUSE_TIME;
         m->vel.x = 0; m->vel.z = 0;
         return;
@@ -869,8 +948,24 @@ void craft_mobs_tick(float dt, CraftPlayer *p) {
         }
 
         if (ahead_solid(nx, m->pos.y, nz)) {
-            m->vel.x = 0; m->vel.z = 0;
-            m->ai_timer = 0.0f;
+            /* Try to hop the obstacle if we're grounded and there's
+             * clear space above. Normal mobs clear 1-block obstacles;
+             * the boss spider clears 2 blocks (its sprite is huge so
+             * a single-block hop wouldn't help it follow the player
+             * up onto small ledges). */
+            bool grounded = (m->vel.y == 0.0f);
+            float jump_v  = (m->type == MOB_BOSS_SPIDER) ? 10.5f : 7.5f;
+            float clear_y = (m->type == MOB_BOSS_SPIDER) ? 2.2f  : 1.1f;
+            if (grounded && !ahead_solid(nx, m->pos.y + clear_y, nz)) {
+                m->vel.y = jump_v;
+                /* Keep XZ velocity so the mob continues forward in
+                 * the air — physics-pass below applies vel.y and the
+                 * next frame's ahead_solid check sees the obstacle
+                 * cleared once we've risen past it. */
+            } else {
+                m->vel.x = 0; m->vel.z = 0;
+                m->ai_timer = 0.0f;
+            }
         } else {
             m->pos.x = nx; m->pos.z = nz;
         }
@@ -1120,6 +1215,18 @@ void craft_mobs_render(const CraftCamera *cam, uint16_t *fb) {
 
 void craft_arrows_clear(void) {
     for (int i = 0; i < CRAFT_MAX_ARROWS; i++) craft_arrows[i].alive = false;
+}
+
+/* Zap every mob, arrow, and drop in the pool. Called on world load so
+ * mobs / arrows from the previous play session don't keep damaging
+ * the player from positions adjacent to their reloaded coords. */
+void craft_mobs_clear_all(void) {
+    for (int i = 0; i < CRAFT_MAX_MOBS; i++) craft_mobs[i].alive = false;
+    craft_arrows_clear();
+    extern void craft_drops_init(void);
+    craft_drops_init();
+    s_first_night_seen = false;
+    s_day_night_t = 0.0f;
 }
 
 void craft_arrows_spawn(Vec3 pos, Vec3 vel, bool from_player) {

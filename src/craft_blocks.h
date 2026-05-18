@@ -72,6 +72,22 @@ typedef enum {
     BLK_LEVER_ON        = 45,
     BLK_REDSTONE_WIRE   = 46,
     BLK_REDSTONE_WIRE_ON = 47,
+    /* Polish-phase placeables with state. Trapdoor/door/piston are
+     * driven by adjacent redstone power; ladders are climbable but
+     * not redstone-triggerable; pressure pads emit redstone power
+     * when a mob or player stands on them; TNT lights its fuse on
+     * redstone power and explodes after 3 s. */
+    BLK_LADDER          = 48,
+    BLK_TRAPDOOR_OFF    = 49,
+    BLK_TRAPDOOR_ON     = 50,
+    BLK_DOOR_OFF        = 51,
+    BLK_DOOR_ON         = 52,
+    BLK_PRESSURE_PAD    = 53,
+    BLK_PISTON_OFF      = 54,
+    BLK_PISTON_ON       = 55,
+    BLK_PISTON_ARM      = 56,
+    BLK_TNT             = 57,
+    BLK_TNT_FUSED       = 58,
     BLK_COUNT
 } BlockId;
 
@@ -121,6 +137,21 @@ const uint16_t *craft_block_texture(BlockId blk, Face face);
  * non-opaque; everything else is. */
 static inline bool craft_block_opaque(BlockId blk) {
     if (blk == BLK_REDSTONE_WIRE || blk == BLK_REDSTONE_WIRE_ON) return false;
+    /* Sprite-style overlays — raycaster skips, post-pass renders. */
+    if (blk == BLK_LADDER || blk == BLK_PRESSURE_PAD) return false;
+    /* Doors + trapdoors render as thin slabs via the sprite system
+     * in BOTH states so the player can see them open/close. The
+     * closed states are still solid (see craft_block_solid). */
+    if (blk == BLK_DOOR_OFF || blk == BLK_DOOR_ON) return false;
+    if (blk == BLK_TRAPDOOR_OFF || blk == BLK_TRAPDOOR_ON) return false;
+    /* Pistons render via sprite system (base + shaft + head) with
+     * orient-aware geometry so they look like real MC pistons. The
+     * base cells are still solid for collision. */
+    if (blk == BLK_PISTON_OFF || blk == BLK_PISTON_ON ||
+        blk == BLK_PISTON_ARM) return false;
+    /* Levers render as a 3D mounted switch via the sprite system,
+     * not as a full-cell cube. */
+    if (blk == BLK_LEVER_OFF || blk == BLK_LEVER_ON) return false;
     return blk != BLK_AIR && blk != BLK_WATER && blk != BLK_GLASS;
 }
 
@@ -135,6 +166,12 @@ static inline bool craft_block_solid(BlockId blk) {
     if (blk == BLK_FURNACE) return true;
     if (blk == BLK_CHEST) return true;
     if (blk == BLK_LEVER_OFF || blk == BLK_LEVER_ON) return true;
+    /* Polish blocks. Open variants don't block movement. */
+    if (blk == BLK_LADDER || blk == BLK_PRESSURE_PAD) return false;
+    if (blk == BLK_DOOR_ON || blk == BLK_TRAPDOOR_ON) return false;
+    if (blk == BLK_DOOR_OFF || blk == BLK_TRAPDOOR_OFF) return true;
+    if (blk == BLK_PISTON_OFF || blk == BLK_PISTON_ON || blk == BLK_PISTON_ARM) return true;
+    if (blk == BLK_TNT || blk == BLK_TNT_FUSED) return true;
     if (blk >= BLK_SILVER_ORE && blk <= BLK_REDSTONE_ORE)   return true;
     if (blk >= BLK_SILVER_BLOCK && blk <= BLK_REDSTONE_BLOCK) return true;
     if (blk >= BLK_STICK) return false;   /* inventory items */
@@ -151,6 +188,10 @@ static inline bool craft_block_placeable(BlockId blk) {
      * accept it as placeable here. BLK_LEVER_OFF is both item and
      * placed block. */
     if (blk == BLK_REDSTONE || blk == BLK_LEVER_OFF) return true;
+    if (blk == BLK_LADDER || blk == BLK_PRESSURE_PAD) return true;
+    if (blk == BLK_TRAPDOOR_OFF || blk == BLK_DOOR_OFF) return true;
+    if (blk == BLK_PISTON_OFF) return true;
+    if (blk == BLK_TNT) return true;
     if (blk >= BLK_SILVER_ORE && blk <= BLK_REDSTONE_ORE)   return true;
     if (blk >= BLK_SILVER_BLOCK && blk <= BLK_REDSTONE_BLOCK) return true;
     if (blk >= BLK_STICK) return false;

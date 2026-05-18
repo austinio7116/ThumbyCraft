@@ -79,6 +79,22 @@ static void edge_update(EdgeState *e, bool now, uint32_t t_ms,
 /* --- Save/load helpers --------------------------------------------- */
 static const char *SAV_PATH = "thumbycraft.sav";
 
+/* Host shim for the engine's portable slot queries. Host uses a
+ * single file at SAV_PATH for now; the slot APIs surface it as
+ * slot 0 only. No thumbnail (the host build is for development
+ * iteration, not multi-slot bookkeeping). */
+bool craft_save_slot_used(int slot) {
+    if (slot != 0) return false;
+    FILE *f = fopen(SAV_PATH, "rb");
+    if (!f) return false;
+    fclose(f);
+    return true;
+}
+const uint16_t *craft_save_slot_thumb(int slot) {
+    (void)slot;
+    return NULL;
+}
+
 static bool try_load(void) {
     FILE *f = fopen(SAV_PATH, "rb");
     if (!f) return false;

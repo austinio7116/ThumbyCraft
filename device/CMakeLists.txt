@@ -86,6 +86,7 @@ set(CRAFT_DEVICE_SOURCES
     ${SRC}/craft_chests.c
     ${SRC}/craft_water.c
     ${SRC}/craft_redstone.c
+    ${SRC}/craft_title.c
     ${SRC}/craft_main.c
     ${CRAFT_BAKED_C}
 )

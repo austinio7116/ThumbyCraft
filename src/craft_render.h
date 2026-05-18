@@ -123,6 +123,7 @@ void craft_render_pick_outline(const CraftCamera *cam, uint16_t *fb);
  * `swing_t` is 0.0..1.0: 0 = idle, 1.0 = just hit. The caller decays
  * it ~5/sec back to 0 — the renderer uses it to dip the item and
  * tilt it forward during the swing. */
-void craft_render_held_item(BlockId held, uint16_t *fb, float swing_t);
+void craft_render_held_item(BlockId held, uint16_t *fb, float swing_t,
+                            float bow_draw_t);
 
 #endif

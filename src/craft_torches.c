@@ -16,6 +16,7 @@
 #include "craft_torches.h"
 #include "craft_world.h"
 #include "craft_blocks.h"
+#include "craft_tool_models.h"   /* CraftToolPart — shared cuboid struct */
 
 #include <string.h>
 
@@ -75,6 +76,11 @@ void craft_torches_forget_orient(int wx, int wy, int wz) {
     }
 }
 
+int craft_torches_lookup_orient(int wx, int wy, int wz) {
+    OrientEntry *e = orient_find(wx, wy, wz, false);
+    return e ? (int)e->orient : (int)FACE_PY;
+}
+
 static uint8_t orient_lookup(int wx, int wy, int wz) {
     OrientEntry *e = orient_find(wx, wy, wz, false);
     return e ? e->orient : FACE_PY;   /* default: floor torch */
@@ -97,6 +103,17 @@ void craft_torches_rebuild(void) {
                 if      (b == BLK_TORCH)             kind = TORCH_KIND_TORCH;
                 else if (b == BLK_REDSTONE_WIRE)     kind = TORCH_KIND_WIRE;
                 else if (b == BLK_REDSTONE_WIRE_ON)  kind = TORCH_KIND_WIRE_ON;
+                else if (b == BLK_LADDER)            kind = TORCH_KIND_LADDER;
+                else if (b == BLK_PRESSURE_PAD)      kind = TORCH_KIND_PRESSURE_PAD;
+                else if (b == BLK_DOOR_OFF)          kind = TORCH_KIND_DOOR_CLOSED;
+                else if (b == BLK_DOOR_ON)           kind = TORCH_KIND_DOOR_OPEN;
+                else if (b == BLK_TRAPDOOR_OFF)      kind = TORCH_KIND_TRAPDOOR_CLOSED;
+                else if (b == BLK_TRAPDOOR_ON)       kind = TORCH_KIND_TRAPDOOR_OPEN;
+                else if (b == BLK_PISTON_OFF)        kind = TORCH_KIND_PISTON_OFF;
+                else if (b == BLK_PISTON_ON)         kind = TORCH_KIND_PISTON_ON;
+                else if (b == BLK_PISTON_ARM)        kind = TORCH_KIND_PISTON_ARM;
+                else if (b == BLK_LEVER_OFF)         kind = TORCH_KIND_LEVER_OFF;
+                else if (b == BLK_LEVER_ON)          kind = TORCH_KIND_LEVER_ON;
                 else continue;
                 if (s_torch_count >= CRAFT_MAX_TORCHES) goto done;
                 CraftTorch *t = &craft_torches[s_torch_count++];
@@ -105,9 +122,44 @@ void craft_torches_rebuild(void) {
                 t->wz     = lz + oz;
                 t->wy     = (int16_t)wy;
                 t->kind   = kind;
-                t->orient = (kind == TORCH_KIND_TORCH)
-                             ? orient_lookup(t->wx, t->wy, t->wz)
-                             : (uint8_t)FACE_PY;
+                t->connect = 0;
+                if (kind == TORCH_KIND_TORCH || kind == TORCH_KIND_LADDER ||
+                    kind == TORCH_KIND_DOOR_CLOSED  || kind == TORCH_KIND_DOOR_OPEN ||
+                    kind == TORCH_KIND_TRAPDOOR_CLOSED || kind == TORCH_KIND_TRAPDOOR_OPEN ||
+                    kind == TORCH_KIND_PISTON_OFF || kind == TORCH_KIND_PISTON_ON ||
+                    kind == TORCH_KIND_PISTON_ARM ||
+                    kind == TORCH_KIND_LEVER_OFF || kind == TORCH_KIND_LEVER_ON) {
+                    t->orient = orient_lookup(t->wx, t->wy, t->wz);
+                } else {
+                    t->orient = (uint8_t)FACE_PY;
+                }
+                /* Wire connection mask — bit per neighbour cell that
+                 * a wire should visually "wire up" with: another wire,
+                 * a lever (source), or any of the driven blocks (door,
+                 * trapdoor, piston, TNT). Lookups go through the
+                 * direct array — same fast path the redstone tick uses. */
+                if (kind == TORCH_KIND_WIRE || kind == TORCH_KIND_WIRE_ON) {
+                    static const int ndx[4] = { 1, -1, 0,  0 };
+                    static const int ndz[4] = { 0,  0, 1, -1 };
+                    for (int d = 0; d < 4; d++) {
+                        int nlx = lx + ndx[d];
+                        int nlz = lz + ndz[d];
+                        if ((unsigned)nlx >= CRAFT_WORLD_X) continue;
+                        if ((unsigned)nlz >= CRAFT_WORLD_Z) continue;
+                        int nidx = (wy * CRAFT_WORLD_Z + nlz) * CRAFT_WORLD_X + nlx;
+                        BlockId nb = (BlockId)(craft_world_blocks[nidx] & 0x3F);
+                        if (nb == BLK_REDSTONE_WIRE || nb == BLK_REDSTONE_WIRE_ON ||
+                            nb == BLK_LEVER_OFF || nb == BLK_LEVER_ON ||
+                            nb == BLK_DOOR_OFF || nb == BLK_DOOR_ON ||
+                            nb == BLK_TRAPDOOR_OFF || nb == BLK_TRAPDOOR_ON ||
+                            nb == BLK_PISTON_OFF || nb == BLK_PISTON_ON ||
+                            nb == BLK_TNT || nb == BLK_TNT_FUSED ||
+                            nb == BLK_PRESSURE_PAD ||
+                            nb == BLK_REDSTONE_BLOCK) {
+                            t->connect |= (1u << d);
+                        }
+                    }
+                }
             }
         }
     }
@@ -130,26 +182,546 @@ typedef struct {
     uint16_t color;
 } TorchCuboid;
 
-static void wire_parts(bool powered, TorchCuboid out[2]) {
-    /* Two thin slabs on the floor of the cell, forming a "+". The
-     * raycaster treats wire cells as non-opaque, so this is the
-     * only thing the player ever sees of a wire. Powered wires use
-     * a brighter red — both slabs share the same colour. */
+static int wire_parts_n(bool powered, uint8_t connect, TorchCuboid *out) {
+    /* Lifted ~10 cm above the floor of the cell so it reads as wire
+     * sitting on TOP of the supporting block, not painted into the
+     * surface. The thin slabs render via the post-pass so anything
+     * below shows through cleanly. */
     uint16_t c = powered ? rgb565(255, 70, 50)
                           : rgb565(130, 35, 30);
-    /* East-west bar. */
-    out[0].cx = 0.5f; out[0].cy = 0.03f; out[0].cz = 0.5f;
-    out[0].hx = 0.48f; out[0].hy = 0.025f; out[0].hz = 0.06f;
-    out[0].color = c;
-    /* North-south bar. */
-    out[1].cx = 0.5f; out[1].cy = 0.03f; out[1].cz = 0.5f;
-    out[1].hx = 0.06f; out[1].hy = 0.025f; out[1].hz = 0.48f;
-    out[1].color = c;
+    const float Y  = 0.10f;
+    const float HY = 0.03f;
+    const float W  = 0.06f;   /* half-width of the strip */
+    const float CENTER_HALF = 0.06f;
+    int n = 0;
+    /* Always render a tiny central pad so isolated dust still
+     * shows. */
+    out[n].cx = 0.5f; out[n].cy = Y; out[n].cz = 0.5f;
+    out[n].hx = CENTER_HALF; out[n].hy = HY; out[n].hz = CENTER_HALF;
+    out[n].color = c;
+    n++;
+    /* Arm toward each connected neighbour. Half-length stops at
+     * the central pad so adjacent arms join cleanly. */
+    bool px = (connect & 0x1) != 0;
+    bool nx = (connect & 0x2) != 0;
+    bool pz = (connect & 0x4) != 0;
+    bool nz = (connect & 0x8) != 0;
+    if (px) {
+        out[n].cx = 0.78f; out[n].cy = Y; out[n].cz = 0.5f;
+        out[n].hx = 0.22f; out[n].hy = HY; out[n].hz = W;
+        out[n].color = c; n++;
+    }
+    if (nx) {
+        out[n].cx = 0.22f; out[n].cy = Y; out[n].cz = 0.5f;
+        out[n].hx = 0.22f; out[n].hy = HY; out[n].hz = W;
+        out[n].color = c; n++;
+    }
+    if (pz) {
+        out[n].cx = 0.5f; out[n].cy = Y; out[n].cz = 0.78f;
+        out[n].hx = W; out[n].hy = HY; out[n].hz = 0.22f;
+        out[n].color = c; n++;
+    }
+    if (nz) {
+        out[n].cx = 0.5f; out[n].cy = Y; out[n].cz = 0.22f;
+        out[n].hx = W; out[n].hy = HY; out[n].hz = 0.22f;
+        out[n].color = c; n++;
+    }
+    return n;
 }
 
-static void torch_parts(int kind, int orient, TorchCuboid out[2]) {
-    if (kind == TORCH_KIND_WIRE)    { wire_parts(false, out); return; }
-    if (kind == TORCH_KIND_WIRE_ON) { wire_parts(true,  out); return; }
+#define MAX_SPRITE_PARTS 8
+
+static int ladder_parts_n(int orient, TorchCuboid *out) {
+    /* Two vertical thin slabs forming a rail+rung silhouette pinned
+     * to one face of the cell. The face the player aimed at is
+     * stored via craft_torches_record_orient. */
+    /* High contrast so rails vs rungs are obvious at 128 px. Rails
+     * use a deep wood tone; rungs a bright light tone. */
+    uint16_t rail = rgb565(80, 50, 25);
+    uint16_t rung = rgb565(220, 160, 90);
+    /* Defaults — laid against -Z wall (cz = 0.08), rails running L/R
+     * along X at x=0.25 / 0.75. Override per face below. */
+    /* Cuboids sit ~0.18 in from the wall so they read as projecting
+     * forward from the surface, not painted onto it. */
+    float a_cx = 0.25f, a_cz = 0.18f, a_hx = 0.04f, a_hz = 0.04f;
+    float b_cx = 0.75f, b_cz = 0.18f, b_hx = 0.04f, b_hz = 0.04f;
+    switch (orient) {
+        case FACE_PZ:   /* aimed at +Z face of parent → ladder on -Z wall of cell */
+            /* defaults */
+            break;
+        case FACE_NZ:   /* aimed at -Z face → ladder on +Z wall */
+            a_cz = 0.82f; b_cz = 0.82f;
+            break;
+        case FACE_PX:   /* aimed at +X face → ladder on -X wall */
+            a_cx = 0.18f; b_cx = 0.18f;
+            a_cz = 0.25f; b_cz = 0.75f;
+            break;
+        case FACE_NX:   /* aimed at -X face → ladder on +X wall */
+            a_cx = 0.82f; b_cx = 0.82f;
+            a_cz = 0.25f; b_cz = 0.75f;
+            break;
+        default:
+            break;
+    }
+    /* Two vertical rails — beefier (5 cm thick each way) so they're
+     * visible across the cell at 128 px. */
+    out[0].cx = a_cx; out[0].cy = 0.5f; out[0].cz = a_cz;
+    out[0].hx = 0.05f; out[0].hy = 0.48f; out[0].hz = 0.05f;
+    out[0].color = rail;
+    out[1].cx = b_cx; out[1].cy = 0.5f; out[1].cz = b_cz;
+    out[1].hx = 0.05f; out[1].hy = 0.48f; out[1].hz = 0.05f;
+    out[1].color = rail;
+    /* Horizontal rungs — 4 spaced along Y. Each is a thin slab
+     * spanning the rail-to-rail axis (the player-perpendicular axis
+     * for the chosen wall). */
+    bool x_axis = (orient == FACE_PX || orient == FACE_NX);
+    float ry[4] = { 0.18f, 0.40f, 0.62f, 0.84f };
+    for (int i = 0; i < 4; i++) {
+        TorchCuboid *r = &out[2 + i];
+        if (x_axis) {
+            /* Wall is on X axis — rungs span Z. */
+            r->cx = a_cx; r->cy = ry[i]; r->cz = 0.5f;
+            r->hx = 0.03f; r->hy = 0.025f; r->hz = 0.30f;
+        } else {
+            /* Wall is on Z axis — rungs span X. */
+            r->cx = 0.5f; r->cy = ry[i]; r->cz = a_cz;
+            r->hx = 0.30f; r->hy = 0.025f; r->hz = 0.03f;
+        }
+        r->color = rung;
+    }
+    return 6;
+}
+
+static void pad_parts(TorchCuboid out[2]) {
+    /* Raised slab on the cell floor — sits ~10 cm above the
+     * supporting block so it's visibly raised. Active-dip would
+     * need per-cell stand-on plumbing through the torch struct;
+     * left as a follow-up. */
+    uint16_t pad = rgb565(170, 170, 180);
+    uint16_t edge = rgb565(110, 110, 125);
+    out[0].cx = 0.5f; out[0].cy = 0.10f; out[0].cz = 0.5f;
+    out[0].hx = 0.42f; out[0].hy = 0.05f; out[0].hz = 0.42f;
+    out[0].color = pad;
+    /* Darker rim to differentiate from the slab surface. */
+    out[1].cx = 0.5f; out[1].cy = 0.08f; out[1].cz = 0.5f;
+    out[1].hx = 0.45f; out[1].hy = 0.025f; out[1].hz = 0.45f;
+    out[1].color = edge;
+}
+
+/* Door slab — thin vertical panel spanning the doorway when closed,
+ * rotated 90° against an adjacent wall when open. `orient` is the
+ * face of the parent wall the door was placed against, which tells
+ * us which axis the doorway runs along. */
+static int door_parts_n(bool open, int orient, TorchCuboid *out) {
+    /* High-contrast wood + iron so the door reads at 128 px scale. */
+    uint16_t plank   = rgb565(195, 130, 60);
+    uint16_t plank_d = rgb565(80, 50, 25);
+    uint16_t iron    = rgb565(70, 70, 85);
+    uint16_t knob    = rgb565(255, 215, 90);
+
+    /* Doorway axis (which way the door blocks when CLOSED):
+     *   FACE_PZ / FACE_NZ  → player faced ±Z when placing → doorway
+     *     spans X (the closed panel runs east-west).
+     *   FACE_PX / FACE_NX  → doorway spans Z. */
+    bool span_x = (orient == FACE_PZ || orient == FACE_NZ);
+
+    /* Hinge sits at the LOW corner of the doorway axis (cx=0 for
+     * span_x, cz=0 for span_z). The open variant rotates the panel
+     * 90° around that hinge edge, so the open panel hugs the LOW
+     * wall on the perpendicular axis. */
+    /* Geometry rule: panel slab is thin (hz=0.025) so background
+     * blocks show past the door on both sides. Grain veins + iron
+     * straps + knob are made slightly THICKER than the panel so they
+     * visibly protrude through it — visible from BOTH faces, not
+     * just the one face the offset used to favour. */
+    const float PANEL_T  = 0.025f;
+    const float DETAIL_T = 0.040f;   /* > panel so it pokes out both sides */
+    const float KNOB_T   = 0.055f;
+
+    if (!open) {
+        if (span_x) {
+            /* Closed panel: spans X, thin Z, centred at cz=0.5. */
+            out[0].cx = 0.5f;  out[0].cy = 0.5f; out[0].cz = 0.5f;
+            out[0].hx = 0.45f; out[0].hy = 0.48f; out[0].hz = PANEL_T;
+            out[0].color = plank;
+            float vein_cx[3] = { 0.22f, 0.50f, 0.78f };
+            for (int i = 0; i < 3; i++) {
+                out[1 + i].cx = vein_cx[i];
+                out[1 + i].cy = 0.5f;
+                out[1 + i].cz = 0.5f;
+                out[1 + i].hx = 0.018f;
+                out[1 + i].hy = 0.46f;
+                out[1 + i].hz = DETAIL_T;
+                out[1 + i].color = plank_d;
+            }
+            out[4].cx = 0.5f;  out[4].cy = 0.84f; out[4].cz = 0.5f;
+            out[4].hx = 0.41f; out[4].hy = 0.04f; out[4].hz = DETAIL_T;
+            out[4].color = iron;
+            out[5].cx = 0.5f;  out[5].cy = 0.16f; out[5].cz = 0.5f;
+            out[5].hx = 0.41f; out[5].hy = 0.04f; out[5].hz = DETAIL_T;
+            out[5].color = iron;
+            out[6].cx = 0.85f; out[6].cy = 0.50f; out[6].cz = 0.5f;
+            out[6].hx = 0.035f; out[6].hy = 0.04f; out[6].hz = KNOB_T;
+            out[6].color = knob;
+        } else {
+            out[0].cx = 0.5f;  out[0].cy = 0.5f; out[0].cz = 0.5f;
+            out[0].hx = PANEL_T; out[0].hy = 0.48f; out[0].hz = 0.45f;
+            out[0].color = plank;
+            float vein_cz[3] = { 0.22f, 0.50f, 0.78f };
+            for (int i = 0; i < 3; i++) {
+                out[1 + i].cx = 0.5f;
+                out[1 + i].cy = 0.5f;
+                out[1 + i].cz = vein_cz[i];
+                out[1 + i].hx = DETAIL_T;
+                out[1 + i].hy = 0.46f;
+                out[1 + i].hz = 0.018f;
+                out[1 + i].color = plank_d;
+            }
+            out[4].cx = 0.5f;  out[4].cy = 0.84f; out[4].cz = 0.5f;
+            out[4].hx = DETAIL_T; out[4].hy = 0.04f; out[4].hz = 0.41f;
+            out[4].color = iron;
+            out[5].cx = 0.5f;  out[5].cy = 0.16f; out[5].cz = 0.5f;
+            out[5].hx = DETAIL_T; out[5].hy = 0.04f; out[5].hz = 0.41f;
+            out[5].color = iron;
+            out[6].cx = 0.5f;  out[6].cy = 0.50f; out[6].cz = 0.85f;
+            out[6].hx = KNOB_T; out[6].hy = 0.04f; out[6].hz = 0.035f;
+            out[6].color = knob;
+        }
+        return 7;
+    } else {
+        /* OPEN — panel rotated 90° around the LOW-edge hinge. */
+        if (span_x) {
+            out[0].cx = 0.05f; out[0].cy = 0.5f; out[0].cz = 0.5f;
+            out[0].hx = PANEL_T; out[0].hy = 0.48f; out[0].hz = 0.45f;
+            out[0].color = plank;
+            float vein_cz[3] = { 0.22f, 0.50f, 0.78f };
+            for (int i = 0; i < 3; i++) {
+                out[1 + i].cx = 0.05f;
+                out[1 + i].cy = 0.5f;
+                out[1 + i].cz = vein_cz[i];
+                out[1 + i].hx = DETAIL_T;
+                out[1 + i].hy = 0.46f;
+                out[1 + i].hz = 0.018f;
+                out[1 + i].color = plank_d;
+            }
+            out[4].cx = 0.05f; out[4].cy = 0.84f; out[4].cz = 0.5f;
+            out[4].hx = DETAIL_T; out[4].hy = 0.04f; out[4].hz = 0.41f;
+            out[4].color = iron;
+            out[5].cx = 0.05f; out[5].cy = 0.16f; out[5].cz = 0.5f;
+            out[5].hx = DETAIL_T; out[5].hy = 0.04f; out[5].hz = 0.41f;
+            out[5].color = iron;
+            out[6].cx = 0.05f; out[6].cy = 0.50f; out[6].cz = 0.85f;
+            out[6].hx = KNOB_T; out[6].hy = 0.04f; out[6].hz = 0.035f;
+            out[6].color = knob;
+        } else {
+            out[0].cx = 0.5f;  out[0].cy = 0.5f; out[0].cz = 0.05f;
+            out[0].hx = 0.45f; out[0].hy = 0.48f; out[0].hz = PANEL_T;
+            out[0].color = plank;
+            float vein_cx[3] = { 0.22f, 0.50f, 0.78f };
+            for (int i = 0; i < 3; i++) {
+                out[1 + i].cx = vein_cx[i];
+                out[1 + i].cy = 0.5f;
+                out[1 + i].cz = 0.05f;
+                out[1 + i].hx = 0.018f;
+                out[1 + i].hy = 0.46f;
+                out[1 + i].hz = DETAIL_T;
+                out[1 + i].color = plank_d;
+            }
+            out[4].cx = 0.5f;  out[4].cy = 0.84f; out[4].cz = 0.05f;
+            out[4].hx = 0.41f; out[4].hy = 0.04f; out[4].hz = DETAIL_T;
+            out[4].color = iron;
+            out[5].cx = 0.5f;  out[5].cy = 0.16f; out[5].cz = 0.05f;
+            out[5].hx = 0.41f; out[5].hy = 0.04f; out[5].hz = DETAIL_T;
+            out[5].color = iron;
+            out[6].cx = 0.85f; out[6].cy = 0.50f; out[6].cz = 0.05f;
+            out[6].hx = 0.035f; out[6].hy = 0.04f; out[6].hz = KNOB_T;
+            out[6].color = knob;
+        }
+        return 7;
+    }
+}
+
+/* Trapdoor — thin horizontal slab at floor level when closed, swung
+ * up against the hinge wall when open. */
+static int trapdoor_parts_n(bool open, int orient, TorchCuboid *out) {
+    uint16_t plank   = rgb565(195, 130, 60);
+    uint16_t plank_d = rgb565(80, 50, 25);
+    uint16_t iron    = rgb565(70, 70, 85);
+    if (!open) {
+        /* CLOSED — thin slab at the TOP of the cell (the ceiling
+         * surface), so it reads as a hatch you stand on top of.
+         * 3 plank strips along the long axis + 2 iron straps + 2
+         * grain veins crossing perpendicular = wood-grain feel. */
+        out[0].cx = 0.5f;  out[0].cy = 0.94f; out[0].cz = 0.5f;
+        out[0].hx = 0.46f; out[0].hy = 0.05f; out[0].hz = 0.46f;
+        out[0].color = plank;
+        /* Dark grain veins along Z. */
+        float vein[3] = { 0.22f, 0.50f, 0.78f };
+        for (int i = 0; i < 3; i++) {
+            out[1 + i].cx = vein[i];
+            out[1 + i].cy = 0.95f;
+            out[1 + i].cz = 0.5f;
+            out[1 + i].hx = 0.018f;
+            out[1 + i].hy = 0.052f;
+            out[1 + i].hz = 0.46f;
+            out[1 + i].color = plank_d;
+        }
+        /* Iron straps along the short edges. */
+        out[4].cx = 0.5f;  out[4].cy = 0.95f; out[4].cz = 0.10f;
+        out[4].hx = 0.41f; out[4].hy = 0.055f; out[4].hz = 0.04f;
+        out[4].color = iron;
+        out[5].cx = 0.5f;  out[5].cy = 0.95f; out[5].cz = 0.90f;
+        out[5].hx = 0.41f; out[5].hy = 0.055f; out[5].hz = 0.04f;
+        out[5].color = iron;
+        (void)orient;
+        return 6;
+    } else {
+        /* OPEN — slab swung vertical, hinged on the side closest to
+         * the player's facing direction. */
+        bool on_x = (orient == FACE_PX || orient == FACE_NX);
+        if (on_x) {
+            float wall_axis = (orient == FACE_PX) ? 0.05f : 0.95f;
+            float vein_off  = (orient == FACE_PX) ? -0.008f : 0.008f;
+            out[0].cx = wall_axis; out[0].cy = 0.5f;  out[0].cz = 0.5f;
+            out[0].hx = 0.05f;     out[0].hy = 0.48f; out[0].hz = 0.46f;
+            out[0].color = plank;
+            /* Dark grain veins along Z. */
+            float vein[3] = { 0.22f, 0.50f, 0.78f };
+            for (int i = 0; i < 3; i++) {
+                out[1 + i].cx = wall_axis + vein_off;
+                out[1 + i].cy = 0.5f;
+                out[1 + i].cz = vein[i];
+                out[1 + i].hx = 0.052f;
+                out[1 + i].hy = 0.46f;
+                out[1 + i].hz = 0.018f;
+                out[1 + i].color = plank_d;
+            }
+            out[4].cx = wall_axis + vein_off; out[4].cy = 0.85f; out[4].cz = 0.5f;
+            out[4].hx = 0.058f; out[4].hy = 0.035f; out[4].hz = 0.41f;
+            out[4].color = iron;
+            out[5].cx = wall_axis + vein_off; out[5].cy = 0.15f; out[5].cz = 0.5f;
+            out[5].hx = 0.058f; out[5].hy = 0.035f; out[5].hz = 0.41f;
+            out[5].color = iron;
+        } else {
+            float wall_axis = (orient == FACE_PZ) ? 0.05f : 0.95f;
+            float vein_off  = (orient == FACE_PZ) ? -0.008f : 0.008f;
+            out[0].cx = 0.5f;  out[0].cy = 0.5f;  out[0].cz = wall_axis;
+            out[0].hx = 0.46f; out[0].hy = 0.48f; out[0].hz = 0.05f;
+            out[0].color = plank;
+            float vein[3] = { 0.22f, 0.50f, 0.78f };
+            for (int i = 0; i < 3; i++) {
+                out[1 + i].cx = vein[i];
+                out[1 + i].cy = 0.5f;
+                out[1 + i].cz = wall_axis + vein_off;
+                out[1 + i].hx = 0.018f;
+                out[1 + i].hy = 0.46f;
+                out[1 + i].hz = 0.052f;
+                out[1 + i].color = plank_d;
+            }
+            out[4].cx = 0.5f;  out[4].cy = 0.85f; out[4].cz = wall_axis + vein_off;
+            out[4].hx = 0.41f; out[4].hy = 0.035f; out[4].hz = 0.058f;
+            out[4].color = iron;
+            out[5].cx = 0.5f;  out[5].cy = 0.15f; out[5].cz = wall_axis + vein_off;
+            out[5].hx = 0.41f; out[5].hy = 0.035f; out[5].hz = 0.058f;
+            out[5].color = iron;
+        }
+        return 6;
+    }
+}
+
+/* Piston model — emits 3 sub-parts (base / shaft / head) positioned
+ * along the orient axis. Variants:
+ *   PISTON_OFF: base 0..0.45, shaft 0.45..0.7, head 0.7..1.0 (fits in cell)
+ *   PISTON_ON : base 0..0.45, shaft 0.45..1.0 (head is in the next cell)
+ *   PISTON_ARM: shaft 0..0.7, head 0.7..1.0   (continues from PISTON_ON cell)
+ * `axis` is the orient (Face enum). Each part is built in axis-
+ * neutral coords then rotated by remapping fields. */
+static int piston_parts_n(int kind, int orient, TorchCuboid *out) {
+    uint16_t base_l = rgb565(135, 135, 145);
+    uint16_t base_d = rgb565(85, 85, 100);
+    uint16_t shaft  = rgb565(180, 180, 190);
+    uint16_t head_l = rgb565(180, 130, 65);
+    uint16_t head_d = rgb565(115, 75, 35);
+
+    /* Build along +Y, then rotate to the actual orient. Local Y
+     * is the "shaft axis". */
+    /* Pick axis offsets for the chosen face. */
+    int ax_axis = 0;     /* 0=X, 1=Y, 2=Z */
+    float dir = 1.0f;    /* +1 = toward higher coord */
+    switch (orient) {
+        case 0: ax_axis = 0; dir =  1.0f; break;   /* FACE_PX */
+        case 1: ax_axis = 0; dir = -1.0f; break;   /* FACE_NX */
+        case 2: ax_axis = 1; dir =  1.0f; break;   /* FACE_PY */
+        case 3: ax_axis = 1; dir = -1.0f; break;   /* FACE_NY */
+        case 4: ax_axis = 2; dir =  1.0f; break;   /* FACE_PZ */
+        default: ax_axis = 2; dir = -1.0f; break;  /* FACE_NZ */
+    }
+
+    /* Helper: writes a cuboid with `t` running along the shaft axis
+     * (0..1 in cell-local coords with shaft-direction sign applied). */
+    #define PISTON_PART(idx, t_lo, t_hi, perp_half, COL) do {            \
+        TorchCuboid *p = &out[(idx)];                                    \
+        p->color = (COL);                                                \
+        float t_centre = 0.5f * ((t_lo) + (t_hi));                        \
+        float t_half   = 0.5f * ((t_hi) - (t_lo));                        \
+        /* If dir is -1, mirror around 0.5 along the shaft axis. */      \
+        float ax_centre = (dir > 0) ? t_centre : (1.0f - t_centre);      \
+        if (ax_axis == 0) {                                              \
+            p->cx = ax_centre; p->cy = 0.5f;     p->cz = 0.5f;           \
+            p->hx = t_half;    p->hy = perp_half; p->hz = perp_half;     \
+        } else if (ax_axis == 1) {                                       \
+            p->cx = 0.5f;      p->cy = ax_centre; p->cz = 0.5f;          \
+            p->hx = perp_half; p->hy = t_half;    p->hz = perp_half;     \
+        } else {                                                         \
+            p->cx = 0.5f;      p->cy = 0.5f;     p->cz = ax_centre;      \
+            p->hx = perp_half; p->hy = perp_half; p->hz = t_half;        \
+        }                                                                \
+    } while (0)
+
+    int n = 0;
+    if (kind == TORCH_KIND_PISTON_OFF) {
+        /* base 0..0.68 (full-width), tiny gap, head 0.70..1.0 (30%) */
+        PISTON_PART(n, 0.00f, 0.68f, 0.48f, base_l); n++;
+        /* darker inset band on the base — read as a panel detail */
+        PISTON_PART(n, 0.04f, 0.64f, 0.35f, base_d); n++;
+        /* head — full perp size to read as a cap */
+        PISTON_PART(n, 0.70f, 1.00f, 0.48f, head_l); n++;
+        PISTON_PART(n, 0.74f, 0.96f, 0.36f, head_d); n++;
+    } else if (kind == TORCH_KIND_PISTON_ON) {
+        /* Extended base — base in this cell, shaft pokes out fully */
+        PISTON_PART(n, 0.00f, 0.68f, 0.48f, base_l); n++;
+        PISTON_PART(n, 0.04f, 0.64f, 0.35f, base_d); n++;
+        PISTON_PART(n, 0.68f, 1.00f, 0.08f, shaft);  n++;
+    } else if (kind == TORCH_KIND_PISTON_ARM) {
+        /* Arm cell — shaft enters from near side, head at far end */
+        PISTON_PART(n, 0.00f, 0.70f, 0.08f, shaft);  n++;
+        PISTON_PART(n, 0.70f, 1.00f, 0.48f, head_l); n++;
+        PISTON_PART(n, 0.74f, 0.96f, 0.36f, head_d); n++;
+    }
+    #undef PISTON_PART
+    return n;
+}
+
+/* Lever — 3D mounted switch. A stone base plate sits flat against
+ * the placement face; a wood handle tilts off the centre toward
+ * one side (flips when toggled), tipped with a small ball. */
+static int lever_parts_n(bool on, int orient, TorchCuboid *out) {
+    uint16_t plate    = rgb565(150, 150, 165);
+    uint16_t plate_d  = rgb565(95, 95, 110);
+    uint16_t handle   = rgb565(160, 110, 55);
+    uint16_t handle_d = rgb565(95, 65, 30);
+    uint16_t ball     = on ? rgb565(255, 80, 60) : rgb565(225, 225, 235);
+
+    /* Position the base plate flat against the orient face. Use
+     * local 0..1 cell coords. The plate is 0.55×0.45×0.55 thin,
+     * the handle is a stalk + ball poking outward from the plate.
+     * Tilt offset: +0.18 when ON, -0.18 when OFF — flips sides. */
+    float tilt = on ? 0.18f : -0.18f;
+
+    /* Helper macro to set a part using axis-relative coords:
+     *   `t` runs OUTWARD from the wall (0 = at wall, 1 = far face)
+     *   `u, v` are perpendicular axes (each 0..1 across the wall)
+     *   `tilt_uv` shifts the part along U when not zero (handle tilt)
+     *
+     * `orient` is the Face enum of the PARENT block the player aimed
+     * at. The lever sits on the placement cell's wall touching the
+     * parent — which is OPPOSITE the orient direction in cell-local
+     * coords. So orient=FACE_PX (parent's +X face) ⇒ wall is at the
+     * placement cell's LOW X (touching parent on its east side). */
+    #define LEVER_PART(idx, t_c, t_h, u_c, u_h, v_c, v_h, COL) do {       \
+        TorchCuboid *p = &out[(idx)];                                     \
+        p->color = (COL);                                                 \
+        float tc_signed = (t_c);                                          \
+        switch (orient) {                                                 \
+            case 0: /* FACE_PX → wall is at LOW X of placement cell */    \
+                p->cx = tc_signed;        p->cy = (v_c); p->cz = (u_c);   \
+                p->hx = (t_h);            p->hy = (v_h); p->hz = (u_h);   \
+                break;                                                    \
+            case 1: /* FACE_NX → wall is at HIGH X */                     \
+                p->cx = 1.0f - tc_signed; p->cy = (v_c); p->cz = (u_c);   \
+                p->hx = (t_h);            p->hy = (v_h); p->hz = (u_h);   \
+                break;                                                    \
+            case 2: /* FACE_PY → wall is the floor (low Y) */             \
+                p->cx = (u_c); p->cy = tc_signed;        p->cz = (v_c);   \
+                p->hx = (u_h); p->hy = (t_h);            p->hz = (v_h);   \
+                break;                                                    \
+            case 3: /* FACE_NY → wall is the ceiling (high Y) */          \
+                p->cx = (u_c); p->cy = 1.0f - tc_signed; p->cz = (v_c);   \
+                p->hx = (u_h); p->hy = (t_h);            p->hz = (v_h);   \
+                break;                                                    \
+            case 4: /* FACE_PZ → wall at LOW Z */                         \
+                p->cx = (u_c); p->cy = (v_c); p->cz = tc_signed;          \
+                p->hx = (u_h); p->hy = (v_h); p->hz = (t_h);              \
+                break;                                                    \
+            default: /* FACE_NZ → wall at HIGH Z */                       \
+                p->cx = (u_c); p->cy = (v_c); p->cz = 1.0f - tc_signed;   \
+                p->hx = (u_h); p->hy = (v_h); p->hz = (t_h);              \
+                break;                                                    \
+        }                                                                 \
+    } while (0)
+
+    int n = 0;
+    /* Base plate — flat against the wall, sticking out 0.08 from
+     * the face, covering the central 0.55×0.55 of the wall. */
+    LEVER_PART(n,
+        0.08f, 0.08f,           /* t centre / half — close to wall */
+        0.5f,  0.28f,           /* u centre / half */
+        0.5f,  0.28f,           /* v centre / half */
+        plate);
+    n++;
+    /* Plate inset (darker) — sit inside the base for visual depth. */
+    LEVER_PART(n,
+        0.10f, 0.06f,
+        0.5f,  0.20f,
+        0.5f,  0.20f,
+        plate_d);
+    n++;
+    /* Handle stalk — tilted along U axis. Length 0.30, thick 0.05. */
+    LEVER_PART(n,
+        0.30f, 0.20f,           /* protrudes 0.10..0.50 from wall */
+        0.5f + tilt * 0.5f, 0.05f,
+        0.5f,               0.05f,
+        handle);
+    n++;
+    /* Darker accent on the stalk. */
+    LEVER_PART(n,
+        0.30f, 0.18f,
+        0.5f + tilt * 0.5f, 0.03f,
+        0.5f,               0.03f,
+        handle_d);
+    n++;
+    /* Ball tip at the far end. */
+    LEVER_PART(n,
+        0.55f, 0.08f,
+        0.5f + tilt, 0.08f,
+        0.5f,        0.08f,
+        ball);
+    n++;
+    #undef LEVER_PART
+    return n;
+}
+
+/* Returns the number of parts written (1..MAX_SPRITE_PARTS).
+ * Callers should pass an array at least MAX_SPRITE_PARTS long. */
+/* Same as torch_parts but accepts a connection mask for wires. The
+ * wire-only API at the top of the file calls this with mask=0xF
+ * (all four arms) for held-item previews; the world render passes
+ * the per-cell connect mask so only real connections draw. */
+static int torch_parts_full(int kind, int orient, uint8_t connect,
+                            TorchCuboid *out) {
+    if (kind == TORCH_KIND_WIRE)              { return wire_parts_n(false, connect, out); }
+    if (kind == TORCH_KIND_WIRE_ON)           { return wire_parts_n(true,  connect, out); }
+    if (kind == TORCH_KIND_LADDER)            { return ladder_parts_n(orient, out); }
+    if (kind == TORCH_KIND_PRESSURE_PAD)      { pad_parts(out); return 2; }
+    if (kind == TORCH_KIND_DOOR_CLOSED)       { return door_parts_n(false, orient, out); }
+    if (kind == TORCH_KIND_DOOR_OPEN)         { return door_parts_n(true,  orient, out); }
+    if (kind == TORCH_KIND_TRAPDOOR_CLOSED)   { return trapdoor_parts_n(false, orient, out); }
+    if (kind == TORCH_KIND_TRAPDOOR_OPEN)     { return trapdoor_parts_n(true,  orient, out); }
+    if (kind == TORCH_KIND_PISTON_OFF ||
+        kind == TORCH_KIND_PISTON_ON  ||
+        kind == TORCH_KIND_PISTON_ARM)        { return piston_parts_n(kind, orient, out); }
+    if (kind == TORCH_KIND_LEVER_OFF)         { return lever_parts_n(false, orient, out); }
+    if (kind == TORCH_KIND_LEVER_ON)          { return lever_parts_n(true,  orient, out); }
 
     /* Defaults — floor torch. */
     float sx = 0.5f, sz = 0.5f;
@@ -183,6 +755,13 @@ static void torch_parts(int kind, int orient, TorchCuboid out[2]) {
     out[1].cx = fx; out[1].cy = fy; out[1].cz = fz;
     out[1].hx = 0.09f; out[1].hy = 0.10f; out[1].hz = 0.09f;
     out[1].color = rgb565(255, 200, 60);
+    return 2;
+}
+
+/* Back-compat wrapper for callers that don't have a per-cell
+ * connect mask (held-item previews use 0xF = "all four arms"). */
+static int torch_parts(int kind, int orient, TorchCuboid *out) {
+    return torch_parts_full(kind, orient, 0xF, out);
 }
 
 /* --- Picking ---------------------------------------------------- */
@@ -231,9 +810,10 @@ int craft_torches_pick(const CraftCamera *cam, float max_dist) {
     for (int i = 0; i < CRAFT_MAX_TORCHES; i++) {
         CraftTorch *t = &craft_torches[i];
         if (!t->alive) continue;
-        TorchCuboid parts[2];
-        torch_parts(t->kind, t->orient, parts);
-        for (int p = 0; p < 2; p++) {
+        TorchCuboid parts[MAX_SPRITE_PARTS];
+        int n_parts = torch_parts_full(t->kind, t->orient,
+                                       t->connect, parts);
+        for (int p = 0; p < n_parts; p++) {
             float bminx = (float)t->wx + parts[p].cx - parts[p].hx;
             float bminy = (float)t->wy + parts[p].cy - parts[p].hy;
             float bminz = (float)t->wz + parts[p].cz - parts[p].hz;
@@ -292,14 +872,15 @@ void craft_torches_render(const CraftCamera *cam, uint16_t *fb) {
         float dist2 = dxp*dxp + dyp*dyp + dzp*dzp;
         if (dist2 > 50.0f * 50.0f) continue;
 
-        TorchCuboid parts[2];
-        torch_parts(t->kind, t->orient, parts);
+        TorchCuboid parts[MAX_SPRITE_PARTS];
+        int n_parts = torch_parts_full(t->kind, t->orient,
+                                       t->connect, parts);
 
-        /* Compute the screen bbox containing all 8 corners of both
-         * parts' world-space AABBs. */
+        /* Compute the screen bbox containing all 8 corners of the
+         * union of every part's world-space AABB. */
         float bmin_x = 1.0f, bmin_y = 1.0f, bmin_z = 1.0f;
         float bmax_x = 0.0f, bmax_y = 0.0f, bmax_z = 0.0f;
-        for (int p = 0; p < 2; p++) {
+        for (int p = 0; p < n_parts; p++) {
             float lo_x = parts[p].cx - parts[p].hx;
             float lo_y = parts[p].cy - parts[p].hy;
             float lo_z = parts[p].cz - parts[p].hz;
@@ -363,7 +944,7 @@ void craft_torches_render(const CraftCamera *cam, uint16_t *fb) {
                 float best_t = 1e30f;
                 uint16_t best_color = 0;
                 bool best_is_flame = false;
-                for (int p = 0; p < 2; p++) {
+                for (int p = 0; p < n_parts; p++) {
                     float bminx = parts[p].cx - parts[p].hx;
                     float bmaxx = parts[p].cx + parts[p].hx;
                     float bminy = parts[p].cy - parts[p].hy;
@@ -377,7 +958,10 @@ void craft_torches_render(const CraftCamera *cam, uint16_t *fb) {
                         if (th < best_t) {
                             best_t = th;
                             best_color = parts[p].color;
-                            best_is_flame = (p == 1);
+                            /* p==1 is "flame" only for the torch
+                             * model; for other sprites the second
+                             * cuboid is just a detail accent. */
+                            best_is_flame = (t->kind == TORCH_KIND_TORCH && p == 1);
                         }
                     }
                 }
@@ -398,10 +982,51 @@ void craft_torches_render(const CraftCamera *cam, uint16_t *fb) {
                  * as glowing dust — same treatment as the flame. */
                 if (!best_is_flame && t->kind == TORCH_KIND_TORCH) {
                     best_color = shade565(best_color, 220);
+                } else if (t->kind == TORCH_KIND_LADDER) {
+                    /* Ladders take partial shading so they read as
+                     * physical wood, not glowing. */
+                    best_color = shade565(best_color, 200);
                 }
                 fb[idx] = best_color;
                 craft_zbuf[idx] = (uint8_t)q;
             }
         }
     }
+}
+
+/* Map a sprite-block id to the torch system's "kind" + fill the
+ * cuboid parts so the held-item viewport can render a mini 3D
+ * preview instead of a flat painted cube. */
+int craft_torches_block_model(uint8_t b, int orient,
+                              CraftToolPart *out, int max_n) {
+    int kind;
+    switch (b) {
+        case BLK_LADDER:           kind = TORCH_KIND_LADDER; break;
+        case BLK_REDSTONE_WIRE:    kind = TORCH_KIND_WIRE; break;
+        case BLK_REDSTONE_WIRE_ON: kind = TORCH_KIND_WIRE_ON; break;
+        case BLK_PRESSURE_PAD:     kind = TORCH_KIND_PRESSURE_PAD; break;
+        case BLK_DOOR_OFF:         kind = TORCH_KIND_DOOR_CLOSED; break;
+        case BLK_DOOR_ON:          kind = TORCH_KIND_DOOR_OPEN; break;
+        case BLK_TRAPDOOR_OFF:     kind = TORCH_KIND_TRAPDOOR_CLOSED; break;
+        case BLK_TRAPDOOR_ON:      kind = TORCH_KIND_TRAPDOOR_OPEN; break;
+        case BLK_TORCH:            kind = TORCH_KIND_TORCH; break;
+        case BLK_LEVER_OFF:
+        case BLK_LEVER_ON:
+            /* Levers don't have a sprite-system model — they're
+             * just cubes with directional textures. Return 0. */
+            return 0;
+        default:
+            return 0;
+    }
+    TorchCuboid local[MAX_SPRITE_PARTS];
+    int n = torch_parts(kind, orient, local);
+    if (n > max_n) n = max_n;
+    /* CraftToolPart and TorchCuboid share the layout — direct copy. */
+    for (int i = 0; i < n; i++) {
+        CraftToolPart *o = &out[i];
+        o->cx = local[i].cx; o->cy = local[i].cy; o->cz = local[i].cz;
+        o->hx = local[i].hx; o->hy = local[i].hy; o->hz = local[i].hz;
+        o->color = local[i].color;
+    }
+    return n;
 }

@@ -32,6 +32,7 @@
 #include "craft_render.h"
 #include "craft_audio.h"
 #include "craft_mobs.h"
+#include "craft_redstone.h"
 #include "craft_torches.h"
 #include "craft_furnace.h"
 #include "craft_chests.h"
@@ -85,6 +86,11 @@ void craft_player_set_mode(CraftPlayer *p, CraftGameMode mode) {
         p->respawn_timer   = 0.0f;
     }
 }
+
+/* Set by craft_player_signal_win from anywhere in the codebase. The
+ * player tick consumes the flag and arms the win-banner timer. */
+static bool s_win_pending;
+void craft_player_signal_win(void) { s_win_pending = true; }
 
 void craft_player_take_damage(CraftPlayer *p, int amount) {
     if (p->mode != CRAFT_MODE_SURVIVAL) return;
@@ -290,11 +296,56 @@ void craft_player_tick(CraftPlayer *p, const CraftInput *in, float dt) {
             p->vel.z = 0;
         }
         p->vel.y += GRAVITY * dt;
+        /* Ladder climbing.
+         *
+         * Engagement is explicit — the player must HOLD LB while
+         * standing in a cell whose chest- or feet-height neighbour
+         * is a ladder. Without LB, gravity applies normally; you
+         * fall past ladders unless you choose to grab them.
+         *
+         * Direction follows pitch: looking up ascends, looking down
+         * descends. Once descending, the moment you touch the
+         * ground we latch a lockout so the next ladder cell in a
+         * corridor floor doesn't immediately re-grab you. You
+         * release LB + repress with upward pitch to re-engage. */
+        int cx = (int)floorf(p->cam.pos.x);
+        int cz = (int)floorf(p->cam.pos.z);
+        int cy_feet = (int)floorf(p->cam.pos.y - PLAYER_EYE);
+        int cy_chest = cy_feet + 1;
+        bool ladder_adj = false;
+        /* Include the player's own cell — the ladder sprite lives
+         * in the cell adjacent to the wall, so the climber is
+         * inside that cell. */
+        const int adj[5][2] = { {0,0}, {1,0}, {-1,0}, {0,1}, {0,-1} };
+        for (int i = 0; i < 5 && !ladder_adj; i++) {
+            int ax = cx + adj[i][0];
+            int az = cz + adj[i][1];
+            if (craft_world_get(ax, cy_feet, az)  == BLK_LADDER) ladder_adj = true;
+            if (craft_world_get(ax, cy_chest, az) == BLK_LADDER) ladder_adj = true;
+        }
+        /* Lockout clears the moment LB is released — fresh press
+         * with upward pitch is the only way to re-engage. */
+        if (!in->lb) p->climb_lockout = false;
+
+        bool lb_engage = in->lb && !in->menu && ladder_adj &&
+                         !p->climb_lockout &&
+                         (p->climbing || p->cam.pitch >= 0.10f);
+        if (lb_engage) {
+            p->climbing  = true;
+            p->vel.y     = (p->cam.pitch >= -0.05f) ? 3.5f : -3.5f;
+            p->vel.x     = 0.0f;
+            p->vel.z     = 0.0f;
+            p->fall_peak_y = p->cam.pos.y;
+        } else {
+            /* Not engaging this frame — drop the climb flag so the
+             * next tick treats this as a fresh grab attempt. */
+            if (p->climbing) p->climbing = false;
+        }
         /* RB tap on ground = jump. Suppressed while MENU is held —
          * otherwise MENU+RB (hotbar-next chord) launches the player
          * mid-cycle, and MENU+LB users who flick RB by accident
          * get a surprise hop. */
-        if (in->rb_pressed && p->on_ground && !in->menu) {
+        if (in->rb_pressed && (p->on_ground || ladder_adj) && !in->menu) {
             p->vel.y = JUMP_VEL;
             p->on_ground = false;
         }
@@ -321,6 +372,7 @@ void craft_player_tick(CraftPlayer *p, const CraftInput *in, float dt) {
 
     float feet_y = p->cam.pos.y - PLAYER_EYE;
     float ny_feet = feet_y + p->vel.y * dt;
+    bool was_on_ground = p->on_ground;
     if (!aabb_blocked(p->cam.pos.x, ny_feet, p->cam.pos.z)) {
         p->cam.pos.y = ny_feet + PLAYER_EYE;
         p->on_ground = false;
@@ -331,6 +383,34 @@ void craft_player_tick(CraftPlayer *p, const CraftInput *in, float dt) {
             p->on_ground = true;
         }
         p->vel.y = 0;
+    }
+    /* Track peak Y over the current air-time so we can compute fall
+     * damage on landing. Walk mode + survival only — fly mode and
+     * creative skip the bookkeeping. */
+    if (!p->fly_mode) {
+        if (!p->on_ground) {
+            if (p->cam.pos.y > p->fall_peak_y) p->fall_peak_y = p->cam.pos.y;
+        } else {
+            if (!was_on_ground) {
+                /* Just landed. 1 HP per block fallen beyond a
+                 * 10-block grace (generous — the 128-pixel screen
+                 * makes vertical drops feel taller than they are).
+                 * Clamped to [0, 20]. */
+                float drop = p->fall_peak_y - p->cam.pos.y;
+                int dmg = (int)(drop - 10.0f + 0.5f);
+                if (dmg > 20) dmg = 20;
+                if (dmg > 0) craft_player_take_damage(p, dmg);
+            }
+            p->fall_peak_y = p->cam.pos.y;
+        }
+        /* Touched ground while on a ladder — latch the climb lockout
+         * so a ladder shaft that bottoms out on a stone floor doesn't
+         * keep you stuck. You release LB + represss with upward
+         * pitch to re-engage. */
+        if (p->on_ground && p->climbing) {
+            p->climbing = false;
+            p->climb_lockout = true;
+        }
     }
 
     /* World is infinite in X/Z — only Y stays clamped to the buffer
@@ -343,33 +423,116 @@ void craft_player_tick(CraftPlayer *p, const CraftInput *in, float dt) {
      * the 3× loudness boost and the field reported it as distracting. */
     p->step_acc = 0.0f;
 
+    /* Pressure-pad detection. Player feet sit one block above their
+     * cam.pos.y - PLAYER_EYE; the cell their feet stand IN is the
+     * pad. Report it (or clear) so the redstone tick can drive
+     * neighbours. */
+    {
+        int pf_y = (int)floorf(p->cam.pos.y - PLAYER_EYE);
+        int pf_x = (int)floorf(p->cam.pos.x);
+        int pf_z = (int)floorf(p->cam.pos.z);
+        BlockId stood = craft_world_get(pf_x, pf_y, pf_z);
+        if (stood == BLK_PRESSURE_PAD) {
+            craft_redstone_note_pressure(pf_x, pf_y, pf_z);
+        } else {
+            craft_redstone_note_pressure(0, -1, 0);
+        }
+    }
+
     /* ----- Place / break / attack (only when MENU not held) ---- */
     if (!in->menu) {
-        /* Bow short-circuit — A while holding a bow + having arrows in
-         * inventory fires an arrow from the camera. Doesn't break /
-         * attack at melee range. */
-        if (in->a_pressed &&
-            p->hotbar[p->hotbar_idx] == BLK_BOW &&
-            p->inventory[BLK_ARROW] > 0) {
-            float cy = cosf(p->cam.yaw),  sy = sinf(p->cam.yaw);
-            float cp = cosf(p->cam.pitch), sp = sinf(p->cam.pitch);
-            Vec3 origin = (Vec3){
-                p->cam.pos.x,
-                p->cam.pos.y - 0.1f,           /* fire from chest, not eyes */
-                p->cam.pos.z
-            };
-            Vec3 fwd = (Vec3){ sy * cp, sp, cy * cp };
-            /* Match the skeleton arrow speed so flight time + drop
-             * feel consistent for the player. */
-            const float ARROW_SPEED = 14.0f;
-            Vec3 vel = (Vec3){
-                fwd.x * ARROW_SPEED,
-                fwd.y * ARROW_SPEED + 1.0f,    /* slight lift compensates for gravity */
-                fwd.z * ARROW_SPEED
-            };
-            craft_arrows_spawn(origin, vel, true);
-            p->inventory[BLK_ARROW]--;
-            p->broke_block = true;            /* drives swing animation */
+        /* Bow handling — A held with a bow + arrows enters "drawing"
+         * state, snaps yaw to the nearest hostile mob inside a
+         * ±60° cone within 16 blocks, and fires on release. Suppresses
+         * the regular break/attack on A while the player is aiming. */
+        bool bow_held = p->hotbar[p->hotbar_idx] == BLK_BOW &&
+                        p->inventory[BLK_ARROW] > 0;
+        if (bow_held && in->a) {
+            p->bow_drawing = true;
+            /* Charge the draw — ~0.4 s to reach full draw. The model
+             * uses this to swing the bow up + back; release uses the
+             * existing swing animation. */
+            p->bow_draw_t += dt / 0.4f;
+            if (p->bow_draw_t > 1.0f) p->bow_draw_t = 1.0f;
+            /* Pick / refresh target each frame. Hostile mobs only
+             * (passive types share their MobType enum positions
+             * below MOB_SLIME). */
+            float best_d2 = 16.0f * 16.0f;
+            int best = -1;
+            for (int i = 0; i < CRAFT_MAX_MOBS; i++) {
+                CraftMob *m = &craft_mobs[i];
+                if (!m->alive) continue;
+                if (m->type < MOB_SLIME) continue;
+                float dx = m->pos.x - p->cam.pos.x;
+                float dz = m->pos.z - p->cam.pos.z;
+                float d2 = dx * dx + dz * dz;
+                if (d2 > best_d2) continue;
+                /* Cone gate around the current yaw (±60°). Once a
+                 * target is locked the smooth lerp pulls the yaw
+                 * onto it, so the next frame's cone is centred on
+                 * the same direction — lock stays sticky. */
+                float t_yaw = atan2f(dx, dz);
+                float dy = t_yaw - p->cam.yaw;
+                while (dy >  3.14159265f) dy -= 6.2831853f;
+                while (dy < -3.14159265f) dy += 6.2831853f;
+                if (dy > 1.05f || dy < -1.05f) continue;
+                best_d2 = d2;
+                best = i;
+            }
+            p->bow_target_mob = best;
+            /* Smooth yaw snap (~6 rad/sec, ~0.5 s to swing 180°). */
+            if (best >= 0) {
+                CraftMob *m = &craft_mobs[best];
+                float dx = m->pos.x - p->cam.pos.x;
+                float dz = m->pos.z - p->cam.pos.z;
+                float t_yaw = atan2f(dx, dz);
+                float dy = t_yaw - p->cam.yaw;
+                while (dy >  3.14159265f) dy -= 6.2831853f;
+                while (dy < -3.14159265f) dy += 6.2831853f;
+                float step = 6.0f * dt;
+                if (dy >  step) dy =  step;
+                if (dy < -step) dy = -step;
+                p->cam.yaw += dy;
+            }
+        }
+        /* Release detection — fire on the frame A transitions from
+         * held to released, provided we were drawing. */
+        bool a_just_released = p->bow_prev_a && !in->a;
+        p->bow_prev_a = in->a;
+        if (p->bow_drawing && a_just_released) {
+            p->bow_drawing = false;
+            if (bow_held) {
+                /* Recompute the firing direction: prefer the locked
+                 * mob if it's still alive, otherwise straight forward. */
+                Vec3 origin = (Vec3){
+                    p->cam.pos.x,
+                    p->cam.pos.y - 0.1f,
+                    p->cam.pos.z
+                };
+                /* Camera forward — yaw is already auto-aimed onto the
+                 * target by the draw lerp; pitch is whatever the
+                 * player set with D-pad. Using camera-forward (not a
+                 * point-to-target ray) keeps vertical aim user-
+                 * controlled, so arc shots over a wall stay possible. */
+                float cy = cosf(p->cam.yaw),  sy = sinf(p->cam.yaw);
+                float cp = cosf(p->cam.pitch), sp = sinf(p->cam.pitch);
+                Vec3 fwd = (Vec3){ sy * cp, sp, cy * cp };
+                const float ARROW_SPEED = 14.0f;
+                Vec3 vel = (Vec3){
+                    fwd.x * ARROW_SPEED,
+                    fwd.y * ARROW_SPEED + 1.0f,
+                    fwd.z * ARROW_SPEED
+                };
+                craft_arrows_spawn(origin, vel, true);
+                p->inventory[BLK_ARROW]--;
+                p->broke_block = true;
+            }
+            p->bow_target_mob = -1;
+            p->bow_draw_t     = 0.0f;
+            goto skip_attack;
+        }
+        if (p->bow_drawing) {
+            /* Still drawing — don't run melee/break code. */
             goto skip_attack;
         }
         if (in->a_pressed) {
@@ -406,6 +569,14 @@ void craft_player_tick(CraftPlayer *p, const CraftInput *in, float dt) {
             CraftRayHit h = craft_render_pick(&p->cam);
             if (h.hit && h.distance < 8.0f) {
                 BlockId was = craft_world_get(h.bx, h.by, h.bz);
+                /* Bedrock — the bottom world layer is indestructible.
+                 * Plays the "needs pickaxe" ting so the player gets
+                 * feedback that the hit registered but did nothing. */
+                if (h.by <= 0) {
+                    extern void craft_audio_pickaxe_ting(void);
+                    craft_audio_pickaxe_ting();
+                    goto break_handled;
+                }
                 /* Mining tier gating. Player has the highest pickaxe
                  * they own; reject if the block needs a higher tier. */
                 int need = craft_block_pickaxe_tier(was);
@@ -452,6 +623,11 @@ void craft_player_tick(CraftPlayer *p, const CraftInput *in, float dt) {
                     else if (was == BLK_REDSTONE_WIRE ||
                              was == BLK_REDSTONE_WIRE_ON) dropped = BLK_REDSTONE;
                     else if (was == BLK_LEVER_ON)      dropped = BLK_LEVER_OFF;
+                    else if (was == BLK_DOOR_ON)       dropped = BLK_DOOR_OFF;
+                    else if (was == BLK_TRAPDOOR_ON)   dropped = BLK_TRAPDOOR_OFF;
+                    else if (was == BLK_PISTON_ON)     dropped = BLK_PISTON_OFF;
+                    else if (was == BLK_PISTON_ARM)    dropped = BLK_AIR;
+                    else if (was == BLK_TNT_FUSED)     dropped = BLK_TNT;
                     /* Track inventory counts in BOTH modes — creative
                      * needs them so the crafting picker can know what
                      * the player has mined. Creative just never
@@ -489,6 +665,25 @@ break_handled: ;
 skip_attack: ;
         if (in->b_pressed) {
             CraftRayHit h = craft_render_pick(&p->cam);
+            /* Doors/trapdoors/ladders are non-opaque in the raycaster
+             * (so the sprite post-pass owns their pixels) which means
+             * craft_render_pick passes through them and reports
+             * whatever's BEHIND. Use the torch-list picker — it walks
+             * the sprite cuboids directly — and prefer its hit when
+             * it's closer than the world-cell hit. */
+            int sprite_i = craft_torches_pick(&p->cam, 5.0f);
+            if (sprite_i >= 0) {
+                CraftTorch *t = &craft_torches[sprite_i];
+                BlockId sb = craft_world_get(t->wx, t->wy, t->wz);
+                if (sb == BLK_DOOR_OFF || sb == BLK_DOOR_ON ||
+                    sb == BLK_TRAPDOOR_OFF || sb == BLK_TRAPDOOR_ON ||
+                    sb == BLK_LEVER_OFF || sb == BLK_LEVER_ON) {
+                    h.hit = true;
+                    h.bx = t->wx; h.by = t->wy; h.bz = t->wz;
+                    h.face = t->orient;
+                    h.distance = 0.5f;   /* arbitrary, < 5.0 gate below */
+                }
+            }
             /* Interact: if the targeted block is a furnace or chest,
              * open the appropriate UI instead of placing on the
              * adjacent face. Routed via a player request flag so the
@@ -524,7 +719,82 @@ skip_attack: ;
                     craft_audio_place(BLK_LEVER_OFF);
                     goto place_done;
                 }
+                /* Manual door / trapdoor toggle — same gesture as
+                 * Minecraft. Redstone power also drives these via
+                 * craft_redstone, but the player can flip them by
+                 * hand when no circuit is wired up. */
+                if (hit_blk == BLK_DOOR_OFF) {
+                    craft_world_set(h.bx, h.by, h.bz, BLK_DOOR_ON);
+                    /* Also toggle the other half of the door so both
+                     * cells open/close together. */
+                    if (craft_world_get(h.bx, h.by + 1, h.bz) == BLK_DOOR_OFF)
+                        craft_world_set(h.bx, h.by + 1, h.bz, BLK_DOOR_ON);
+                    else if (craft_world_get(h.bx, h.by - 1, h.bz) == BLK_DOOR_OFF)
+                        craft_world_set(h.bx, h.by - 1, h.bz, BLK_DOOR_ON);
+                    craft_audio_place(BLK_DOOR_ON);
+                    goto place_done;
+                }
+                if (hit_blk == BLK_DOOR_ON) {
+                    craft_world_set(h.bx, h.by, h.bz, BLK_DOOR_OFF);
+                    if (craft_world_get(h.bx, h.by + 1, h.bz) == BLK_DOOR_ON)
+                        craft_world_set(h.bx, h.by + 1, h.bz, BLK_DOOR_OFF);
+                    else if (craft_world_get(h.bx, h.by - 1, h.bz) == BLK_DOOR_ON)
+                        craft_world_set(h.bx, h.by - 1, h.bz, BLK_DOOR_OFF);
+                    craft_audio_place(BLK_DOOR_OFF);
+                    goto place_done;
+                }
+                if (hit_blk == BLK_TRAPDOOR_OFF) {
+                    craft_world_set(h.bx, h.by, h.bz, BLK_TRAPDOOR_ON);
+                    craft_audio_place(BLK_TRAPDOOR_ON);
+                    goto place_done;
+                }
+                if (hit_blk == BLK_TRAPDOOR_ON) {
+                    craft_world_set(h.bx, h.by, h.bz, BLK_TRAPDOOR_OFF);
+                    craft_audio_place(BLK_TRAPDOOR_OFF);
+                    goto place_done;
+                }
             }
+            /* Ladder-in-own-cell shortcut.
+             *
+             * When you're inside a 1-block-wide vertical shaft, aiming
+             * at a side wall already lands h.fx,fy,fz on your own
+             * cell — but the picker can miss when there's nothing to
+             * aim at (looking up into open air) or when the closest
+             * wall is just above eye level. Make placing a ladder in
+             * the current chest cell explicit: holding LADDER + B
+             * always places a ladder in the player's own cell (if
+             * empty) against the nearest adjacent wall, even when
+             * the picker returned no hit. */
+            {
+                BlockId held = p->hotbar[p->hotbar_idx];
+                if (held == BLK_LADDER) {
+                    bool affordable_l = (p->mode == CRAFT_MODE_CREATIVE) ||
+                                        p->inventory[BLK_LADDER] > 0;
+                    int  px = (int)floorf(p->cam.pos.x);
+                    int  py = (int)floorf(p->cam.pos.y);   /* chest cell */
+                    int  pz = (int)floorf(p->cam.pos.z);
+                    /* Pick the wall that's actually adjacent. Preference
+                     * order matches the placement orient enum so the
+                     * sprite mounts predictably. */
+                    int wall_face = -1;
+                    if (craft_block_solid(craft_world_get(px + 1, py, pz)))      wall_face = FACE_NX;   /* +X wall → ladder on +X side of cell */
+                    else if (craft_block_solid(craft_world_get(px - 1, py, pz))) wall_face = FACE_PX;
+                    else if (craft_block_solid(craft_world_get(px, py, pz + 1))) wall_face = FACE_NZ;
+                    else if (craft_block_solid(craft_world_get(px, py, pz - 1))) wall_face = FACE_PZ;
+                    BlockId here = craft_world_get(px, py, pz);
+                    if (affordable_l && wall_face >= 0 &&
+                        (here == BLK_AIR || here == BLK_WATER)) {
+                        craft_world_set(px, py, pz, BLK_LADDER);
+                        craft_torches_record_orient(px, py, pz, wall_face);
+                        craft_torches_rebuild();
+                        if (p->mode == CRAFT_MODE_SURVIVAL) p->inventory[BLK_LADDER]--;
+                        p->placed_block = true;
+                        craft_audio_place(BLK_LADDER);
+                        goto place_done;
+                    }
+                }
+            }
+
             if (h.hit && h.distance < 8.0f) {
                 BlockId blk = p->hotbar[p->hotbar_idx];
                 /* Tools (pickaxe) are non-placeable; skip silently. */
@@ -561,6 +831,59 @@ skip_attack: ;
                             /* Rebuild now to pick up the orient. */
                             craft_torches_rebuild();
                         }
+                        /* Sprite-based blocks need an orientation
+                         * memo so the post-pass knows which wall /
+                         * axis to mount against.
+                         *
+                         *  Ladders:    use the wall face the player
+                         *              aimed at (h.face).
+                         *  Doors:      use the player's facing
+                         *              direction, snapped to the
+                         *              nearest cardinal — so the
+                         *              door swings around the side
+                         *              the player walked toward.
+                         *  Trapdoors:  same player-facing rule, so
+                         *              the open swing goes toward
+                         *              the wall the player faced. */
+                        if (place_blk == BLK_LADDER ||
+                            place_blk == BLK_DOOR_OFF ||
+                            place_blk == BLK_TRAPDOOR_OFF ||
+                            place_blk == BLK_PISTON_OFF ||
+                            place_blk == BLK_LEVER_OFF) {
+                            int orient_face = h.face;
+                            if (place_blk == BLK_DOOR_OFF ||
+                                place_blk == BLK_TRAPDOOR_OFF) {
+                                float yaw = p->cam.yaw;
+                                /* Normalise to (-π, π]. */
+                                while (yaw >  3.14159265f) yaw -= 6.2831853f;
+                                while (yaw < -3.14159265f) yaw += 6.2831853f;
+                                const float Q = 0.7853982f;   /* π/4 */
+                                if      (yaw >= -Q && yaw <  Q)        orient_face = FACE_PZ;
+                                else if (yaw >=  Q && yaw <  Q*3.0f)   orient_face = FACE_PX;
+                                else if (yaw < -Q && yaw >= -Q*3.0f)   orient_face = FACE_NX;
+                                else                                    orient_face = FACE_NZ;
+                            }
+                            /* Piston orient: the shaft points AWAY
+                             * from the face the player aimed at
+                             * (i.e., in the direction +face_normal
+                             * from the parent block — same as h.face
+                             * value directly). */
+                            craft_torches_record_orient(
+                                h.fx, h.fy, h.fz, orient_face);
+                            if (place_blk == BLK_DOOR_OFF) {
+                                craft_torches_record_orient(
+                                    h.fx, h.fy + 1, h.fz, orient_face);
+                            }
+                            craft_torches_rebuild();
+                        }
+                        /* Doors are two cells tall — also place the
+                         * top half if the cell above is free. */
+                        if (place_blk == BLK_DOOR_OFF) {
+                            BlockId above = craft_world_get(h.fx, h.fy + 1, h.fz);
+                            if (above == BLK_AIR || above == BLK_WATER) {
+                                craft_world_set(h.fx, h.fy + 1, h.fz, BLK_DOOR_OFF);
+                            }
+                        }
                         craft_audio_place(blk);
                     }
                 }
@@ -575,6 +898,17 @@ place_done: ;
         p->no_damage_t += dt;
         p->damage_flash -= dt;
         if (p->damage_flash < 0.0f) p->damage_flash = 0.0f;
+
+        /* Latch the win banner armed by the boss-spider kill, then
+         * tick it down so the HUD shows it for ~5 s. */
+        if (s_win_pending) {
+            p->win_banner_t = 5.0f;
+            s_win_pending = false;
+        }
+        if (p->win_banner_t > 0.0f) {
+            p->win_banner_t -= dt;
+            if (p->win_banner_t < 0.0f) p->win_banner_t = 0.0f;
+        }
 
         /* Respawn handling. */
         if (p->respawn_timer > 0.0f) {

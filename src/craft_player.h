@@ -49,6 +49,12 @@ typedef struct {
     float  regen_acc;
     float  damage_flash;
     float  respawn_timer;         /* >0 = dead, counting down to respawn */
+    float  win_banner_t;          /* >0 = boss just slain, banner showing */
+    float  fall_peak_y;           /* highest y reached during current air time */
+    bool   bow_drawing;           /* true while A is held with bow + arrows */
+    int    bow_target_mob;        /* locked mob index for auto-aim, -1 = none */
+    bool   bow_prev_a;             /* previous frame's A state (for release detect) */
+    float  bow_draw_t;             /* 0..1, charges over BOW_DRAW_TIME while drawing */
     Vec3   spawn_point;
     int    inventory[BLK_COUNT];
     bool   fly_mode;              /* gravity off (creative only) */
@@ -101,6 +107,15 @@ typedef struct {
     bool   _menu_chord_used;
     bool   _lb_prev;
     bool   _lb_consumed_by_chord;
+
+    /* Ladder climb state. `climbing` latches true while the player
+     * is actively grabbing the ladder (LB held, adjacent to ladder).
+     * `climb_lockout` latches true after the player lands on the
+     * ground while climbing — re-engaging needs LB released + a
+     * fresh upward press (so descending into a corridor doesn't
+     * leave you stuck to the ladder cell). */
+    bool   climbing;
+    bool   climb_lockout;
 } CraftPlayer;
 
 void craft_player_init(CraftPlayer *p, Vec3 spawn);
@@ -108,6 +123,10 @@ void craft_player_set_mode(CraftPlayer *p, CraftGameMode mode);
 
 /* Mob/world layers call this to deal HP damage with cooldown enforced. */
 void craft_player_take_damage(CraftPlayer *p, int amount);
+
+/* Trigger the green YOU WIN! banner — called when the boss spider
+ * dies. The HUD reads win_banner_t and renders the banner for ~5 s. */
+void craft_player_signal_win(void);
 
 /* Advance state by dt seconds given current input. */
 void craft_player_tick(CraftPlayer *p, const CraftInput *in, float dt);

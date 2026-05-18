@@ -469,13 +469,28 @@ void craft_world_set(int wx, int wy, int wz, BlockId blk) {
     /* Wires and levers ride the torch render pipeline as small overlay
      * sprites — their list also needs to be rebuilt on placement /
      * removal / state transition (lever toggle, wire power flip). */
-    #define IS_WIRE_OR_LEVER(b) ((b) == BLK_REDSTONE_WIRE    ||     \
-                                 (b) == BLK_REDSTONE_WIRE_ON ||     \
-                                 (b) == BLK_LEVER_OFF        ||     \
-                                 (b) == BLK_LEVER_ON)
-    bool sprite_change  = torch_change ||
-                          IS_WIRE_OR_LEVER(blk) || IS_WIRE_OR_LEVER(prev);
-    #undef IS_WIRE_OR_LEVER
+    /* Trigger torch-list rebuild on any block change that affects
+     * sprite rendering OR wire connectivity. Pistons + TNT aren't
+     * rendered as sprites themselves but adjacent wires should
+     * connect to them visually — including them here makes the
+     * wire connect mask refresh on those placements/changes. */
+    #define IS_SPRITE(b) ((b) == BLK_REDSTONE_WIRE    ||     \
+                          (b) == BLK_REDSTONE_WIRE_ON ||     \
+                          (b) == BLK_LEVER_OFF        ||     \
+                          (b) == BLK_LEVER_ON         ||     \
+                          (b) == BLK_LADDER           ||     \
+                          (b) == BLK_PRESSURE_PAD     ||     \
+                          (b) == BLK_DOOR_OFF         ||     \
+                          (b) == BLK_DOOR_ON          ||     \
+                          (b) == BLK_TRAPDOOR_OFF     ||     \
+                          (b) == BLK_TRAPDOOR_ON      ||     \
+                          (b) == BLK_PISTON_OFF       ||     \
+                          (b) == BLK_PISTON_ON        ||     \
+                          (b) == BLK_TNT              ||     \
+                          (b) == BLK_TNT_FUSED        ||     \
+                          (b) == BLK_REDSTONE_BLOCK)
+    bool sprite_change  = torch_change || IS_SPRITE(blk) || IS_SPRITE(prev);
+    #undef IS_SPRITE
     bool prev_blocks    = !light_transparent(prev);
     bool new_blocks     = !light_transparent(blk);
     bool transp_changed = (prev_blocks != new_blocks);

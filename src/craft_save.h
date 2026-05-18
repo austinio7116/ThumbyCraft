@@ -51,4 +51,21 @@ size_t craft_save_serialise(uint32_t seed,
 bool   craft_save_deserialise(const uint8_t *in, size_t n,
                               uint32_t *out_seed, CraftPlayer *p);
 
+/* --- Save-slot metadata (platform-provided) --------------------- *
+ *
+ * Slots are flash-backed (device) or file-backed (host). The engine
+ * uses these queries to drive the slot picker UI and the title page.
+ * Actual read/write goes via the platform's craft_main request flags.
+ */
+#define CRAFT_SAVE_SLOT_COUNT_PUBLIC 4
+#define CRAFT_SAVE_THUMB_DIM         32
+
+/* True if slot has a valid saved world. */
+bool craft_save_slot_used(int slot);
+
+/* Pointer to the slot's 32×32 RGB565 thumbnail in storage-mapped
+ * memory (XIP flash on device, mmap'd file on host), or NULL when
+ * the slot is empty. Pointer is stable until the slot is written. */
+const uint16_t *craft_save_slot_thumb(int slot);
+
 #endif

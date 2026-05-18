@@ -31,6 +31,9 @@
 #include "craft_player.h"
 #include "craft_font.h"
 #include "craft_save.h"
+#include "craft_title.h"
+#include "craft_blocks.h"
+#include "craft_menu.h"
 #include "craft_menu.h"
 
 #ifdef THUMBYONE_SLOT_MODE
@@ -92,14 +95,17 @@ static void drain_requests(void) {
     if (craft_main_take_save_request()) {
         static uint8_t buf[CRAFT_SAVE_MAX_BYTES];
         size_t n = craft_main_save(buf, sizeof buf);
-        if (n > 0 && craft_save_flash_write(buf, n))
+        int slot = craft_main_save_slot();
+        if (n > 0 && craft_save_flash_write_slot(slot, buf, n,
+                                                 craft_main_thumb()))
             craft_menu_toast("World saved");
         else
             craft_menu_toast("Save failed");
     }
     if (craft_main_take_load_request()) {
+        int slot = craft_main_save_slot();
         const uint8_t *blob;
-        size_t blob_n = craft_save_flash_read(&blob);
+        size_t blob_n = craft_save_flash_read_slot(slot, &blob);
         if (blob_n > 0 && craft_main_load(blob, blob_n))
             craft_menu_toast("World loaded");
         else
@@ -123,16 +129,63 @@ int main(void) {
 
     splash();
 
-    /* Seed from the SDK's ROSC-backed entropy source — to_ms_since_boot
-     * here would be a small, near-constant value (we're milliseconds
-     * past power-on) and gave the same world every boot. */
-    uint32_t seed = get_rand_32();
-    craft_main_init(g_fb, seed);
-
-    /* Restore previous save if present. */
-    const uint8_t *blob;
-    size_t blob_n = craft_save_flash_read(&blob);
-    if (blob_n > 0) craft_main_load(blob, blob_n);
+    /* Title screen — block until the player picks New or a save
+     * slot. craft_blocks_build_textures runs inside craft_main_init,
+     * which we defer until after the pick, so the title page only
+     * needs the font + slot thumbnails (already in flash). */
+    craft_blocks_build_textures();
+    craft_title_init(g_fb);
+    {
+        CraftTitleAction act = CRAFT_TITLE_STILL;
+        absolute_time_t t_prev_ts = get_absolute_time();
+        (void)t_prev_ts;
+        while (act == CRAFT_TITLE_STILL) {
+            CraftRawButtons raw_t; craft_buttons_read(&raw_t);
+            CraftInput in_t = {0};
+            in_t.up    = raw_t.up;
+            in_t.down  = raw_t.down;
+            in_t.left  = raw_t.left;
+            in_t.right = raw_t.right;
+            in_t.a     = raw_t.a;
+            in_t.b     = raw_t.b;
+            in_t.menu  = raw_t.menu;
+            act = craft_title_step(&in_t);
+            craft_title_draw();
+            /* Push the framebuffer to the LCD. The dual-core render
+             * isn't running yet — single-core present is fine here. */
+            extern void craft_lcd_present(const uint16_t *fb);
+            craft_lcd_present(g_fb);
+        }
+        if (act == CRAFT_TITLE_LOAD) {
+            int slot = craft_title_chosen_slot();
+            const uint8_t *blob;
+            size_t blob_n = craft_save_flash_read_slot(slot, &blob);
+            if (blob_n > 0) {
+                /* Seed comes from inside the blob; craft_main_init
+                 * needs SOME seed up-front for chunk store + audio
+                 * init, so use slot 0's seed as a placeholder — the
+                 * subsequent craft_main_load re-seeds + reloads
+                 * everything correctly. */
+                uint32_t boot_seed = 0;
+                if (blob_n >= 12) {
+                    boot_seed = (uint32_t)blob[8] |
+                                ((uint32_t)blob[9]  << 8) |
+                                ((uint32_t)blob[10] << 16) |
+                                ((uint32_t)blob[11] << 24);
+                }
+                craft_main_init(g_fb, boot_seed);
+                craft_main_load(blob, blob_n);
+                craft_main_set_save_slot(slot);
+            } else {
+                /* Fallback if slot turned out invalid: new world. */
+                craft_main_init(g_fb, get_rand_32());
+            }
+        } else {
+            /* CRAFT_TITLE_NEW: fresh random world. */
+            uint32_t seed = get_rand_32();
+            craft_main_init(g_fb, seed);
+        }
+    }
 
     /* Launch core1 for the top-half render. */
     multicore_launch_core1(core1_main);

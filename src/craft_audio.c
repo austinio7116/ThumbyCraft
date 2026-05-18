@@ -301,6 +301,21 @@ void craft_audio_pickaxe_ting(void) {
 void craft_audio_step(void) { trigger_sfx(140.0f, W_NOISE, 0.20f, 90.0f); }
 void craft_audio_jump(void) { trigger_sfx(380.0f, W_TRI, 0.35f, 140.0f); }
 
+/* TNT fuse ignition — short rising hiss + brief tone. */
+void craft_audio_fuse(void) {
+    trigger_sfx(180.0f, W_NOISE, 0.40f, 250.0f);
+    trigger_sfx(700.0f, W_TRI,   0.25f, 200.0f);
+}
+
+/* Explosion — deep bass noise burst + mid-range thump. Loud and
+ * short so a chain reaction still feels punchy without the synth
+ * pool starving the music. */
+void craft_audio_explode(void) {
+    trigger_sfx( 70.0f, W_NOISE, 0.95f, 450.0f);
+    trigger_sfx(140.0f, W_NOISE, 0.65f, 350.0f);
+    trigger_sfx(220.0f, W_TRI,   0.40f, 250.0f);
+}
+
 /* Per-material footstep tone. Sand whooshes (high noise), stone clacks
  * (mid noise), grass rustles (low noise + quick), wood is a triangle
  * thunk. Volume low so each step is felt but doesn't drown out music
@@ -431,10 +446,12 @@ static void reroll_pitch_shift(void) {
     int   jitter = (int)((s_pitch_rng >> 16) & 0x3Fu) - 32;   /* -32..+31 */
     if (jitter > 5)  jitter = 5;
     if (jitter < -5) jitter = -5;
-    float center = 5.0f + (1.0f - s_alt_norm) * 14.0f;        /* 5..19 */
+    /* Pitch range narrowed to 0..12 semitones (was 0..24) — one
+     * octave of variation reads as expressive rather than novelty. */
+    float center = 2.0f + (1.0f - s_alt_norm) * 8.0f;          /* 2..10 */
     int   n      = (int)(center + 0.5f) + jitter;
     if (n < 0)  n = 0;
-    if (n > 24) n = 24;
+    if (n > 12) n = 12;
     s_pitch_semis = n;
     s_pitch_mult  = powf(2.0f, (float)n / 12.0f);
 }

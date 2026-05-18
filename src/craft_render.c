@@ -43,16 +43,26 @@ float craft_render_sun_y(void) { return s_sun_y; }
 /* Recompute the sky / brightness lookup for the new sun position.
  * Called once per frame from render_begin. */
 void craft_render_set_time(float world_time) {
-    const float DAY_LENGTH = 240.0f;
+    const float DAY_LENGTH = 300.0f;   /* must match CRAFT_DAY_LENGTH */
     /* Cloud drift — slow east scroll, ~0.5 world blocks per second.
      * Wraps every 16384 units which is way beyond a play session. */
     s_cloud_drift = world_time * 0.5f;
     float t = world_time / DAY_LENGTH;
     t -= (float)((int)t);
     if (t < 0) t += 1.0f;
+    /* Skew the sun curve so the day half stretches and the night
+     * half stays at the original ~120 s. With DAY_FRAC = 180/300
+     * the player gets a 180 s day + 120 s night per cycle. */
+    const float DAY_FRAC = 180.0f / 300.0f;
+    float t_sun;
+    if (t < DAY_FRAC) {
+        t_sun = (t / DAY_FRAC) * 0.5f;
+    } else {
+        t_sun = 0.5f + ((t - DAY_FRAC) / (1.0f - DAY_FRAC)) * 0.5f;
+    }
     {
         extern float s_sun_cos;
-        float angle = t * 6.2831853f;
+        float angle = t_sun * 6.2831853f;
         s_sun_y   = sinf(angle);
         s_sun_cos = cosf(angle);
     }
@@ -238,11 +248,27 @@ INLINE_HOT TraceHit trace_ray(Vec3 origin, Vec3 dir, bool stop_at_water) {
          * top 2 bits, which carry the water-flow level field. */
         BlockId blk = (BlockId)(craft_world_blocks[idx] & 0x3F);
         if (blk == BLK_AIR) continue;
-        /* Torches are smaller-than-cube objects rendered in a
-         * separate 3D post-pass. The raycaster sees the cell as
-         * empty so the player can see through it and the torch
-         * cuboid sits properly inside it. */
+        /* Torches and redstone wires are smaller-than-cube objects
+         * rendered in a separate 3D post-pass (craft_torches). The
+         * raycaster sees the cell as empty so the player can see
+         * through it and the small sprite sits properly inside it. */
         if (blk == BLK_TORCH) continue;
+        if (blk == BLK_REDSTONE_WIRE || blk == BLK_REDSTONE_WIRE_ON) continue;
+        /* Ladder + pressure pad + doors + trapdoors render as
+         * thin-slab overlays via the torch post-pass (BOTH closed
+         * and open states). The raycaster skips them so the slab
+         * post-pass owns the pixels; collision still blocks the
+         * closed states via craft_block_solid. */
+        if (blk == BLK_LADDER || blk == BLK_PRESSURE_PAD) continue;
+        if (blk == BLK_DOOR_OFF || blk == BLK_DOOR_ON) continue;
+        if (blk == BLK_TRAPDOOR_OFF || blk == BLK_TRAPDOOR_ON) continue;
+        /* Pistons render via sprite overlay but must STOP the picker
+         * ray so the player can place blocks on the piston's head face.
+         * In pick mode (stop_at_water=true) they behave as solid cells;
+         * during rendering they pass through and the sprite paints. */
+        if ((blk == BLK_PISTON_OFF || blk == BLK_PISTON_ON ||
+             blk == BLK_PISTON_ARM) && !stop_at_water) continue;
+        if (blk == BLK_LEVER_OFF || blk == BLK_LEVER_ON) continue;
         if (blk == BLK_WATER) {
             if (!stop_at_water) {
                 h.passed_water = true;
@@ -1029,10 +1055,22 @@ static inline uint16_t held_face_color(BlockId blk, Face face) {
     return tex[(CRAFT_TEX_SIZE / 2) * CRAFT_TEX_SIZE + (CRAFT_TEX_SIZE / 2)];
 }
 
-void craft_render_held_item(BlockId held, uint16_t *fb, float swing_t) {
+void craft_render_held_item(BlockId held, uint16_t *fb, float swing_t,
+                            float bow_draw_t) {
     if (held == BLK_AIR) return;
     if (swing_t < 0.0f) swing_t = 0.0f;
     if (swing_t > 1.0f) swing_t = 1.0f;
+    if (bow_draw_t < 0.0f) bow_draw_t = 0.0f;
+    if (bow_draw_t > 1.0f) bow_draw_t = 1.0f;
+    /* Drawn bow rotates its TOP AWAY from the camera (negative pitch
+     * relative to the swing convention) so the bow leans "back" as
+     * if the string is being pulled toward the player. Yaw stays at
+     * idle and the model rises slightly (negative dip) toward eye
+     * level — same as raising the bow to aim. Affects only the bow
+     * model. */
+    float bow_extra_pitch = (held == BLK_BOW) ? -bow_draw_t * 0.45f : 0.0f;
+    float bow_extra_yaw   = (held == BLK_BOW) ?  bow_draw_t * 0.15f : 0.0f;
+    float bow_dip         = (held == BLK_BOW) ? -bow_draw_t * 0.03f : 0.0f;
 
     /* Resolve the model. Placeable blocks render as a 6-face tilted
      * cube; tools/weapons/bow/arrow render from the tool model
@@ -1080,9 +1118,9 @@ void craft_render_held_item(BlockId held, uint16_t *fb, float swing_t) {
      * pushes the tip DOWN+OUTWARD as if striking the world. Both
      * INCREASE on swing — the old code drove pitch the wrong way,
      * which made the tool tip whip back toward the player's face. */
-    float yaw_rad   = IDLE_YAW   - 0.6000f * swing_t;
-    float pitch_rad = IDLE_PITCH + 0.7000f * swing_t;
-    float dip       =  0.05f * swing_t;
+    float yaw_rad   = IDLE_YAW   - 0.6000f * swing_t + bow_extra_yaw;
+    float pitch_rad = IDLE_PITCH + 0.7000f * swing_t + bow_extra_pitch;
+    float dip       =  0.05f * swing_t + bow_dip;
     float cos_p = cosf(pitch_rad), sin_p = sinf(pitch_rad);
     float cos_y = cosf(yaw_rad),   sin_y = sinf(yaw_rad);
 

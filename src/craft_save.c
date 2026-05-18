@@ -146,6 +146,30 @@ bool craft_save_deserialise(const uint8_t *in, size_t n,
      * and restore_window pulls in any persisted mods. */
     craft_world_load_around((int)p->cam.pos.x, (int)p->cam.pos.z, seed);
 
+    /* Reset transient state that doesn't survive across worlds:
+     *  - velocity / fall tracking — stale `fall_peak_y` or `vel.y`
+     *    from the pre-save tick would otherwise trigger fall damage
+     *    or "you've been falling" weirdness on the first tick.
+     *  - damage cooldown + invuln flash — a damaging hit just before
+     *    save shouldn't grant invuln on reload.
+     *  - mob + arrow + drop pools — any hostile mob lingering in the
+     *    pool from current play (skeleton arrow, slime behind a
+     *    wall) would otherwise keep dealing melee damage from its
+     *    pre-save position right next to the loaded player. The
+     *    HUD never shows them because they're behind a wall, so the
+     *    player just bleeds out in apparent daylight. */
+    p->vel               = v3(0, 0, 0);
+    p->fall_peak_y       = p->cam.pos.y;
+    p->on_ground         = false;
+    p->damage_cooldown   = 0.0f;
+    p->damage_flash      = 0.0f;
+    p->no_damage_t       = 0.0f;
+    p->regen_acc         = 0.0f;
+    p->respawn_timer     = 0.0f;
+    p->spawn_point       = p->cam.pos;
+    extern void craft_mobs_clear_all(void);
+    craft_mobs_clear_all();
+
     if (out_seed) *out_seed = seed;
     return true;
 }

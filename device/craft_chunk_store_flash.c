@@ -42,9 +42,10 @@
 #define CS_SLOTS        64
 #define CS_PROBE        4
 
-/* Reserved 256 KB below the save sectors. Save lives at (TOP - 16 KB);
- * chunk store lives at (TOP - 16 KB - 256 KB). For the standalone
- * 2 MB build that's 2,097,152 - 16,384 - 262,144 = 1,818,624 bytes. */
+/* Reserved 256 KB below the save sectors. Save occupies 16 KB at
+ * the top of the image (4 fixed slots × 4 KB), so chunk store lives
+ * at (TOP - 16 KB - 256 KB). For the standalone 2 MB build that's
+ * 2,097,152 - 16,384 - 262,144 = 1,818,624 bytes. */
 #ifndef CRAFT_CHUNK_STORE_OFFSET
 #  ifdef THUMBYONE_SLOT_MODE
 #    include "slot_layout.h"

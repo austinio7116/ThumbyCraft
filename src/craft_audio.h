@@ -23,6 +23,8 @@ void craft_audio_step(void);
 void craft_audio_step_on(BlockId blk);   /* material-aware footstep */
 void craft_audio_jump(void);
 void craft_audio_pickaxe_ting(void);     /* "needs pickaxe" feedback */
+void craft_audio_fuse(void);             /* TNT/creeper fuse ignition */
+void craft_audio_explode(void);          /* TNT/creeper detonation */
 
 /* Fill `out` with `n_samples` of int16 mono PCM. Always succeeds —
  * never blocks. Returns the number of samples written. */
