@@ -33,6 +33,12 @@
 #define COL_PICK_STONE_DARK   C565( 95,  95, 105)
 #define COL_PICK_IRON_LIGHT   C565(230, 230, 240)
 #define COL_PICK_IRON_DARK    C565(170, 170, 180)
+#define COL_PICK_SILV_LIGHT   C565(195, 215, 230)
+#define COL_PICK_SILV_DARK    C565(145, 170, 190)
+#define COL_PICK_GOLD_LIGHT   C565(255, 215,  60)
+#define COL_PICK_GOLD_DARK    C565(195, 155,  30)
+#define COL_PICK_DIAM_LIGHT   C565(120, 240, 250)
+#define COL_PICK_DIAM_DARK    C565( 70, 175, 200)
 
 /* Tool handle / haft / grip — always wood, tier-independent. */
 #define COL_HAFT_LIGHT        C565(140,  95,  45)
@@ -45,6 +51,12 @@
 #define COL_BLADE_STONE_DARK  COL_PICK_STONE_DARK
 #define COL_BLADE_IRON_LIGHT  COL_PICK_IRON_LIGHT
 #define COL_BLADE_IRON_DARK   COL_PICK_IRON_DARK
+#define COL_BLADE_SILV_LIGHT  COL_PICK_SILV_LIGHT
+#define COL_BLADE_SILV_DARK   COL_PICK_SILV_DARK
+#define COL_BLADE_GOLD_LIGHT  COL_PICK_GOLD_LIGHT
+#define COL_BLADE_GOLD_DARK   COL_PICK_GOLD_DARK
+#define COL_BLADE_DIAM_LIGHT  COL_PICK_DIAM_LIGHT
+#define COL_BLADE_DIAM_DARK   COL_PICK_DIAM_DARK
 
 /* Sword cross-guard / pommel — small dark detail. */
 #define COL_GUARD             C565( 95,  65,  25)
@@ -113,6 +125,18 @@ static const CraftToolPart parts_pick_iron[] = {
     PICKAXE_HEAD_PARTS(COL_PICK_IRON_LIGHT, COL_PICK_IRON_DARK),
     PICKAXE_HANDLE_PARTS,
 };
+static const CraftToolPart parts_pick_silver[] = {
+    PICKAXE_HEAD_PARTS(COL_PICK_SILV_LIGHT, COL_PICK_SILV_DARK),
+    PICKAXE_HANDLE_PARTS,
+};
+static const CraftToolPart parts_pick_gold[] = {
+    PICKAXE_HEAD_PARTS(COL_PICK_GOLD_LIGHT, COL_PICK_GOLD_DARK),
+    PICKAXE_HANDLE_PARTS,
+};
+static const CraftToolPart parts_pick_diamond[] = {
+    PICKAXE_HEAD_PARTS(COL_PICK_DIAM_LIGHT, COL_PICK_DIAM_DARK),
+    PICKAXE_HANDLE_PARTS,
+};
 
 /* ---- Sword (3 tiers) ------------------------------------------ *
  *
@@ -177,6 +201,21 @@ static const CraftToolPart parts_sword_stone[] = {
 };
 static const CraftToolPart parts_sword_iron[] = {
     SWORD_BLADE_PARTS(COL_BLADE_IRON_LIGHT, COL_BLADE_IRON_DARK),
+    SWORD_GUARD_PARTS,
+    SWORD_GRIP_PARTS,
+};
+static const CraftToolPart parts_sword_silver[] = {
+    SWORD_BLADE_PARTS(COL_BLADE_SILV_LIGHT, COL_BLADE_SILV_DARK),
+    SWORD_GUARD_PARTS,
+    SWORD_GRIP_PARTS,
+};
+static const CraftToolPart parts_sword_gold[] = {
+    SWORD_BLADE_PARTS(COL_BLADE_GOLD_LIGHT, COL_BLADE_GOLD_DARK),
+    SWORD_GUARD_PARTS,
+    SWORD_GRIP_PARTS,
+};
+static const CraftToolPart parts_sword_diamond[] = {
+    SWORD_BLADE_PARTS(COL_BLADE_DIAM_LIGHT, COL_BLADE_DIAM_DARK),
     SWORD_GUARD_PARTS,
     SWORD_GRIP_PARTS,
 };
@@ -288,12 +327,18 @@ void craft_tool_models_init(void) {
  * (craft_render_held_item) early-outs on that. */
 CraftToolModel craft_tool_model(BlockId b) {
     switch ((int)b) {
-        case BLK_PICKAXE_WOOD:  return (CraftToolModel)MODEL(parts_pick_wood);
-        case BLK_PICKAXE_STONE: return (CraftToolModel)MODEL(parts_pick_stone);
-        case BLK_PICKAXE_IRON:  return (CraftToolModel)MODEL(parts_pick_iron);
-        case BLK_SWORD_WOOD:    return (CraftToolModel)MODEL(parts_sword_wood);
-        case BLK_SWORD_STONE:   return (CraftToolModel)MODEL(parts_sword_stone);
-        case BLK_SWORD_IRON:    return (CraftToolModel)MODEL(parts_sword_iron);
+        case BLK_PICKAXE_WOOD:    return (CraftToolModel)MODEL(parts_pick_wood);
+        case BLK_PICKAXE_STONE:   return (CraftToolModel)MODEL(parts_pick_stone);
+        case BLK_PICKAXE_IRON:    return (CraftToolModel)MODEL(parts_pick_iron);
+        case BLK_PICKAXE_SILVER:  return (CraftToolModel)MODEL(parts_pick_silver);
+        case BLK_PICKAXE_GOLD:    return (CraftToolModel)MODEL(parts_pick_gold);
+        case BLK_PICKAXE_DIAMOND: return (CraftToolModel)MODEL(parts_pick_diamond);
+        case BLK_SWORD_WOOD:      return (CraftToolModel)MODEL(parts_sword_wood);
+        case BLK_SWORD_STONE:     return (CraftToolModel)MODEL(parts_sword_stone);
+        case BLK_SWORD_IRON:      return (CraftToolModel)MODEL(parts_sword_iron);
+        case BLK_SWORD_SILVER:    return (CraftToolModel)MODEL(parts_sword_silver);
+        case BLK_SWORD_GOLD:      return (CraftToolModel)MODEL(parts_sword_gold);
+        case BLK_SWORD_DIAMOND:   return (CraftToolModel)MODEL(parts_sword_diamond);
         case 22:                return (CraftToolModel)MODEL(parts_bow);   /* BLK_BOW   */
         case 23:                return (CraftToolModel)MODEL(parts_arrow); /* BLK_ARROW */
         case BLK_TORCH:         return (CraftToolModel)MODEL(parts_torch);

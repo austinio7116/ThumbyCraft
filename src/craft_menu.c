@@ -63,9 +63,20 @@ static int   s_controls_scroll; /* first visible line on controls page */
 
 /* Crafting state — kept across menu opens so partial recipes persist
  * if the player closes the menu accidentally. */
-static BlockId s_craft_grid[9];     /* row-major 3×3 grid */
+static BlockId s_craft_grid[9];     /* row-major 3×3 grid (block id per cell) */
+static int     s_craft_count[9];    /* stack count per cell (0 means AIR) */
 static int     s_craft_sel;         /* 0..8 = grid, 9 = output */
 static int     s_craft_last_row;    /* row to return to from output */
+/* Frame counter + last-A-press tracker for double-tap detection. A
+ * double-tap A on the SAME cell pulls every available copy of the
+ * currently-held resource out of inventory and splits it evenly
+ * across all grid cells already holding that resource (plus the
+ * tapped cell). Single-tap A just adds 1 to the cell, as before.
+ * 10 frames ≈ 333 ms at 30 fps. */
+static int     s_craft_frame;
+static int     s_craft_a_last_frame = -100;
+static int     s_craft_a_last_cell  = -1;
+#define CRAFT_DBL_TAP_FRAMES 10
 
 /* Furnace page state — the page is bound to a specific world block
  * when craft_menu_open_furnace is called. s_furnace_sel selects the
@@ -442,6 +453,49 @@ static const CraftRecipe RECIPES[] = {
     { { BLK_PLANK, BLK_PLANK, BLK_PLANK,
         BLK_PLANK, BLK_AIR,   BLK_PLANK,
         BLK_PLANK, BLK_PLANK, BLK_PLANK }, BLK_CHEST, 1, "Chest" },
+
+    /* --- Higher-tier pickaxes (same 3-on-top + 2-stick shape) --- */
+    { { BLK_SILVER_INGOT, BLK_SILVER_INGOT, BLK_SILVER_INGOT,
+        BLK_AIR,          BLK_STICK,        BLK_AIR,
+        BLK_AIR,          BLK_STICK,        BLK_AIR }, BLK_PICKAXE_SILVER, 1, "Silver pick" },
+
+    { { BLK_GOLD_INGOT, BLK_GOLD_INGOT, BLK_GOLD_INGOT,
+        BLK_AIR,        BLK_STICK,      BLK_AIR,
+        BLK_AIR,        BLK_STICK,      BLK_AIR }, BLK_PICKAXE_GOLD, 1, "Gold pick" },
+
+    { { BLK_DIAMOND, BLK_DIAMOND, BLK_DIAMOND,
+        BLK_AIR,     BLK_STICK,   BLK_AIR,
+        BLK_AIR,     BLK_STICK,   BLK_AIR }, BLK_PICKAXE_DIAMOND, 1, "Diamond pick" },
+
+    /* --- Higher-tier swords (2-blade + 1-stick handle) --- */
+    { { BLK_AIR, BLK_SILVER_INGOT, BLK_AIR,
+        BLK_AIR, BLK_SILVER_INGOT, BLK_AIR,
+        BLK_AIR, BLK_STICK,        BLK_AIR }, BLK_SWORD_SILVER, 1, "Silver sword" },
+
+    { { BLK_AIR, BLK_GOLD_INGOT, BLK_AIR,
+        BLK_AIR, BLK_GOLD_INGOT, BLK_AIR,
+        BLK_AIR, BLK_STICK,      BLK_AIR }, BLK_SWORD_GOLD, 1, "Gold sword" },
+
+    { { BLK_AIR, BLK_DIAMOND, BLK_AIR,
+        BLK_AIR, BLK_DIAMOND, BLK_AIR,
+        BLK_AIR, BLK_STICK,   BLK_AIR }, BLK_SWORD_DIAMOND, 1, "Diamond sword" },
+
+    /* --- Storage blocks (9 of the material in a 3x3 square) --- */
+    { { BLK_SILVER_INGOT, BLK_SILVER_INGOT, BLK_SILVER_INGOT,
+        BLK_SILVER_INGOT, BLK_SILVER_INGOT, BLK_SILVER_INGOT,
+        BLK_SILVER_INGOT, BLK_SILVER_INGOT, BLK_SILVER_INGOT }, BLK_SILVER_BLOCK, 1, "Silver block" },
+
+    { { BLK_GOLD_INGOT, BLK_GOLD_INGOT, BLK_GOLD_INGOT,
+        BLK_GOLD_INGOT, BLK_GOLD_INGOT, BLK_GOLD_INGOT,
+        BLK_GOLD_INGOT, BLK_GOLD_INGOT, BLK_GOLD_INGOT }, BLK_GOLD_BLOCK, 1, "Gold block" },
+
+    { { BLK_DIAMOND, BLK_DIAMOND, BLK_DIAMOND,
+        BLK_DIAMOND, BLK_DIAMOND, BLK_DIAMOND,
+        BLK_DIAMOND, BLK_DIAMOND, BLK_DIAMOND }, BLK_DIAMOND_BLOCK, 1, "Diamond block" },
+
+    { { BLK_REDSTONE, BLK_REDSTONE, BLK_REDSTONE,
+        BLK_REDSTONE, BLK_REDSTONE, BLK_REDSTONE,
+        BLK_REDSTONE, BLK_REDSTONE, BLK_REDSTONE }, BLK_REDSTONE_BLOCK, 1, "Redstone block" },
 };
 #define RECIPE_COUNT ((int)(sizeof(RECIPES)/sizeof(RECIPES[0])))
 
@@ -464,7 +518,7 @@ static int craft_block_available(const CraftPlayer *p, BlockId b) {
     if (b == BLK_AIR) return 0;
     int placed = 0;
     for (int i = 0; i < 9; i++)
-        if (s_craft_grid[i] == b) placed++;
+        if (s_craft_grid[i] == b) placed += s_craft_count[i];
     if (p->mode == CRAFT_MODE_CREATIVE) {
         /* In creative, you have it if the inventory ever saw it. */
         return p->inventory[b] > 0 ? 999 : 0;
@@ -473,6 +527,7 @@ static int craft_block_available(const CraftPlayer *p, BlockId b) {
 }
 
 static CraftMenuResult tick_craft_page(const CraftInput *in, CraftPlayer *p) {
+    s_craft_frame++;
     /* D-pad nav with wrap. */
     bool dpad_now = in->up || in->down || in->left || in->right;
     if (dpad_now && !s_dpad_was_pressed) {
@@ -537,7 +592,8 @@ nav_done:
             return CRAFT_MENU_RESULT_NONE;
         }
         /* Clear selected grid cell. */
-        s_craft_grid[s_craft_sel] = BLK_AIR;
+        s_craft_grid[s_craft_sel]  = BLK_AIR;
+        s_craft_count[s_craft_sel] = 0;
         return CRAFT_MENU_RESULT_NONE;
     }
     if (in->a_pressed) {
@@ -546,18 +602,26 @@ nav_done:
             int r = find_matching_recipe();
             if (r < 0) return CRAFT_MENU_RESULT_NONE;
             const CraftRecipe *rec = &RECIPES[r];
-            /* Consume inputs from grid (survival also debits inventory). */
-            for (int i = 0; i < 9; i++) {
-                BlockId b = s_craft_grid[i];
-                if (b == BLK_AIR) continue;
-                if (p->mode == CRAFT_MODE_SURVIVAL && p->inventory[b] > 0)
+            /* Survival: each non-AIR cell consumes 1 from its stack and
+             * from inventory. Cells whose stack drops to 0 clear back to
+             * AIR. The grid pattern survives the craft, so repeated A
+             * presses on the output keep producing while every input
+             * cell still has stack left. */
+            if (p->mode == CRAFT_MODE_SURVIVAL) {
+                for (int i = 0; i < 9; i++) {
+                    BlockId b = s_craft_grid[i];
+                    if (b == BLK_AIR) continue;
+                    if (s_craft_count[i] <= 0 || p->inventory[b] <= 0) {
+                        return CRAFT_MENU_RESULT_NONE;
+                    }
                     p->inventory[b]--;
-                s_craft_grid[i] = BLK_AIR;
-            }
-            /* Add output. In creative, inventory is irrelevant — just
-             * auto-add to hotbar if not present. */
-            if (p->mode == CRAFT_MODE_SURVIVAL)
+                    s_craft_count[i]--;
+                    if (s_craft_count[i] <= 0) {
+                        s_craft_grid[i] = BLK_AIR;
+                    }
+                }
                 p->inventory[rec->output] += rec->output_count;
+            }
             bool present = false;
             for (int i = 0; i < CRAFT_HOTBAR_SLOTS; i++)
                 if (p->hotbar[i] == rec->output) { present = true; break; }
@@ -574,9 +638,48 @@ nav_done:
         /* A on grid cell — place the active hotbar block. */
         BlockId held = p->hotbar[p->hotbar_idx];
         if (held == BLK_AIR) return CRAFT_MENU_RESULT_NONE;
+
+        /* Double-tap on the same cell with the same held item: pull
+         * every available copy of `held` out of inventory and split
+         * evenly across all grid cells already holding `held` (plus
+         * the tapped cell). Remainder goes to earlier cells. */
+        bool dbl = (s_craft_a_last_cell == s_craft_sel) &&
+                   ((s_craft_frame - s_craft_a_last_frame) <= CRAFT_DBL_TAP_FRAMES);
+        s_craft_a_last_frame = s_craft_frame;
+        s_craft_a_last_cell  = s_craft_sel;
+
+        if (dbl && p->mode == CRAFT_MODE_SURVIVAL && p->inventory[held] > 0) {
+            int idx[9]; int n = 0; bool target_in_set = false;
+            for (int i = 0; i < 9; i++) {
+                if (s_craft_grid[i] == held) {
+                    idx[n++] = i;
+                    if (i == s_craft_sel) target_in_set = true;
+                }
+            }
+            if (!target_in_set) idx[n++] = s_craft_sel;
+            int pool = p->inventory[held];
+            int per  = pool / n;
+            int rem  = pool % n;
+            for (int k = 0; k < n; k++) {
+                int i = idx[k];
+                s_craft_grid[i]  = held;
+                s_craft_count[i] = per + (k < rem ? 1 : 0);
+            }
+            return CRAFT_MENU_RESULT_NONE;
+        }
+
+        /* Single-press place. Same item as the cell already holds →
+         * increment stack; different item or empty cell → replace
+         * with a single copy. Reject if there isn't an available copy
+         * left (cells already reserve from inventory). */
         if (craft_block_available(p, held) <= 0)
             return CRAFT_MENU_RESULT_NONE;
-        s_craft_grid[s_craft_sel] = held;
+        if (s_craft_grid[s_craft_sel] == held) {
+            s_craft_count[s_craft_sel]++;
+        } else {
+            s_craft_grid[s_craft_sel]  = held;
+            s_craft_count[s_craft_sel] = 1;
+        }
     }
 
     /* LB / RB cycle the hotbar slot — same semantics as the in-game
@@ -1161,6 +1264,18 @@ static void draw_craft_page(uint16_t *fb, const CraftPlayer *p) {
             BlockId b = s_craft_grid[idx];
             if (b != BLK_AIR) {
                 block_swatch_at(fb, cx + 1, cy + 1, cell - 2, b);
+                /* Stack count badge — only when >1, so single-slot
+                 * cells stay visually uncluttered. */
+                int n = s_craft_count[idx];
+                if (n > 1) {
+                    char buf[6];
+                    snprintf(buf, sizeof buf, "%d", n);
+                    int bw = craft_font_width(buf);
+                    int bx = cx + cell - bw - 1;
+                    int by = cy + cell - 6;
+                    rect(fb, bx - 1, by - 1, bw + 2, 7, rgb565(20, 20, 25));
+                    craft_font_draw(fb, buf, bx, by, 0xFFFF);
+                }
             }
             if (idx == s_craft_sel) {
                 rect(fb, cx - 1, cy - 1,        cell + 2, 1, 0xFFFF);

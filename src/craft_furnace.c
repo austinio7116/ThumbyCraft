@@ -40,15 +40,18 @@ void craft_furnace_remove(int wx, int wy, int wz) {
 }
 
 bool craft_furnace_is_smeltable(BlockId b) {
-    return b == BLK_IRON_ORE || b == BLK_SAND || b == BLK_COBBLE;
+    return b == BLK_IRON_ORE   || b == BLK_SAND   || b == BLK_COBBLE ||
+           b == BLK_SILVER_ORE || b == BLK_GOLD_ORE;
 }
 
 BlockId craft_furnace_smelt_output(BlockId b) {
     switch (b) {
-        case BLK_IRON_ORE: return BLK_IRON_INGOT;
-        case BLK_SAND:     return BLK_GLASS;
-        case BLK_COBBLE:   return BLK_STONE;
-        default:           return BLK_AIR;
+        case BLK_IRON_ORE:   return BLK_IRON_INGOT;
+        case BLK_SAND:       return BLK_GLASS;
+        case BLK_COBBLE:     return BLK_STONE;
+        case BLK_SILVER_ORE: return BLK_SILVER_INGOT;
+        case BLK_GOLD_ORE:   return BLK_GOLD_INGOT;
+        default:             return BLK_AIR;
     }
 }
 

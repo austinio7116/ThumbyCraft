@@ -21,7 +21,10 @@
 #define WATER_TICK_PERIOD 0.20f       /* 5 Hz sim rate */
 #define WATER_EVENT_MAX   256
 
-#define WATER_LEVEL_MAX   7           /* 0 source, 1..7 flowing, >7 dries up */
+#define WATER_LEVEL_MAX   3           /* 0 source, 1..3 flowing, >3 dries up.
+                                       * 2 bits because the block-id field
+                                       * grew to 6 bits to accommodate the
+                                       * full ore series. */
 
 /* Local-window coords keep each event to 4 bytes — saves ~2 KB BSS
  * vs storing world int32s. Events are applied immediately after the
@@ -43,10 +46,10 @@ void craft_water_init(void) {
     s_n_events = 0;
 }
 
-static inline uint8_t block_id_of(uint8_t b)    { return b & 0x1F; }
-static inline uint8_t water_level_of(uint8_t b) { return (b >> 5) & 0x07; }
+static inline uint8_t block_id_of(uint8_t b)    { return b & 0x3F; }
+static inline uint8_t water_level_of(uint8_t b) { return (b >> 6) & 0x03; }
 static inline uint8_t water_byte(uint8_t level) {
-    return (uint8_t)BLK_WATER | (uint8_t)((level & 0x07) << 5);
+    return (uint8_t)BLK_WATER | (uint8_t)((level & 0x03) << 6);
 }
 
 static void queue_event(int lx, int wy, int lz, uint8_t byte) {

@@ -627,8 +627,14 @@ void craft_gen_column(int wx, int wz, uint32_t seed,
         }
         uint32_t r = hash3(wx, y, wz) ^ (seed * 1370529931u);
         BlockId b = BLK_STONE;
-        if ((r & coal_mask) == 0)      b = BLK_COAL_ORE;
-        else if ((r & iron_mask) == 0) b = BLK_IRON_ORE;
+        /* Depth-gated precious ores tested before coal/iron so the
+         * rarer veins win when several would hit at the same cell. */
+        if      (y < 12 && (r & 0xFFu) == 0) b = BLK_DIAMOND_ORE;   /* 1/256 below y=12 */
+        else if (y < 16 && (r & 0x3Fu) == 0) b = BLK_REDSTONE_ORE;  /* 1/64  below y=16 */
+        else if (y < 20 && (r & 0x7Fu) == 0) b = BLK_GOLD_ORE;      /* 1/128 below y=20 */
+        else if (y < 30 && (r & 0x7Fu) == 0) b = BLK_SILVER_ORE;    /* 1/128 below y=30 */
+        else if ((r & coal_mask) == 0)       b = BLK_COAL_ORE;
+        else if ((r & iron_mask) == 0)       b = BLK_IRON_ORE;
         out[y] = b;
     }
     for (int y = h - 3; y < h; y++) {

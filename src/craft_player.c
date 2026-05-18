@@ -407,9 +407,12 @@ void craft_player_tick(CraftPlayer *p, const CraftInput *in, float dt) {
                  * they own; reject if the block needs a higher tier. */
                 int need = craft_block_pickaxe_tier(was);
                 int have = 0;
-                if      (p->inventory[BLK_PICKAXE_IRON]  > 0) have = 3;
-                else if (p->inventory[BLK_PICKAXE_STONE] > 0) have = 2;
-                else if (p->inventory[BLK_PICKAXE_WOOD]  > 0) have = 1;
+                if      (p->inventory[BLK_PICKAXE_DIAMOND] > 0) have = 3;
+                else if (p->inventory[BLK_PICKAXE_GOLD]    > 0) have = 3;
+                else if (p->inventory[BLK_PICKAXE_SILVER]  > 0) have = 3;
+                else if (p->inventory[BLK_PICKAXE_IRON]    > 0) have = 3;
+                else if (p->inventory[BLK_PICKAXE_STONE]   > 0) have = 2;
+                else if (p->inventory[BLK_PICKAXE_WOOD]    > 0) have = 1;
                 if (need > have) {
                     extern void craft_audio_pickaxe_ting(void);
                     craft_audio_pickaxe_ting();
@@ -439,8 +442,10 @@ void craft_player_tick(CraftPlayer *p, const CraftInput *in, float dt) {
                      * Without this, mining stone gave you stone and
                      * the furnace recipe (needs cobble) was unobtainable. */
                     BlockId dropped = was;
-                    if      (was == BLK_STONE) dropped = BLK_COBBLE;
-                    else if (was == BLK_GRASS) dropped = BLK_DIRT;
+                    if      (was == BLK_STONE)         dropped = BLK_COBBLE;
+                    else if (was == BLK_GRASS)         dropped = BLK_DIRT;
+                    else if (was == BLK_DIAMOND_ORE)   dropped = BLK_DIAMOND;
+                    else if (was == BLK_REDSTONE_ORE)  dropped = BLK_REDSTONE;
                     /* Track inventory counts in BOTH modes — creative
                      * needs them so the crafting picker can know what
                      * the player has mined. Creative just never

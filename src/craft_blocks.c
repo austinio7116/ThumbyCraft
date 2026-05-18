@@ -78,6 +78,24 @@ const char *craft_block_name(BlockId blk) {
         case BLK_ARROW:         return "arrow";
         case BLK_FURNACE:       return "furnace";
         case BLK_CHEST:         return "chest";
+        case BLK_SILVER_ORE:    return "silver ore";
+        case BLK_GOLD_ORE:      return "gold ore";
+        case BLK_DIAMOND_ORE:   return "diamond ore";
+        case BLK_REDSTONE_ORE:  return "redstone ore";
+        case BLK_SILVER_INGOT:  return "silver";
+        case BLK_GOLD_INGOT:    return "gold";
+        case BLK_DIAMOND:       return "diamond";
+        case BLK_REDSTONE:      return "redstone";
+        case BLK_PICKAXE_SILVER:  return "silver pick";
+        case BLK_PICKAXE_GOLD:    return "gold pick";
+        case BLK_PICKAXE_DIAMOND: return "diamond pick";
+        case BLK_SWORD_SILVER:    return "silver sword";
+        case BLK_SWORD_GOLD:      return "gold sword";
+        case BLK_SWORD_DIAMOND:   return "diamond sword";
+        case BLK_SILVER_BLOCK:    return "silver block";
+        case BLK_GOLD_BLOCK:      return "gold block";
+        case BLK_DIAMOND_BLOCK:   return "diamond block";
+        case BLK_REDSTONE_BLOCK:  return "redstone block";
         default:                return "?";
     }
 }
@@ -228,6 +246,128 @@ void craft_blocks_build_textures(void) {
            sizeof(uint16_t) * CRAFT_TEX_PIXELS);
 }
 #else
+/* Generate an ore tile: speckled-stone base with ~18 small material
+ * flecks. Mirrored to all three faces. */
+static void ore_with_flecks(BlockId blk, uint32_t seed,
+                            int fr, int fg, int fb) {
+    uint16_t *side = &craft_textures[(blk * 3 + 1) * CRAFT_TEX_PIXELS];
+    speckle(side, seed, 130, 130, 130, 50);
+    uint32_t s = seed ^ 0xABCD0001u;
+    for (int n = 0; n < 18; n++) {
+        int cx = (int)(xs32(&s) % CRAFT_TEX_SIZE);
+        int cy = (int)(xs32(&s) % CRAFT_TEX_SIZE);
+        for (int dy = -1; dy <= 1; dy++) {
+            for (int dx = -1; dx <= 1; dx++) {
+                int x = cx + dx, y = cy + dy;
+                if ((unsigned)x >= CRAFT_TEX_SIZE) continue;
+                if ((unsigned)y >= CRAFT_TEX_SIZE) continue;
+                if ((xs32(&s) & 3) == 0) continue;
+                int j = (int)(xs32(&s) & 0x1F);
+                int r = fr + j, g = fg + j, b = fb + j;
+                if (r > 255) r = 255;
+                if (g > 255) g = 255;
+                if (b > 255) b = 255;
+                side[y * CRAFT_TEX_SIZE + x] = rgb565(r, g, b);
+            }
+        }
+    }
+    memcpy(&craft_textures[(blk * 3 + 0) * CRAFT_TEX_PIXELS],
+           side, sizeof(uint16_t) * CRAFT_TEX_PIXELS);
+    memcpy(&craft_textures[(blk * 3 + 2) * CRAFT_TEX_PIXELS],
+           side, sizeof(uint16_t) * CRAFT_TEX_PIXELS);
+}
+
+/* Inventory item tile: dark backdrop + a horizontal "bar" of two
+ * shades from row 6 to 9, cols 3..12. Used by ingots; pale+dark
+ * gives a metallic look. */
+static void ingot_bar_tex(BlockId blk, int r, int g, int b) {
+    uint16_t *side = &craft_textures[(blk * 3 + 1) * CRAFT_TEX_PIXELS];
+    for (int i = 0; i < CRAFT_TEX_PIXELS; i++) side[i] = rgb565(40, 40, 50);
+    uint16_t bright = rgb565(r, g, b);
+    int dr = r * 3 / 4, dg = g * 3 / 4, db = b * 3 / 4;
+    uint16_t dark   = rgb565(dr, dg, db);
+    for (int x = 3; x < 13; x++) {
+        side[6 * CRAFT_TEX_SIZE + x] = dark;
+        side[7 * CRAFT_TEX_SIZE + x] = bright;
+        side[8 * CRAFT_TEX_SIZE + x] = bright;
+        side[9 * CRAFT_TEX_SIZE + x] = dark;
+    }
+    memcpy(&craft_textures[(blk * 3 + 0) * CRAFT_TEX_PIXELS],
+           side, sizeof(uint16_t) * CRAFT_TEX_PIXELS);
+    memcpy(&craft_textures[(blk * 3 + 2) * CRAFT_TEX_PIXELS],
+           side, sizeof(uint16_t) * CRAFT_TEX_PIXELS);
+}
+
+/* Inventory item tile: dark backdrop + a diamond-shaped gem. */
+static void gem_tex(BlockId blk, int r, int g, int b) {
+    uint16_t *side = &craft_textures[(blk * 3 + 1) * CRAFT_TEX_PIXELS];
+    for (int i = 0; i < CRAFT_TEX_PIXELS; i++) side[i] = rgb565(40, 40, 50);
+    uint16_t bright = rgb565(r, g, b);
+    int dr = r * 3 / 4, dg = g * 3 / 4, db = b * 3 / 4;
+    uint16_t dark   = rgb565(dr, dg, db);
+    int hr = r + (255 - r) / 2, hg = g + (255 - g) / 2, hb = b + (255 - b) / 2;
+    uint16_t hi = rgb565(hr, hg, hb);
+    /* Diamond outline rows: spread = |row - 7|. */
+    for (int y = 3; y < 13; y++) {
+        int spread = (y >= 8) ? (12 - y) : (y - 3);
+        for (int dx = -spread; dx <= spread; dx++) {
+            int x = 7 + dx;
+            if ((unsigned)x >= CRAFT_TEX_SIZE) continue;
+            uint16_t c = bright;
+            if (dx == -spread || dx == spread) c = dark;
+            if (dx == -spread + 1 && y >= 4 && y <= 7) c = hi;
+            side[y * CRAFT_TEX_SIZE + x] = c;
+        }
+    }
+    memcpy(&craft_textures[(blk * 3 + 0) * CRAFT_TEX_PIXELS],
+           side, sizeof(uint16_t) * CRAFT_TEX_PIXELS);
+    memcpy(&craft_textures[(blk * 3 + 2) * CRAFT_TEX_PIXELS],
+           side, sizeof(uint16_t) * CRAFT_TEX_PIXELS);
+}
+
+/* Inventory item tile: dark backdrop + 8 scattered specks of `c`. */
+static void dust_tex(BlockId blk, uint32_t seed, int r, int g, int b) {
+    uint16_t *side = &craft_textures[(blk * 3 + 1) * CRAFT_TEX_PIXELS];
+    for (int i = 0; i < CRAFT_TEX_PIXELS; i++) side[i] = rgb565(40, 40, 50);
+    uint16_t c = rgb565(r, g, b);
+    uint32_t s = seed;
+    for (int n = 0; n < 14; n++) {
+        int cx = 3 + (int)(xs32(&s) % 10);
+        int cy = 3 + (int)(xs32(&s) % 10);
+        side[cy * CRAFT_TEX_SIZE + cx] = c;
+        if ((xs32(&s) & 1) && cx + 1 < CRAFT_TEX_SIZE)
+            side[cy * CRAFT_TEX_SIZE + cx + 1] = c;
+    }
+    memcpy(&craft_textures[(blk * 3 + 0) * CRAFT_TEX_PIXELS],
+           side, sizeof(uint16_t) * CRAFT_TEX_PIXELS);
+    memcpy(&craft_textures[(blk * 3 + 2) * CRAFT_TEX_PIXELS],
+           side, sizeof(uint16_t) * CRAFT_TEX_PIXELS);
+}
+
+/* Storage block (silver/gold/diamond/redstone block): solid colour
+ * with a slightly-darker border so faces visibly separate. Same on
+ * top / side / bottom. */
+static void solid_block_tex(BlockId blk, int r, int g, int b) {
+    uint16_t bright = rgb565(r, g, b);
+    int dr = r * 5 / 6, dg = g * 5 / 6, db = b * 5 / 6;
+    uint16_t mid    = rgb565(dr, dg, db);
+    int br = r * 2 / 3, bg = g * 2 / 3, bb = b * 2 / 3;
+    uint16_t dark   = rgb565(br, bg, bb);
+    uint16_t *side = &craft_textures[(blk * 3 + 1) * CRAFT_TEX_PIXELS];
+    for (int y = 0; y < CRAFT_TEX_SIZE; y++) {
+        for (int x = 0; x < CRAFT_TEX_SIZE; x++) {
+            uint16_t c = bright;
+            if (x == 0 || y == 0 || x == 15 || y == 15) c = dark;
+            else if ((x ^ y) & 1) c = mid;
+            side[y * CRAFT_TEX_SIZE + x] = c;
+        }
+    }
+    memcpy(&craft_textures[(blk * 3 + 0) * CRAFT_TEX_PIXELS],
+           side, sizeof(uint16_t) * CRAFT_TEX_PIXELS);
+    memcpy(&craft_textures[(blk * 3 + 2) * CRAFT_TEX_PIXELS],
+           side, sizeof(uint16_t) * CRAFT_TEX_PIXELS);
+}
+
 void craft_blocks_build_textures(void) {
     /* AIR slot is never sampled but zero-init the rows anyway. */
     fill_solid(&craft_textures[(BLK_AIR * 3 + 0) * CRAFT_TEX_PIXELS], 0);
@@ -431,13 +571,19 @@ void craft_blocks_build_textures(void) {
     /* Common tool icon — stone-style pickaxe with tunable head colour.
      * Non-static: rgb565 isn't a constant expression so a static
      * initializer wouldn't compile. Trivial stack init at startup. */
-    const uint16_t TIER_PICK[3][2] = {
-        { rgb565(155, 110, 60), rgb565(115, 80, 40) },
-        { rgb565(130, 130, 135), rgb565(85, 85, 90) },
-        { rgb565(225, 225, 235), rgb565(170, 170, 180) },
+    const uint16_t TIER_PICK[6][2] = {
+        { rgb565(155, 110, 60),  rgb565(115, 80, 40)   }, /* wood */
+        { rgb565(130, 130, 135), rgb565(85, 85, 90)    }, /* stone */
+        { rgb565(225, 225, 235), rgb565(170, 170, 180) }, /* iron */
+        { rgb565(190, 210, 225), rgb565(140, 165, 185) }, /* silver */
+        { rgb565(255, 215, 60),  rgb565(195, 155, 30)  }, /* gold */
+        { rgb565(120, 240, 250), rgb565(70, 175, 200)  }, /* diamond */
     };
-    BlockId pick_ids[3] = { BLK_PICKAXE_WOOD, BLK_PICKAXE_STONE, BLK_PICKAXE_IRON };
-    for (int tier = 0; tier < 3; tier++) {
+    BlockId pick_ids[6] = {
+        BLK_PICKAXE_WOOD, BLK_PICKAXE_STONE, BLK_PICKAXE_IRON,
+        BLK_PICKAXE_SILVER, BLK_PICKAXE_GOLD, BLK_PICKAXE_DIAMOND,
+    };
+    for (int tier = 0; tier < 6; tier++) {
         uint16_t *side = &craft_textures[(pick_ids[tier] * 3 + 1) * CRAFT_TEX_PIXELS];
         for (int i = 0; i < CRAFT_TEX_PIXELS; i++) side[i] = rgb565(40, 40, 50);
         uint16_t head   = TIER_PICK[tier][0];
@@ -464,13 +610,19 @@ void craft_blocks_build_textures(void) {
                side, sizeof(uint16_t) * CRAFT_TEX_PIXELS);
     }
 
-    const uint16_t TIER_SWORD[3][2] = {
-        { rgb565(170, 130, 70), rgb565(120, 90, 50) },
-        { rgb565(140, 140, 145), rgb565(95, 95, 100) },
-        { rgb565(230, 230, 240), rgb565(170, 170, 180) },
+    const uint16_t TIER_SWORD[6][2] = {
+        { rgb565(170, 130, 70),  rgb565(120, 90, 50)   }, /* wood */
+        { rgb565(140, 140, 145), rgb565(95, 95, 100)   }, /* stone */
+        { rgb565(230, 230, 240), rgb565(170, 170, 180) }, /* iron */
+        { rgb565(195, 215, 230), rgb565(145, 170, 190) }, /* silver */
+        { rgb565(255, 215, 60),  rgb565(195, 155, 30)  }, /* gold */
+        { rgb565(130, 245, 255), rgb565(75, 180, 210)  }, /* diamond */
     };
-    BlockId sword_ids[3] = { BLK_SWORD_WOOD, BLK_SWORD_STONE, BLK_SWORD_IRON };
-    for (int tier = 0; tier < 3; tier++) {
+    BlockId sword_ids[6] = {
+        BLK_SWORD_WOOD, BLK_SWORD_STONE, BLK_SWORD_IRON,
+        BLK_SWORD_SILVER, BLK_SWORD_GOLD, BLK_SWORD_DIAMOND,
+    };
+    for (int tier = 0; tier < 6; tier++) {
         uint16_t *side = &craft_textures[(sword_ids[tier] * 3 + 1) * CRAFT_TEX_PIXELS];
         for (int i = 0; i < CRAFT_TEX_PIXELS; i++) side[i] = rgb565(40, 40, 50);
         uint16_t blade = TIER_SWORD[tier][0], blade_d = TIER_SWORD[tier][1];
@@ -657,5 +809,23 @@ void craft_blocks_build_textures(void) {
         memcpy(&craft_textures[(BLK_ARROW * 3 + 2) * CRAFT_TEX_PIXELS],
                side, sizeof(uint16_t) * CRAFT_TEX_PIXELS);
     }
+
+    /* Precious-metal ores — speckled stone with material flecks. */
+    ore_with_flecks(BLK_SILVER_ORE,   0x511A011u, 190, 210, 225);
+    ore_with_flecks(BLK_GOLD_ORE,     0x6011D11u, 220, 180,  40);
+    ore_with_flecks(BLK_DIAMOND_ORE,  0xD1A1011u,  90, 200, 220);
+    ore_with_flecks(BLK_REDSTONE_ORE, 0xED5701Cu, 200,  40,  40);
+
+    /* Ingots / gem / dust. */
+    ingot_bar_tex(BLK_SILVER_INGOT, 215, 225, 235);
+    ingot_bar_tex(BLK_GOLD_INGOT,   245, 210,  55);
+    gem_tex      (BLK_DIAMOND,      130, 240, 250);
+    dust_tex     (BLK_REDSTONE,     0xDEADBEEFu, 230,  40,  40);
+
+    /* Storage blocks — solid colour with hatched mid + dark border. */
+    solid_block_tex(BLK_SILVER_BLOCK,   210, 220, 230);
+    solid_block_tex(BLK_GOLD_BLOCK,     245, 210,  55);
+    solid_block_tex(BLK_DIAMOND_BLOCK,  130, 240, 250);
+    solid_block_tex(BLK_REDSTONE_BLOCK, 210,  40,  40);
 }
 #endif /* CRAFT_TEXTURES_BAKED */

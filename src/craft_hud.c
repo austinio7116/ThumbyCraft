@@ -131,6 +131,16 @@ void craft_hud_draw_hotbar(uint16_t *fb, const CraftPlayer *p) {
             block_swatch(fb, sx + 1, y0 + 1, slot_w - 2, p->hotbar[i]);
         if (i == p->hotbar_idx)
             rect_outline(fb, sx - 1, y0 - 1, slot_w + 2, slot_w + 2, 0xFFFF);
+        /* Survival count badge — drawn here so menus (which call only
+         * draw_hotbar) get the same info the in-game HUD shows. */
+        if (p->mode == CRAFT_MODE_SURVIVAL && p->hotbar[i] != BLK_AIR) {
+            int n = p->inventory[p->hotbar[i]];
+            if (n > 0) {
+                char cbuf[6];
+                snprintf(cbuf, sizeof cbuf, "%d", n);
+                craft_font_draw(fb, cbuf, sx + 1, y0 + slot_w - 6, 0xFFFF);
+            }
+        }
     }
 }
 
@@ -155,20 +165,6 @@ void craft_hud_draw(uint16_t *fb, const CraftPlayer *p, int fps) {
     }
     int nw = craft_font_width(name);
     craft_font_draw(fb, name, (CRAFT_FB_W - nw) / 2, y0 - 8, 0xFFFF);
-
-    /* Per-slot count overlay in survival. */
-    if (p->mode == CRAFT_MODE_SURVIVAL) {
-        for (int i = 0; i < CRAFT_HOTBAR_SLOTS; i++) {
-            BlockId b = p->hotbar[i];
-            if (b == BLK_AIR) continue;
-            int n = p->inventory[b];
-            if (n <= 0) continue;
-            char cbuf[6];
-            snprintf(cbuf, sizeof cbuf, "%d", n);
-            int sx = x0 + i * (slot_w + gap);
-            craft_font_draw(fb, cbuf, sx + 1, y0 + slot_w - 6, 0xFFFF);
-        }
-    }
 
     if (fps > 0) {
         char buf[16];

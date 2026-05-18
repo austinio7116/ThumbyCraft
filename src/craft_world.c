@@ -349,7 +349,7 @@ static void light_flood_from(int sx, int sy, int sz) {
             if ((unsigned)ny >= CRAFT_WORLD_Y) continue;
             if ((unsigned)nz >= CRAFT_WORLD_Z) continue;
             int n_idx = local_idx(nx, ny, nz);
-            BlockId b = (BlockId)(craft_world_blocks[n_idx] & 0x1F);
+            BlockId b = (BlockId)(craft_world_blocks[n_idx] & 0x3F);
             if (!light_transparent(b)) continue;
             if (light_get(n_idx) >= next_level) continue;  /* already as bright or brighter */
             light_set_max(n_idx, (uint8_t)next_level);
@@ -375,7 +375,7 @@ static inline bool blocks_sky(BlockId b) {
 static void compute_skyheight_column(int lx, int lz) {
     int sh = 0;
     for (int wy = CRAFT_WORLD_Y - 1; wy >= 0; wy--) {
-        BlockId b = (BlockId)(craft_world_blocks[local_idx(lx, wy, lz)] & 0x1F);
+        BlockId b = (BlockId)(craft_world_blocks[local_idx(lx, wy, lz)] & 0x3F);
         if (blocks_sky(b)) { sh = wy; break; }
     }
     craft_world_skyheight[lz * CRAFT_WORLD_X + lx] = (uint8_t)sh;
@@ -394,7 +394,7 @@ void craft_world_rebuild_lightmap(void) {
     for (int lz = 0; lz < CRAFT_WORLD_Z; lz++) {
         for (int lx = 0; lx < CRAFT_WORLD_X; lx++) {
             for (int wy = 0; wy < CRAFT_WORLD_Y; wy++) {
-                if ((craft_world_blocks[local_idx(lx, wy, lz)] & 0x1F) == BLK_TORCH) {
+                if ((craft_world_blocks[local_idx(lx, wy, lz)] & 0x3F) == BLK_TORCH) {
                     light_flood_from(lx, wy, lz);
                 }
             }
@@ -408,11 +408,11 @@ BlockId craft_world_get(int wx, int wy, int wz) {
     int lz = wz - craft_world_origin_z;
     if ((unsigned)lx >= CRAFT_WORLD_X) return BLK_AIR;
     if ((unsigned)lz >= CRAFT_WORLD_Z) return BLK_AIR;
-    /* Low 5 bits = block id (BLK_COUNT fits in 5 bits). Top 3 bits
+    /* Low 6 bits = block id (BLK_COUNT fits in 6 bits). Top 2 bits
      * are repurposed as the water-level field used by the water
      * flow simulation. The mask hides those bits from every
      * consumer of the public block-id API. */
-    return (BlockId)(craft_world_blocks[local_idx(lx, wy, lz)] & 0x1F);
+    return (BlockId)(craft_world_blocks[local_idx(lx, wy, lz)] & 0x3F);
 }
 
 uint8_t craft_world_get_byte(int wx, int wy, int wz) {
