@@ -122,7 +122,15 @@ static bool aabb_blocked(float px, float feet_y, float pz) {
     int x1 = (int)floorf(px + PLAYER_HALF_W);
     int z0 = (int)floorf(pz - PLAYER_HALF_W);
     int z1 = (int)floorf(pz + PLAYER_HALF_W);
-    int y0 = (int)floorf(feet_y);
+    /* +1e-3 epsilon on the feet-Y floor defeats a float-precision bug
+     * that put the player half a micro-unit below their integer-y
+     * surface. Without the bias, (ground_y + 1) + PLAYER_EYE - PLAYER_EYE
+     * occasionally rounds to ground_y + 0.9999996 instead of ground_y + 1,
+     * making the foot AABB intersect the very grass cell the player
+     * is standing on. The user reported this as "stuck on flat ground"
+     * with HUD diagnostic fy=30.99..., grass everywhere — auto-step
+     * was hiding it. */
+    int y0 = (int)floorf(feet_y + 0.001f);
     int y1 = (int)floorf(feet_y + PLAYER_HEIGHT);
     for (int y = y0; y <= y1; y++)
         for (int z = z0; z <= z1; z++)

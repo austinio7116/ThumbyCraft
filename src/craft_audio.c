@@ -27,11 +27,15 @@
 #include <math.h>
 #include <string.h>
 
-#define CRAFT_AUDIO_VOICES 4
-#define MUSIC_PAD_VOICE    0
-#define MUSIC_MELODY_VOICE 1
-#define SFX_VOICE_FIRST    2
-#define SFX_VOICE_LAST     3
+/* 8 voices total — 6 in the music pool (notes pick the oldest
+ * released voice on trigger so previous notes can ring through),
+ * 2 reserved for SFX. */
+#define CRAFT_AUDIO_VOICES 8
+#define MUSIC_VOICE_FIRST  0
+#define MUSIC_VOICE_LAST   5
+#define MUSIC_VOICE_COUNT  (MUSIC_VOICE_LAST - MUSIC_VOICE_FIRST + 1)
+#define SFX_VOICE_FIRST    6
+#define SFX_VOICE_LAST     7
 
 typedef enum { W_SQR, W_TRI, W_NOISE, W_SINE } Wave;
 
@@ -100,150 +104,65 @@ static inline float sine_lookup(float phase) {
 #define DELAY_TAP    1500              /* 68 ms — feels spacious */
 static int16_t s_delay_ring[DELAY_SIZE];
 static int     s_delay_pos;
-#define REVERB_WET    0.28f
-#define REVERB_FEED   0.22f   /* reduced — sustained chords no longer build a mud halo */
+/* Heavy reverb — this is the engine's sustain-pedal substitute. With
+ * only two music voices we can't truly hold previous notes through
+ * fresh triggers, so the reverb tail does that work integratively:
+ * each note's release contributes a long decaying smear that fills
+ * the gaps between notes and gives the perceived sustain Debussy's
+ * piano writing relies on. Feedback at 0.55 yields a ~3-4 s tail. */
+#define REVERB_WET    0.45f
+#define REVERB_FEED   0.55f
 
 static float freq_to_inc(float hz) {
     return hz / (float)CRAFT_AUDIO_RATE;
 }
 
-/* --- Music state -------------------------------------------------- */
-
-/* A chord is a 4-note voicing in the mid register. Keeping the bass
- * note above ~190 Hz avoids the "drone buzz" the old C3 root had —
- * fundamentals that low were clipping under the 3× loudness boost. */
-typedef struct {
-    float freqs[4];
-} Chord;
-
-/* Eight-chord progression covering the A / B / A' sections of Debussy's
- * "Clair de Lune" (3rd of Suite Bergamasque). Authentic Db major
- * voicings with parsimonious voice-leading — adjacent chords share at
- * least two common tones so the pad transitions glide smoothly rather
- * than jumping.
+/* --- Music: Clair de Lune note timeline -------------------------- *
  *
- *   0  Dbmaj9     Ab3 F4  Ab4 C5     I9 (opening colour)
- *   1  Fm7        C4  F4  Ab4 C5     iii7 parallel shadow
- *   2  Bbm7       Bb3 F4  Ab4 Db5    vi7 wistful turn
- *   3  Ebm9       Eb4 Gb4 Bb4 F5     ii9 floaty
- *   4  Ab7sus4    Ab3 Db4 Ab4 Eb5    V-sus, suspended 3rd
- *   5  Ab7        Ab3 Eb4 Gb4 C5     V7
- *   6  Gbmaj7     Bb3 Gb4 Bb4 F5     IV7 plagal lift
- *   7  Dbmaj7/F   F4  Ab4 C5  F5     I6 return
+ * Total rewrite. The previous generator (chord pad + arpeggio figure
+ * scheduler) couldn't sound like the piece because the architecture
+ * was wrong: a held drone with notes on top will always feel like
+ * a synth pad, never like a piano playing Clair de Lune.
  *
- * Bass tones (lowest osc) sit at 184-349 Hz — above the drone-buzz
- * zone but rich enough to anchor the 9ths above. */
-static const Chord chord_prog[] = {
-    { { 207.65f, 349.23f, 415.30f, 523.25f } }, /* 0 Dbmaj9      Ab3 F4 Ab4 C5 */
-    { { 261.63f, 349.23f, 415.30f, 523.25f } }, /* 1 Fm7         C4  F4 Ab4 C5 */
-    { { 233.08f, 349.23f, 415.30f, 554.37f } }, /* 2 Bbm7        Bb3 F4 Ab4 Db5 */
-    { { 311.13f, 369.99f, 466.16f, 698.46f } }, /* 3 Ebm9        Eb4 Gb4 Bb4 F5 */
-    { { 207.65f, 277.18f, 415.30f, 622.25f } }, /* 4 Ab7sus4     Ab3 Db4 Ab4 Eb5 */
-    { { 207.65f, 311.13f, 369.99f, 523.25f } }, /* 5 Ab7         Ab3 Eb4 Gb4 C5 */
-    { { 233.08f, 369.99f, 466.16f, 698.46f } }, /* 6 Gbmaj7      Bb3 Gb4 Bb4 F5 */
-    { { 349.23f, 415.30f, 523.25f, 698.46f } }, /* 7 Dbmaj7/F    F4  Ab4 C5 F5  */
-};
-#define CHORD_COUNT (int)(sizeof(chord_prog) / sizeof(chord_prog[0]))
-
-/* Per-chord OPENING MOTIF — the iconic Clair de Lune right-hand line:
- * descending stepwise figure with one rebound, ending on a held tone.
- * Each motif spans roughly the top of the chord through to the 3rd or
- * 5th, hugging the chord's diatonic neighbours. Frequencies are
- * absolute Hz so transposition is implicit per chord row. */
-#define MOTIF_NOTES 7
-static const float motif_per_chord[CHORD_COUNT][MOTIF_NOTES] = {
-    /* 0  Dbmaj9 — the literal opening, brief's reference pattern. */
-    { 830.61f, 698.46f, 554.37f, 622.25f, 698.46f, 554.37f, 415.30f },
-    /* 1  Fm7 — sits a step up, mirrors the descent with C6 lead. */
-    { 1046.50f, 830.61f, 698.46f, 622.25f, 698.46f, 830.61f, 698.46f },
-    /* 2  Bbm7 — wistful descent through chord+9th tones. */
-    { 932.33f, 830.61f, 698.46f, 554.37f, 622.25f, 698.46f, 554.37f },
-    /* 3  Ebm9 — floating around the 5th + 9th, soft contour. */
-    { 698.46f, 622.25f, 554.37f, 466.16f, 622.25f, 554.37f, 466.16f },
-    /* 4  Ab7sus — suspended 4th hangs, descent through sus tones. */
-    { 554.37f, 466.16f, 415.30f, 622.25f, 554.37f, 415.30f, 554.37f },
-    /* 5  Ab7 — dominant tension; the 3rd appears for the resolution. */
-    { 622.25f, 554.37f, 466.16f, 415.30f, 466.16f, 554.37f, 523.25f },
-    /* 6  Gbmaj7 — bright plagal lift, hovers around Gb-Bb-F. */
-    { 932.33f, 739.99f, 698.46f, 622.25f, 698.46f, 739.99f, 698.46f },
-    /* 7  Dbmaj7/F — return cadence, lands on Ab5 for the closing glow. */
-    { 698.46f, 622.25f, 554.37f, 523.25f, 554.37f, 698.46f, 830.61f },
-};
-
-/* Dotted-eighth + sixteenth + eighth rhythmic cell, repeated twice
- * with a quarter resolution at the end. In sixteenth units at the
- * piece's ~60 BPM dotted-quarter: 3-1-2 3-1-2 4 = 16 sixteenths,
- * i.e. one full 9/8 bar. */
-static const uint8_t motif_durs_16ths[MOTIF_NOTES] = { 3, 1, 2, 3, 1, 2, 4 };
-
-/* Per-chord APPOGIATURA — a 2-note grace + resolution where the
- * upper neighbour resolves a step down onto a chord tone. The accent
- * is on the dissonant first note; the second is the soft landing. */
-static const float appogg_per_chord[CHORD_COUNT][2] = {
-    { 739.99f, 698.46f },   /* 0  Gb5→F5  over Dbmaj9 */
-    { 932.33f, 830.61f },   /* 1  Bb5→Ab5 over Fm7 */
-    { 932.33f, 830.61f },   /* 2  Bb5→Ab5 over Bbm7 */
-    { 783.99f, 698.46f },   /* 3  G5→F5   over Ebm9 */
-    { 587.33f, 554.37f },   /* 4  D5→Db5  over Ab7sus */
-    { 587.33f, 554.37f },   /* 5  D5→Db5  over Ab7 (leading-tone tug) */
-    { 830.61f, 739.99f },   /* 6  Ab5→Gb5 over Gbmaj7 */
-    { 932.33f, 830.61f },   /* 7  Bb5→Ab5 over Dbmaj7/F */
-};
-
-/* Two pacing modes — switched on the world's sun position.
+ * New architecture: a hand-composed timeline of NOTE EVENTS — like a
+ * tracker. The first ~14 seconds of Clair de Lune (opening 4 bars in
+ * Db major, 9/8 time) are written out as explicit notes with start
+ * times, frequencies, durations, and velocities. The engine just
+ * plays them back in order and loops.
  *
- * NIGHT (sun_y < 0): slow, sparse, "shifting clouds" texture.
- * DAY   (sun_y > 0): faster, more melodic — adds arpeggiated runs
- *                    through the current chord like Claire-de-Lune's
- *                    right-hand figures. Chord changes are also more
- *                    frequent so the harmony breathes with motion. */
-#define CHORD_DURATION_NIGHT 20.0f
-#define CHORD_DURATION_DAY   12.0f
-#define MELODY_MIN_GAP_NIGHT  2.5f
-#define MELODY_MAX_GAP_NIGHT  5.5f
-#define MELODY_REST_PCT_NIGHT 0.55f
-#define MELODY_MIN_GAP_DAY    1.2f
-#define MELODY_MAX_GAP_DAY    2.8f
-#define MELODY_REST_PCT_DAY   0.20f
-
-/* Day mode mix of melody event types (sum to 1.0):
- *   SCALE_RUN — long sequential pentatonic sweep (8-14 notes,
- *               ascending or descending, optionally crossing
- *               octaves). This is the Claire-de-Lune RH figure.
- *   ARPEGGIO  — short broken chord (4-6 notes).
- *   SINGLE    — one held note. */
-#define DAY_PCT_SCALE     0.60f
-#define DAY_PCT_ARPEGGIO  0.25f
-/* Night mode: occasional scale runs for variety, but sparser. */
-#define NIGHT_PCT_SCALE   0.15f
-
-#define RUN_MAX_NOTES   16
-#define RUN_NOTE_GAP    0.105f   /* 16th-note feel at ~140 BPM — sweepy */
-#define ARP_NOTE_GAP    0.140f   /* slightly slower for chord arps */
+ * Two music voices:
+ *   LH  — left-hand chord stabs (4 oscillators per strike).
+ *   RH  — right-hand melody (1 or 2 oscillators).
+ *
+ * Each note in the timeline targets one voice. Voice retriggers
+ * preserve oscillator phase (see trigger_music_voice) so successive
+ * melody notes don't produce envelope-step clicks. */
 
 typedef struct {
-    int    n_notes;
-    int    next_idx;
-    float  next_t;
-    float  note_gap;
-    float  velocity;
-    float  release_t;
-    float  freqs[RUN_MAX_NOTES];
-} RunState;
+    float    t;          /* start time in seconds from sequence start */
+    float    hz[4];      /* fundamental(s) — 1 for melody, 2 for octave-doubled, 4 for chord */
+    uint8_t  n_hz;
+    uint8_t  voice;      /* 0 = LH, 1 = RH */
+    float    vel;
+    float    attack;
+    float    sustain;
+    float    release;
+} CDLNote;
+
+/* Note timeline lives in a separate header — it's ~915 events,
+ * auto-generated from the actual Clair de Lune MIDI by
+ * /tmp/cdl_to_c.py. Defines cdl_seq[], CDL_SEQ_LEN, CDL_SEQ_PERIOD. */
+#include "craft_audio_cdl_data.h"
 
 typedef struct {
-    bool   enabled;
-    float  target_gain;
-    float  cur_gain;
-    float  t;
-    int    chord_idx;
-    int    last_chord_played;
-    float  chord_t;
-    float  next_note_t;
-    int    last_note;
-    float  duck_until;
-    float  sun_y;        /* >0 day, <0 night. Set by host each tick. */
-    RunState run;        /* active scale-run or arpeggio note queue */
+    bool     enabled;
+    float    target_gain;
+    float    cur_gain;
+    float    t;            /* global time since music start (for SFX duck timing) */
+    float    seq_t;        /* time within current loop iteration */
+    int      next_idx;     /* next event in cdl_seq[] to fire */
+    float    duck_until;
+    float    sun_y;        /* unused now, kept for API stability */
     uint32_t rng;
 } MusicState;
 
@@ -270,14 +189,13 @@ void craft_audio_init(void) {
     memset(voices, 0, sizeof voices);
     sfx_rr = SFX_VOICE_FIRST;
     memset(&s_music, 0, sizeof s_music);
-    s_music.rng               = 0xA110F00Du;
-    s_music.target_gain       = 0.70f;
-    s_music.cur_gain          = 0.0f;
-    s_music.last_note         = 3;
-    s_music.next_note_t       = 1.0f;
-    s_music.last_chord_played = -1;
-    s_music.sun_y             = 1.0f;   /* assume day until world sets it */
-    s_music.run.n_notes       = 0;
+    s_music.rng         = 0xA110F00Du;
+    s_music.target_gain = 0.70f;
+    s_music.cur_gain    = 0.0f;
+    s_music.t           = 0.0f;
+    s_music.seq_t       = 0.0f;
+    s_music.next_idx    = 0;
+    s_music.sun_y       = 1.0f;
     memset(s_delay_ring, 0, sizeof s_delay_ring);
     s_delay_pos = 0;
     if (!s_sine_ready) sine_init();
@@ -425,7 +343,8 @@ void craft_audio_set_ambient(float g) {
 void craft_audio_music_enable(bool on) {
     s_music.enabled = on;
     if (on) {
-        s_music.last_chord_played = -1;
+        s_music.seq_t    = 0.0f;
+        s_music.next_idx = 0;
         if (!s_sine_ready) sine_init();
     }
 }
@@ -455,14 +374,23 @@ static void trigger_music_voice(int voice_idx,
                                 float attack_t, float sustain_hold_t,
                                 float release_t) {
     Voice *v = &voices[voice_idx];
+    if (n_freqs < 1) n_freqs = 1;
+    if (n_freqs > MAX_OSC) n_freqs = MAX_OSC;
+    /* Phase preservation: if the voice was already active and the
+     * oscillator count matches, KEEP the running phase per osc.
+     * Resetting phase on a retrigger is what produced the audible
+     * "click" between successive melody notes — the sine wave jumped
+     * from its current value back to zero. Continuous phase + a new
+     * phase_inc gives a smooth pitch transition with no discontinuity. */
+    bool same_shape = v->on && v->n_osc == n_freqs;
     v->on        = true;
     v->use_adsr  = true;
     v->wave      = W_SINE;
-    if (n_freqs < 1) n_freqs = 1;
-    if (n_freqs > MAX_OSC) n_freqs = MAX_OSC;
-    v->n_osc = n_freqs;
+    v->n_osc     = n_freqs;
     for (int i = 0; i < n_freqs; i++) {
-        v->phase[i]     = (float)i / (float)n_freqs;  /* staggered start */
+        if (!same_shape) {
+            v->phase[i] = (float)i / (float)n_freqs;
+        }
         v->phase_inc[i] = freq_to_inc(freqs[i]);
     }
     v->attack_coef  = env_coef_for(attack_t);
@@ -473,73 +401,41 @@ static void trigger_music_voice(int voice_idx,
     /* gain is preserved from previous note for smooth re-trigger. */
 }
 
-static int pick_next_melody_note(int last, uint32_t *rng) {
-    if (last < 0) return (int)(xs(rng) % PENT_COUNT);
-    uint32_t r = xs(rng);
-    int delta;
-    if ((r & 0x3FF) < 0x266) {           /* ~60% step */
-        delta = (int)((r >> 10) & 3) - 1;          /* -1..+2 */
-        if (delta == 0) delta = ((r >> 12) & 1) ? 1 : -1;
-    } else if ((r & 0x3FF) < 0x366) {     /* ~25% leap */
-        delta = (int)((r >> 12) & 7) - 3;          /* -3..+4 */
-    } else {                              /* ~15% repeat */
-        delta = 0;
+/* Pick a voice from the music pool to host the next note. Picks an
+ * idle voice if one exists, otherwise the voice with the LOWEST
+ * gain (i.e. furthest into its release tail and thus least audible
+ * to steal). This is what gives the engine polyphony — previous
+ * notes keep ringing on their own voices while new notes pick
+ * fresh ones, exactly the way a sustain pedal lets piano strings
+ * vibrate after a fresh strike. */
+static int alloc_music_voice(void) {
+    int   best_idx  = MUSIC_VOICE_FIRST;
+    float best_score = 1e30f;
+    for (int i = MUSIC_VOICE_FIRST; i <= MUSIC_VOICE_LAST; i++) {
+        Voice *v = &voices[i];
+        /* Idle voice wins instantly. */
+        if (!v->on) return i;
+        /* Otherwise prefer the voice in release with the smallest
+         * gain — stealing it loses the least signal. Voices in
+         * attack/sustain are kept; we score them as "loud" so the
+         * search prefers releasing voices. */
+        float score = (v->env == ENV_RELEASE) ? v->gain : (v->gain + 1.0f);
+        if (score < best_score) {
+            best_score = score;
+            best_idx   = i;
+        }
     }
-    int next = last + delta;
-    if (next < 0) next = 0;
-    if (next >= PENT_COUNT) next = PENT_COUNT - 1;
-    return next;
+    return best_idx;
 }
 
-/* Short chord arpeggio — 4-6 notes through the chord tones plus an
- * octave-up doubling. Filler between scale runs. */
-static void arp_build(RunState *run, const Chord *ch, uint32_t *rng) {
-    uint32_t r = xs(rng);
-    bool descending = (r & 1);
-    bool include_octave = ((r >> 1) & 3) != 0;
-    int n = 4;
-    if (include_octave) n = (((r >> 3) & 1) ? 5 : 6);
-    run->n_notes = n;
-    run->next_idx = 0;
-    run->next_t = 0.0f;
-    run->note_gap = ARP_NOTE_GAP;
-    run->velocity = 0.15f;
-    run->release_t = 0.80f;
-    for (int i = 0; i < 4; i++) {
-        int idx = descending ? (3 - i) : i;
-        run->freqs[i] = ch->freqs[idx];
-    }
-    if (n >= 5) run->freqs[4] = ch->freqs[descending ? 0 : 3] * 2.0f;
-    if (n >= 6) run->freqs[5] = ch->freqs[descending ? 1 : 2] * 2.0f;
-}
-
-/* SCALE RUN — sequential pentatonic sweep on the current chord's
- * pentatonic table. Picks a random start, direction, and length
- * (8-14 notes) and walks in one-step increments, wrapping into the
- * octave above when we run off the top. The pent argument is the
- * 10-entry table for the chord we're currently sitting on. */
-static void scale_build(RunState *run, const float *pent, uint32_t *rng) {
-    uint32_t r = xs(rng);
-    bool descending = (r & 1);
-    int len = 8 + (int)((r >> 1) & 7);   /* 8..15 */
-    if (len > RUN_MAX_NOTES) len = RUN_MAX_NOTES;
-    run->n_notes = len;
-    run->next_idx = 0;
-    run->next_t = 0.0f;
-    run->note_gap = RUN_NOTE_GAP;
-    run->velocity = 0.20f;
-    run->release_t = 0.55f;
-    int max_start = descending ? (PENT_COUNT - 1) : 4;
-    int start = (int)((r >> 4) % (uint32_t)(max_start + 1));
-    if (descending) start = (PENT_COUNT - 1) - start;
-    for (int i = 0; i < len; i++) {
-        int step = descending ? -i : i;
-        int idx = start + step;
-        float oct_mul = 1.0f;
-        while (idx >= PENT_COUNT) { idx -= PENT_COUNT; oct_mul *= 2.0f; }
-        while (idx < 0)           { idx += PENT_COUNT; oct_mul *= 0.5f; }
-        run->freqs[i] = pent[idx] * oct_mul;
-    }
+static void fire_cdl_event(const CDLNote *n) {
+    int voice = alloc_music_voice();
+    trigger_music_voice(voice,
+                        n->hz, (int)n->n_hz,
+                        n->vel,
+                        n->attack,
+                        n->sustain,
+                        n->release);
 }
 
 void craft_audio_music_tick(float dt) {
@@ -547,97 +443,20 @@ void craft_audio_music_tick(float dt) {
         s_music.cur_gain *= expf(-3.0f * dt);
         return;
     }
-    s_music.t += dt;
-    s_music.chord_t += dt;
+    s_music.t     += dt;
+    s_music.seq_t += dt;
 
-    /* Day/night switch — picks the timing constants for this tick. */
-    bool is_day = s_music.sun_y > 0.0f;
-    float chord_duration = is_day ? CHORD_DURATION_DAY : CHORD_DURATION_NIGHT;
-    float melody_min     = is_day ? MELODY_MIN_GAP_DAY  : MELODY_MIN_GAP_NIGHT;
-    float melody_max     = is_day ? MELODY_MAX_GAP_DAY  : MELODY_MAX_GAP_NIGHT;
-    float melody_rest    = is_day ? MELODY_REST_PCT_DAY : MELODY_REST_PCT_NIGHT;
-
-    if (s_music.chord_t >= chord_duration) {
-        s_music.chord_t = 0;
-        s_music.chord_idx = (s_music.chord_idx + 1) % CHORD_COUNT;
-    }
-    if (s_music.last_chord_played != s_music.chord_idx) {
-        s_music.last_chord_played = s_music.chord_idx;
-        /* Pad: full 4-note chord through a single envelope. Slow
-         * attack (~3 s) so the chord blooms rather than punches.
-         * Per-note velocity is low because four oscillators sum;
-         * the 3× output boost brings it back up cleanly. */
-        trigger_music_voice(
-            MUSIC_PAD_VOICE,
-            chord_prog[s_music.chord_idx].freqs, 4,
-            /* per-note velocity */ 0.10f,
-            /* attack */ is_day ? 1.6f : 3.0f,
-            /* sustain hold */ chord_duration - 2.0f,
-            /* release */ is_day ? 3.0f : 4.5f);
+    /* Fire every event whose time has arrived. */
+    while (s_music.next_idx < CDL_SEQ_LEN &&
+           cdl_seq[s_music.next_idx].t <= s_music.seq_t) {
+        fire_cdl_event(&cdl_seq[s_music.next_idx]);
+        s_music.next_idx++;
     }
 
-    /* Drive any active run (scale or arpeggio) — fire next note when
-     * its time comes. */
-    if (s_music.run.n_notes > 0 && s_music.t >= s_music.run.next_t) {
-        int i = s_music.run.next_idx;
-        float freqs1[1] = { s_music.run.freqs[i] };
-        trigger_music_voice(
-            MUSIC_MELODY_VOICE,
-            freqs1, 1,
-            s_music.run.velocity,
-            /* attack */ 0.025f,
-            /* sustain hold */ 0.04f,
-            /* release */ s_music.run.release_t);
-        s_music.run.next_idx++;
-        s_music.run.next_t = s_music.t + s_music.run.note_gap;
-        if (s_music.run.next_idx >= s_music.run.n_notes) {
-            s_music.run.n_notes = 0;   /* sequence done */
-            /* Defer next melody event so the sweep's tail rings out. */
-            float span = melody_max - melody_min;
-            s_music.next_note_t = s_music.t + melody_min + frand01(&s_music.rng) * span;
-        }
-    }
-    else if (s_music.t >= s_music.next_note_t && s_music.run.n_notes == 0) {
-        uint32_t r = xs(&s_music.rng);
-        bool rest = (r & 0xFFFF) < (uint32_t)(melody_rest * 0x10000);
-        if (!rest) {
-            /* Pick event kind:
-             *   day:   SCALE (60%) → ARP (25%) → SINGLE (15%)
-             *   night: SCALE (15%) → SINGLE (85%)  -- no arps
-             * Scale runs are the dominant Claire-de-Lune feature so
-             * we want them often during the day and as occasional
-             * night sparkle. */
-            float pick = ((r >> 16) & 0xFFFF) / 65535.0f;
-            float p_scale = is_day ? DAY_PCT_SCALE : NIGHT_PCT_SCALE;
-            float p_arp   = is_day ? DAY_PCT_ARPEGGIO : 0.0f;
-            const float *pent = pent_per_chord[s_music.chord_idx];
-            if (pick < p_scale) {
-                scale_build(&s_music.run, pent, &s_music.rng);
-            } else if (pick < p_scale + p_arp) {
-                arp_build(&s_music.run, &chord_prog[s_music.chord_idx],
-                          &s_music.rng);
-            } else {
-                int note = pick_next_melody_note(s_music.last_note, &s_music.rng);
-                s_music.last_note = note;
-                float hz = pent[note];
-                /* Sustained single note — long release so it bleeds
-                 * into the next note like sustain-pedal piano. */
-                float freqs1[1] = { hz };
-                trigger_music_voice(
-                    MUSIC_MELODY_VOICE,
-                    freqs1, 1,
-                    /* velocity */ 0.16f,
-                    /* attack */ 0.08f,
-                    /* sustain hold */ is_day ? 0.18f : 0.30f,
-                    /* release */ is_day ? 1.2f : 2.2f);
-            }
-        }
-        if (s_music.run.n_notes == 0) {
-            /* Only schedule next event when a run wasn't queued —
-             * the run-end path handles its own scheduling above. */
-            float span = melody_max - melody_min;
-            s_music.next_note_t = s_music.t + melody_min + frand01(&s_music.rng) * span;
-        }
+    /* Loop the sequence — wrap back to the start once the period ends. */
+    if (s_music.seq_t >= CDL_SEQ_PERIOD) {
+        s_music.seq_t -= CDL_SEQ_PERIOD;
+        s_music.next_idx = 0;
     }
 
     float target = s_music.target_gain;
@@ -713,12 +532,14 @@ static inline float voice_sample(Voice *v) {
 int craft_audio_render(int16_t *out, int n) {
     float mg = s_music.cur_gain;
     for (int i = 0; i < n; i++) {
-        /* Music dry mix (PAD + MELODY) — fed through reverb. */
+        /* Music dry mix — sum across the 6-voice pool. Idle voices
+         * are still cycled through voice_sample so their release
+         * tails keep advancing; voice_sample itself early-outs on
+         * v->on == false. */
         float music_dry = 0.0f;
-        if (voices[MUSIC_PAD_VOICE].on)
-            music_dry += voice_sample(&voices[MUSIC_PAD_VOICE]);
-        if (voices[MUSIC_MELODY_VOICE].on)
-            music_dry += voice_sample(&voices[MUSIC_MELODY_VOICE]);
+        for (int j = MUSIC_VOICE_FIRST; j <= MUSIC_VOICE_LAST; j++) {
+            if (voices[j].on) music_dry += voice_sample(&voices[j]);
+        }
         music_dry *= mg;
 
         /* Reverb tap. */
@@ -741,15 +562,7 @@ int craft_audio_render(int16_t *out, int n) {
         ambient_lp += (noise - ambient_lp) * 0.03f;
 
         float mix = music_dry + wet * REVERB_WET + sfx_mix + ambient_lp * ambient_gain;
-        /* Loudness boost + soft-clipper. The previous hard ±1 clamp
-         * crackled because the chord+melody+reverb stack often pushes
-         * past the |mix|>0.33 threshold after the 3× boost, slicing
-         * every transient flat. x / sqrt(1 + x²) is the standard
-         * tanh-shaped soft-clip — linear at small signal, saturates
-         * smoothly toward ±1 at peaks. One sqrt per sample (~1 % CPU
-         * at 22 050 Hz) buys clean output across the whole dynamic
-         * range. */
-        mix *= 3.0f;
+        mix *= 2.4f;
         mix = mix / sqrtf(1.0f + mix * mix);
         /* Output scale: 32000 ≈ 98% of int16 max. */
         out[i] = (int16_t)(mix * 32000.0f);
