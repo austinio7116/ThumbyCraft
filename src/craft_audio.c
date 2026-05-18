@@ -110,8 +110,8 @@ static int     s_delay_pos;
  * each note's release contributes a long decaying smear that fills
  * the gaps between notes and gives the perceived sustain Debussy's
  * piano writing relies on. Feedback at 0.55 yields a ~3-4 s tail. */
-#define REVERB_WET    0.45f
-#define REVERB_FEED   0.55f
+#define REVERB_WET    0.38f
+#define REVERB_FEED   0.45f
 
 static float freq_to_inc(float hz) {
     return hz / (float)CRAFT_AUDIO_RATE;
@@ -190,7 +190,7 @@ void craft_audio_init(void) {
     sfx_rr = SFX_VOICE_FIRST;
     memset(&s_music, 0, sizeof s_music);
     s_music.rng         = 0xA110F00Du;
-    s_music.target_gain = 0.70f;
+    s_music.target_gain = 1.00f;
     s_music.cur_gain    = 0.0f;
     s_music.t           = 0.0f;
     s_music.seq_t       = 0.0f;
@@ -562,6 +562,14 @@ int craft_audio_render(int16_t *out, int n) {
         ambient_lp += (noise - ambient_lp) * 0.03f;
 
         float mix = music_dry + wet * REVERB_WET + sfx_mix + ambient_lp * ambient_gain;
+        /* Low-shelf bass boost — extracts the low band with a one-pole
+         * LP (~350 Hz corner) and adds it back at +6 dB. Compensates
+         * for the PWM speaker's natural roll-off below ~300 Hz so the
+         * bass register becomes audible without transposing notes
+         * away from their intended pitch. */
+        static float s_bass_lp;
+        s_bass_lp += (mix - s_bass_lp) * 0.10f;   /* alpha ≈ 350 Hz @ 22050 */
+        mix += s_bass_lp * 1.0f;
         mix *= 2.4f;
         mix = mix / sqrtf(1.0f + mix * mix);
         /* Output scale: 32000 ≈ 98% of int16 max. */
