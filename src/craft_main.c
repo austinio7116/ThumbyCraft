@@ -24,6 +24,7 @@
 #include "craft_drops.h"
 #include "craft_furnace.h"
 #include "craft_chests.h"
+#include "craft_water.h"
 
 #include <string.h>
 
@@ -89,6 +90,7 @@ void craft_main_init(uint16_t *fb, uint32_t seed) {
     craft_drops_init();
     craft_furnace_init();
     craft_chests_init();
+    craft_water_init();
     /* Starter chest 2 blocks east of spawn — pre-stocked with a bow
      * and arrows so the player can verify the ranged loop without
      * having to melee a skeleton first. */
@@ -288,6 +290,7 @@ void craft_main_step(const CraftInput *in, float dt, int fps) {
     craft_arrows_tick(dt, &s_player);
     craft_drops_tick(dt, &s_player);
     craft_furnace_tick(dt);
+    craft_water_tick(dt);
     craft_mobs_day_night_tick(dt, craft_render_sun_y(), &s_player);
     craft_audio_music_set_sun(craft_render_sun_y());
     craft_audio_music_tick(dt);
@@ -373,6 +376,7 @@ void craft_main_tick(const CraftInput *in, float dt) {
     craft_arrows_tick(dt, &s_player);
     craft_drops_tick(dt, &s_player);
     craft_furnace_tick(dt);
+    craft_water_tick(dt);
     craft_mobs_day_night_tick(dt, craft_render_sun_y(), &s_player);
     craft_audio_music_set_sun(craft_render_sun_y());
     craft_audio_music_tick(dt);

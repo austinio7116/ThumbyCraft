@@ -231,8 +231,9 @@ INLINE_HOT TraceHit trace_ray(Vec3 origin, Vec3 dir, bool stop_at_water) {
             (unsigned)(vz - craft_world_origin_z) >= CRAFT_WORLD_Z) break;
 
         /* Direct buffer read — bounds already checked above, idx is
-         * maintained incrementally so this is one load. */
-        BlockId blk = (BlockId)craft_world_blocks[idx];
+         * maintained incrementally so this is one load. Mask off the
+         * top 3 bits, which carry the water-flow level field. */
+        BlockId blk = (BlockId)(craft_world_blocks[idx] & 0x1F);
         if (blk == BLK_AIR) continue;
         /* Torches are smaller-than-cube objects rendered in a
          * separate 3D post-pass. The raycaster sees the cell as

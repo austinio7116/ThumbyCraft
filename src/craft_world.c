@@ -349,7 +349,7 @@ static void light_flood_from(int sx, int sy, int sz) {
             if ((unsigned)ny >= CRAFT_WORLD_Y) continue;
             if ((unsigned)nz >= CRAFT_WORLD_Z) continue;
             int n_idx = local_idx(nx, ny, nz);
-            BlockId b = (BlockId)craft_world_blocks[n_idx];
+            BlockId b = (BlockId)(craft_world_blocks[n_idx] & 0x1F);
             if (!light_transparent(b)) continue;
             if (light_get(n_idx) >= next_level) continue;  /* already as bright or brighter */
             light_set_max(n_idx, (uint8_t)next_level);
@@ -375,7 +375,7 @@ static inline bool blocks_sky(BlockId b) {
 static void compute_skyheight_column(int lx, int lz) {
     int sh = 0;
     for (int wy = CRAFT_WORLD_Y - 1; wy >= 0; wy--) {
-        BlockId b = (BlockId)craft_world_blocks[local_idx(lx, wy, lz)];
+        BlockId b = (BlockId)(craft_world_blocks[local_idx(lx, wy, lz)] & 0x1F);
         if (blocks_sky(b)) { sh = wy; break; }
     }
     craft_world_skyheight[lz * CRAFT_WORLD_X + lx] = (uint8_t)sh;
@@ -394,7 +394,7 @@ void craft_world_rebuild_lightmap(void) {
     for (int lz = 0; lz < CRAFT_WORLD_Z; lz++) {
         for (int lx = 0; lx < CRAFT_WORLD_X; lx++) {
             for (int wy = 0; wy < CRAFT_WORLD_Y; wy++) {
-                if (craft_world_blocks[local_idx(lx, wy, lz)] == BLK_TORCH) {
+                if ((craft_world_blocks[local_idx(lx, wy, lz)] & 0x1F) == BLK_TORCH) {
                     light_flood_from(lx, wy, lz);
                 }
             }
@@ -408,9 +408,31 @@ BlockId craft_world_get(int wx, int wy, int wz) {
     int lz = wz - craft_world_origin_z;
     if ((unsigned)lx >= CRAFT_WORLD_X) return BLK_AIR;
     if ((unsigned)lz >= CRAFT_WORLD_Z) return BLK_AIR;
-    /* Full byte is block id now — BLK_COUNT exceeds 16 once items
-     * land in the enum, so the old 4-bit mask had to go. */
-    return (BlockId)craft_world_blocks[local_idx(lx, wy, lz)];
+    /* Low 5 bits = block id (BLK_COUNT fits in 5 bits). Top 3 bits
+     * are repurposed as the water-level field used by the water
+     * flow simulation. The mask hides those bits from every
+     * consumer of the public block-id API. */
+    return (BlockId)(craft_world_blocks[local_idx(lx, wy, lz)] & 0x1F);
+}
+
+uint8_t craft_world_get_byte(int wx, int wy, int wz) {
+    if ((unsigned)wy >= CRAFT_WORLD_Y) return 0;
+    int lx = wx - craft_world_origin_x;
+    int lz = wz - craft_world_origin_z;
+    if ((unsigned)lx >= CRAFT_WORLD_X) return 0;
+    if ((unsigned)lz >= CRAFT_WORLD_Z) return 0;
+    return craft_world_blocks[local_idx(lx, wy, lz)];
+}
+
+void craft_world_set_byte(int wx, int wy, int wz, uint8_t b) {
+    if ((unsigned)wy >= CRAFT_WORLD_Y) return;
+    int lx = wx - craft_world_origin_x;
+    int lz = wz - craft_world_origin_z;
+    if ((unsigned)lx >= CRAFT_WORLD_X) return;
+    if ((unsigned)lz >= CRAFT_WORLD_Z) return;
+    craft_world_blocks[local_idx(lx, wy, lz)] = b;
+    /* No mod_set side effect — water flow changes are transient and
+     * deliberately skip the player-edit chunk-store path. */
 }
 
 void craft_world_set(int wx, int wy, int wz, BlockId blk) {

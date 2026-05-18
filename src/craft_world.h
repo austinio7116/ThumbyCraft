@@ -115,6 +115,15 @@ void craft_world_persist_tick(void);
 BlockId craft_world_get(int wx, int wy, int wz);
 void    craft_world_set(int wx, int wy, int wz, BlockId blk);
 
+/* Raw byte access — only used by the water flow sim, which packs a
+ * 3-bit water level into the top of the block byte. Other callers
+ * should use craft_world_get / craft_world_set, which mask the
+ * level out. craft_world_set_byte deliberately bypasses mod_set
+ * because water changes are transient and shouldn't pollute the
+ * chunk-store dirty queue. */
+uint8_t craft_world_get_byte(int wx, int wy, int wz);
+void    craft_world_set_byte(int wx, int wy, int wz, uint8_t b);
+
 /* Mod-aware block lookup — used by the window shift path. Returns
  * the override block if (wx, wy, wz) is in the mod table, otherwise
  * the procedural value from craft_gen_block_at(seed). */

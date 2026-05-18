@@ -63,6 +63,7 @@ add_executable(thumbycraft_host
     ${SRC}/craft_tool_models.c
     ${SRC}/craft_furnace.c
     ${SRC}/craft_chests.c
+    ${SRC}/craft_water.c
     ${SRC}/craft_main.c
     ${CRAFT_BAKED_C}
 )

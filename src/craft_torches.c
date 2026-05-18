@@ -92,7 +92,7 @@ void craft_torches_rebuild(void) {
         for (int lx = 0; lx < CRAFT_WORLD_X; lx++) {
             for (int wy = 0; wy < CRAFT_WORLD_Y; wy++) {
                 int idx = (wy * CRAFT_WORLD_Z + lz) * CRAFT_WORLD_X + lx;
-                if (craft_world_blocks[idx] != BLK_TORCH) continue;
+                if ((craft_world_blocks[idx] & 0x1F) != BLK_TORCH) continue;
                 if (s_torch_count >= CRAFT_MAX_TORCHES) goto done;
                 CraftTorch *t = &craft_torches[s_torch_count++];
                 t->alive  = true;
