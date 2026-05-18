@@ -341,77 +341,123 @@ void craft_render_begin(const CraftCamera *cam) {
 }
 
 CRAFT_HOT
-/* --- Procedural cloud overlay -----------------------------------
+/* --- Procedural cloud volume ------------------------------------
  *
- * Sky-plane clouds at a fixed altitude. For each sky pixel whose ray
- * points up and originates below the cloud layer, find the world
- * (x, z) where the ray crosses CLOUD_Y, sample two octaves of cheap
- * bilinear noise + threshold for cloudy-vs-clear, blend white into
- * the sky colour. Distance fade prevents a hard horizon line.
+ * Vanilla Minecraft clouds are flat-bottomed 3D prisms ~4 blocks
+ * thick and ~12×12 blocks wide, built from individual square
+ * pieces. We mimic that with a 4-block slab between Y=CLOUD_Y_BOT
+ * and Y=CLOUD_Y_TOP, populated by a hash bitmap on an 8-block
+ * grid (~40% coverage).
  *
- * Cost is ~25-30 cycles per sky pixel that passes the upward + day
- * filter — roughly 1-2% of one core at typical outdoor view.
+ * Per upward ray: compute the two plane intersections t_bot/t_top,
+ * then sample the hash at 3 evenly-spaced points between them.
+ * If any sample hits a cloud cell, paint the pixel — the same
+ * sampling renders the side walls of the boxes from below, which
+ * is what gives clouds their characteristic Minecraft silhouette.
+ *
+ * Cost is ~40-50 cycles per sky pixel that survives the gating
+ * (upward + below-cloud + not-deep-night).
  */
-#define CLOUD_Y           58.0f
-#define CLOUD_SCALE_BASE  0.035f
-#define CLOUD_SCALE_DET   0.090f
-#define CLOUD_THRESHOLD   0.55f
+#define CLOUD_Y_BOT       110.0f
+#define CLOUD_Y_TOP       114.0f
+#define CLOUD_FINE         16.0f       /* fine cell — visible square edge */
+#define CLOUD_COARSE       64.0f       /* coarse region — clump scale */
+#define CLOUD_INV_FINE     (1.0f / CLOUD_FINE)
+#define CLOUD_INV_COARSE   (1.0f / CLOUD_COARSE)
 
 INLINE_HOT uint32_t cloud_hash(int x, int z) {
     uint32_t h = (uint32_t)x * 374761393u ^ (uint32_t)z * 668265263u;
     h = (h ^ (h >> 13)) * 1274126177u;
     return h ^ (h >> 16);
 }
-INLINE_HOT float cloud_noise(float x, float z) {
-    int ix = (int)floorf(x), iz = (int)floorf(z);
-    float fx = x - ix, fz = z - iz;
-    fx = fx * fx * (3.0f - 2.0f * fx);
-    fz = fz * fz * (3.0f - 2.0f * fz);
-    float v00 = (cloud_hash(ix,     iz)     & 0xFFFF) * (1.0f / 65535.0f);
-    float v10 = (cloud_hash(ix + 1, iz)     & 0xFFFF) * (1.0f / 65535.0f);
-    float v01 = (cloud_hash(ix,     iz + 1) & 0xFFFF) * (1.0f / 65535.0f);
-    float v11 = (cloud_hash(ix + 1, iz + 1) & 0xFFFF) * (1.0f / 65535.0f);
-    float a = v00 * (1.0f - fx) + v10 * fx;
-    float b = v01 * (1.0f - fx) + v11 * fx;
-    return a * (1.0f - fz) + b * fz;
+
+/* Sample the cloud volume at world position (wx, wz).
+ *
+ * Two-scale clumping so clouds form connected patches instead of
+ * white-noise speckle:
+ *   1. Coarse 64-block region passes ~55 % of the time → roughly
+ *      half the sky is "cloudy zones", the rest is open sky.
+ *   2. Within a cloudy zone, the 16-block fine cell passes ~70 % →
+ *      bulky connected blobs with the occasional internal gap that
+ *      reads as classic Minecraft cloud silhouette.
+ * Net coverage ≈ 38 %, organised into 64-block patches. */
+INLINE_HOT bool cloud_at(float wx, float wz) {
+    int gcx = (int)floorf(wx * CLOUD_INV_COARSE);
+    int gcz = (int)floorf(wz * CLOUD_INV_COARSE);
+    uint32_t gh = cloud_hash(gcx + 0x9E37, gcz - 0x517C);
+    if ((gh & 0xFF) < 0x73) return false;   /* ~55 % regions are cloudy */
+
+    int cx = (int)floorf(wx * CLOUD_INV_FINE);
+    int cz = (int)floorf(wz * CLOUD_INV_FINE);
+    uint32_t h = cloud_hash(cx, cz);
+    return (h & 0xFF) < 0xB3;               /* ~70 % fine cells solid */
 }
 
+#define CLOUD_MAX_T       200.0f      /* fog horizon for cloud rays */
+
 INLINE_HOT uint16_t cloud_overlay(uint16_t sky_c, Vec3 origin, Vec3 dir) {
-    /* Skip cheap-and-early when the ray can't possibly hit the
-     * cloud plane. */
-    if (dir.y <= 0.01f) return sky_c;
-    if (origin.y >= CLOUD_Y - 0.5f) return sky_c;
-    if (s_sun_y < -0.30f) return sky_c;       /* invisible at deep night */
+    /* Cheap rejects first. Stronger up-tilt cutoff (0.08) drops the
+     * pixel count by skipping rays close to horizontal — they hit
+     * the slab so far away it's invisible anyway. */
+    if (dir.y <= 0.08f) return sky_c;
+    if (origin.y >= CLOUD_Y_BOT - 0.5f) return sky_c;
+    if (s_sun_y < -0.30f) return sky_c;
 
-    float t = (CLOUD_Y - origin.y) / dir.y;
-    if (t > 220.0f) return sky_c;             /* over the fog horizon */
+    float inv_dy = 1.0f / dir.y;
+    float t_bot = (CLOUD_Y_BOT - origin.y) * inv_dy;
+    if (t_bot > CLOUD_MAX_T) return sky_c;
 
-    float wx = origin.x + dir.x * t + s_cloud_drift;
-    float wz = origin.z + dir.z * t;
+    /* Sample the bottom face first — that's what a player below the
+     * cloud layer actually sees. Cloudy pixels stop right here (one
+     * hash pair) and never pay for the side-wall lookup. */
+    float wx0 = origin.x + dir.x * t_bot + s_cloud_drift;
+    float wz0 = origin.z + dir.z * t_bot;
+    bool hit_bottom = cloud_at(wx0, wz0);
+    float t_hit;
+    bool side_face;
 
-    float n1 = cloud_noise(wx * CLOUD_SCALE_BASE, wz * CLOUD_SCALE_BASE);
-    float n2 = cloud_noise(wx * CLOUD_SCALE_DET,  wz * CLOUD_SCALE_DET);
-    float density = n1 * 0.7f + n2 * 0.3f;
-    if (density < CLOUD_THRESHOLD) return sky_c;
+    if (hit_bottom) {
+        t_hit = t_bot;
+        side_face = false;
+    } else {
+        /* Mid-slab sample picks up side walls — rays that miss the
+         * bottom of a cell but clip its vertical face on the way
+         * up. Single sample is enough for a 4-block slab. */
+        float t_top = (CLOUD_Y_TOP - origin.y) * inv_dy;
+        float t_mid = (t_bot + t_top) * 0.5f;
+        float wx1 = origin.x + dir.x * t_mid + s_cloud_drift;
+        float wz1 = origin.z + dir.z * t_mid;
+        if (!cloud_at(wx1, wz1)) return sky_c;
+        t_hit = t_mid;
+        side_face = true;
+    }
 
-    float strength = (density - CLOUD_THRESHOLD) / (1.0f - CLOUD_THRESHOLD);
-    if (strength > 1.0f) strength = 1.0f;
-    /* Distance fade so the horizon-line of clouds is soft. */
-    float dist_fade = 1.0f - (t / 220.0f);
-    if (dist_fade < 0.0f) dist_fade = 0.0f;
-    strength *= dist_fade;
-    /* Twilight tint — clouds turn orange at sunrise/sunset. */
-    int cr = 230, cg = 230, cb = 245;
+    /* Distance fade — clouds soften toward the horizon so the slab
+     * doesn't show a hard ring. */
+    float dist_fade = 1.0f - (t_hit * (1.0f / CLOUD_MAX_T));
+    if (dist_fade < 0.10f) return sky_c;
+    if (dist_fade > 1.0f) dist_fade = 1.0f;
+
+    /* Cloud colour: light grey by default, warm-orange at twilight. */
+    int cr = 230, cg = 230, cb = 240;
     if (s_sun_y < 0.3f && s_sun_y > -0.3f) {
         float glow = 1.0f - fabsf(s_sun_y) / 0.3f;
         cr = (int)(cr + (255 - cr) * glow);
-        cg = (int)(cg + (140 - cg) * glow);
-        cb = (int)(cb + ( 70 - cb) * glow);
+        cg = (int)(cg + (150 - cg) * glow);
+        cb = (int)(cb + ( 90 - cb) * glow);
     }
+    /* Side walls render slightly darker than the bottom face so the
+     * 3D shape reads from below. */
+    if (side_face) {
+        cr = (cr * 6) >> 3;
+        cg = (cg * 6) >> 3;
+        cb = (cb * 6) >> 3;
+    }
+
     int sr = (sky_c >> 11) & 0x1F;
     int sg = (sky_c >>  5) & 0x3F;
     int sb =  sky_c        & 0x1F;
-    int alpha = (int)(strength * 256.0f);
+    int alpha = (int)(dist_fade * 220.0f);
     int r = sr + (((cr >> 3) - sr) * alpha) / 256;
     int g = sg + (((cg >> 2) - sg) * alpha) / 256;
     int b = sb + (((cb >> 3) - sb) * alpha) / 256;
@@ -891,14 +937,14 @@ bool craft_render_project(const CraftCamera *cam, Vec3 world_pos,
  * per frame, single-digit % of one core.
  */
 
-#define HELD_VP_W      50
-#define HELD_VP_H      40
-#define HELD_VP_X0     (CRAFT_FB_W - HELD_VP_W)   /* 78 */
-#define HELD_VP_Y0     (CRAFT_FB_H - HELD_VP_H)   /* 88 */
+#define HELD_VP_W      70
+#define HELD_VP_H      56
+#define HELD_VP_X0     (CRAFT_FB_W - HELD_VP_W)   /* 58 */
+#define HELD_VP_Y0     (CRAFT_FB_H - HELD_VP_H)   /* 72 */
 /* Camera sits this far in -Z from the model origin; the near-camera
  * FOV is wide enough that the model's ~0.5 m envelope fills the
  * viewport without clipping at idle. */
-#define HELD_CAM_BACK  0.55f
+#define HELD_CAM_BACK  0.48f
 
 /* Local ray-vs-AABB slab intersect — independent copy from
  * craft_mobs.c (which keeps its own static for the mob renderer) so
@@ -988,15 +1034,19 @@ void craft_render_held_item(BlockId held, uint16_t *fb, float swing_t) {
      * cube; tools/weapons/bow/arrow render from the tool model
      * table. Non-handheld items (sticks, ingots) currently have no
      * model — skip them. */
-    bool is_block = craft_block_placeable(held);
-    CraftToolModel tm;
+    /* Tool model wins if one exists — even for placeables like BLK_TORCH
+     * that would otherwise render as a flat-coloured cube. The block
+     * cube path is the fallback for ordinary placeable blocks (dirt,
+     * stone, planks etc.) that have no dedicated model. */
+    CraftToolModel tm = craft_tool_model(held);
+    bool is_block = (tm.n_parts == 0) && craft_block_placeable(held);
     int n_parts = 0;
-    if (is_block) {
+    if (tm.n_parts > 0) {
+        n_parts = tm.n_parts;
+    } else if (is_block) {
         n_parts = 1;     /* one virtual cuboid, face colour resolved per pixel */
     } else {
-        tm = craft_tool_model(held);
-        n_parts = tm.n_parts;
-        if (n_parts == 0) return;
+        return;          /* non-handheld item (stick, ingot) — nothing to draw */
     }
 
     /* Block "cube" pseudo-model — single 0.36 m cube centred at the
@@ -1015,13 +1065,20 @@ void craft_render_held_item(BlockId held, uint16_t *fb, float swing_t) {
      * the camera. We apply the inverse rotation to the ray so each
      * cuboid part stays axis-aligned for the slab test (the part
      * positions/sizes never change). */
-    const float IDLE_YAW   =  0.4500f;  /* ~26 deg — show right face */
-    const float IDLE_PITCH = -0.3500f;  /* ~-20 deg — show top face  */
-    float yaw_rad   = IDLE_YAW;
-    /* Swing tips the top further toward the viewer (more negative
-     * pitch in our convention — see the rotation matrix below). */
-    float pitch_rad = IDLE_PITCH - 0.5236f * swing_t;
-    float dip       = -0.10f * swing_t;
+    /* Idle pose — Minecraft-style hand: tool tip points up-left,
+     * handle visible bottom-right. Yaw shows the right face, mild
+     * positive pitch keeps the tip in screen-space view without
+     * tipping the top toward the camera (that was the "stabbing
+     * yourself" look). */
+    const float IDLE_YAW   =  0.4200f;  /* ~24 deg — show right face */
+    const float IDLE_PITCH =  0.1800f;  /* ~+10 deg — tip slightly up-out */
+    /* Swing arc: yaw sweeps inward across the screen and pitch
+     * pushes the tip DOWN+OUTWARD as if striking the world. Both
+     * INCREASE on swing — the old code drove pitch the wrong way,
+     * which made the tool tip whip back toward the player's face. */
+    float yaw_rad   = IDLE_YAW   - 0.6000f * swing_t;
+    float pitch_rad = IDLE_PITCH + 0.7000f * swing_t;
+    float dip       =  0.05f * swing_t;
     float cos_p = cosf(pitch_rad), sin_p = sinf(pitch_rad);
     float cos_y = cosf(yaw_rad),   sin_y = sinf(yaw_rad);
 

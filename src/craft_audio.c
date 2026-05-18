@@ -24,6 +24,7 @@
  * exponential gain decay. Ducks the music to 30 % for 350 ms.
  */
 #include "craft_audio.h"
+#include <math.h>
 #include <string.h>
 
 #define CRAFT_AUDIO_VOICES 4
@@ -115,38 +116,79 @@ typedef struct {
     float freqs[4];
 } Chord;
 
-/* Six-chord modal progression centred on F major / D minor.
- * Voicings move with shared tones between adjacent chords so each
- * change feels like a single voice gliding rather than a hard jump:
+/* Eight-chord progression covering the A / B / A' sections of Debussy's
+ * "Clair de Lune" (3rd of Suite Bergamasque). Authentic Db major
+ * voicings with parsimonious voice-leading — adjacent chords share at
+ * least two common tones so the pad transitions glide smoothly rather
+ * than jumping.
  *
- *   Fmaj9   F4  A4  C5  E5   (root colour — bright open)
- *   Am9     A3  E4  G4  B4   (shares E with prev; adds 9th gloss)
- *   Dm9     D4  F4  A4  E5   (shares F A; classic Debussy descent)
- *   Bbmaj7  Bb3 D4  F4  A4   (shares D F A; warm lift)
- *   Csus4   C4  F4  G4  C5   (open suspension; pivots key)
- *   Fmaj7add6 F4 A4 D5 E5    (return — adds 6th for resolution glow)
+ *   0  Dbmaj9     Ab3 F4  Ab4 C5     I9 (opening colour)
+ *   1  Fm7        C4  F4  Ab4 C5     iii7 parallel shadow
+ *   2  Bbm7       Bb3 F4  Ab4 Db5    vi7 wistful turn
+ *   3  Ebm9       Eb4 Gb4 Bb4 F5     ii9 floaty
+ *   4  Ab7sus4    Ab3 Db4 Ab4 Eb5    V-sus, suspended 3rd
+ *   5  Ab7        Ab3 Eb4 Gb4 C5     V7
+ *   6  Gbmaj7     Bb3 Gb4 Bb4 F5     IV7 plagal lift
+ *   7  Dbmaj7/F   F4  Ab4 C5  F5     I6 return
  *
- * Bass notes (lowest oscillator) sit at 196–349 Hz — well above the
- * drone-buzz zone. */
+ * Bass tones (lowest osc) sit at 184-349 Hz — above the drone-buzz
+ * zone but rich enough to anchor the 9ths above. */
 static const Chord chord_prog[] = {
-    { { 349.23f, 440.00f, 523.25f, 659.26f } }, /* Fmaj9    F4 A4 C5 E5 */
-    { { 220.00f, 329.63f, 392.00f, 493.88f } }, /* Am9      A3 E4 G4 B4 */
-    { { 293.66f, 349.23f, 440.00f, 659.26f } }, /* Dm9      D4 F4 A4 E5 */
-    { { 233.08f, 293.66f, 349.23f, 440.00f } }, /* Bbmaj7   Bb3 D4 F4 A4 */
-    { { 261.63f, 349.23f, 392.00f, 523.25f } }, /* Csus4    C4 F4 G4 C5 */
-    { { 349.23f, 440.00f, 587.33f, 659.26f } }, /* Fmaj7add6 F4 A4 D5 E5 */
+    { { 207.65f, 349.23f, 415.30f, 523.25f } }, /* 0 Dbmaj9      Ab3 F4 Ab4 C5 */
+    { { 261.63f, 349.23f, 415.30f, 523.25f } }, /* 1 Fm7         C4  F4 Ab4 C5 */
+    { { 233.08f, 349.23f, 415.30f, 554.37f } }, /* 2 Bbm7        Bb3 F4 Ab4 Db5 */
+    { { 311.13f, 369.99f, 466.16f, 698.46f } }, /* 3 Ebm9        Eb4 Gb4 Bb4 F5 */
+    { { 207.65f, 277.18f, 415.30f, 622.25f } }, /* 4 Ab7sus4     Ab3 Db4 Ab4 Eb5 */
+    { { 207.65f, 311.13f, 369.99f, 523.25f } }, /* 5 Ab7         Ab3 Eb4 Gb4 C5 */
+    { { 233.08f, 369.99f, 466.16f, 698.46f } }, /* 6 Gbmaj7      Bb3 Gb4 Bb4 F5 */
+    { { 349.23f, 415.30f, 523.25f, 698.46f } }, /* 7 Dbmaj7/F    F4  Ab4 C5 F5  */
 };
 #define CHORD_COUNT (int)(sizeof(chord_prog) / sizeof(chord_prog[0]))
 
-/* Melody scale — F major pentatonic spanning the upper octave so
- * notes float clearly above the pad. */
-static const float pent_freqs[10] = {
-    349.23f, 392.00f, 440.00f, 523.25f, 587.33f,
-    698.46f, 783.99f, 880.00f, 1046.50f, 1174.66f,
-    /* F4   G4      A4      C5      D5
-       F5   G5      A5      C6      D6 */
+/* Per-chord OPENING MOTIF — the iconic Clair de Lune right-hand line:
+ * descending stepwise figure with one rebound, ending on a held tone.
+ * Each motif spans roughly the top of the chord through to the 3rd or
+ * 5th, hugging the chord's diatonic neighbours. Frequencies are
+ * absolute Hz so transposition is implicit per chord row. */
+#define MOTIF_NOTES 7
+static const float motif_per_chord[CHORD_COUNT][MOTIF_NOTES] = {
+    /* 0  Dbmaj9 — the literal opening, brief's reference pattern. */
+    { 830.61f, 698.46f, 554.37f, 622.25f, 698.46f, 554.37f, 415.30f },
+    /* 1  Fm7 — sits a step up, mirrors the descent with C6 lead. */
+    { 1046.50f, 830.61f, 698.46f, 622.25f, 698.46f, 830.61f, 698.46f },
+    /* 2  Bbm7 — wistful descent through chord+9th tones. */
+    { 932.33f, 830.61f, 698.46f, 554.37f, 622.25f, 698.46f, 554.37f },
+    /* 3  Ebm9 — floating around the 5th + 9th, soft contour. */
+    { 698.46f, 622.25f, 554.37f, 466.16f, 622.25f, 554.37f, 466.16f },
+    /* 4  Ab7sus — suspended 4th hangs, descent through sus tones. */
+    { 554.37f, 466.16f, 415.30f, 622.25f, 554.37f, 415.30f, 554.37f },
+    /* 5  Ab7 — dominant tension; the 3rd appears for the resolution. */
+    { 622.25f, 554.37f, 466.16f, 415.30f, 466.16f, 554.37f, 523.25f },
+    /* 6  Gbmaj7 — bright plagal lift, hovers around Gb-Bb-F. */
+    { 932.33f, 739.99f, 698.46f, 622.25f, 698.46f, 739.99f, 698.46f },
+    /* 7  Dbmaj7/F — return cadence, lands on Ab5 for the closing glow. */
+    { 698.46f, 622.25f, 554.37f, 523.25f, 554.37f, 698.46f, 830.61f },
 };
-#define PENT_COUNT 10
+
+/* Dotted-eighth + sixteenth + eighth rhythmic cell, repeated twice
+ * with a quarter resolution at the end. In sixteenth units at the
+ * piece's ~60 BPM dotted-quarter: 3-1-2 3-1-2 4 = 16 sixteenths,
+ * i.e. one full 9/8 bar. */
+static const uint8_t motif_durs_16ths[MOTIF_NOTES] = { 3, 1, 2, 3, 1, 2, 4 };
+
+/* Per-chord APPOGIATURA — a 2-note grace + resolution where the
+ * upper neighbour resolves a step down onto a chord tone. The accent
+ * is on the dissonant first note; the second is the soft landing. */
+static const float appogg_per_chord[CHORD_COUNT][2] = {
+    { 739.99f, 698.46f },   /* 0  Gb5→F5  over Dbmaj9 */
+    { 932.33f, 830.61f },   /* 1  Bb5→Ab5 over Fm7 */
+    { 932.33f, 830.61f },   /* 2  Bb5→Ab5 over Bbm7 */
+    { 783.99f, 698.46f },   /* 3  G5→F5   over Ebm9 */
+    { 587.33f, 554.37f },   /* 4  D5→Db5  over Ab7sus */
+    { 587.33f, 554.37f },   /* 5  D5→Db5  over Ab7 (leading-tone tug) */
+    { 830.61f, 739.99f },   /* 6  Ab5→Gb5 over Gbmaj7 */
+    { 932.33f, 830.61f },   /* 7  Bb5→Ab5 over Dbmaj7/F */
+};
 
 /* Two pacing modes — switched on the world's sun position.
  *
@@ -471,12 +513,12 @@ static void arp_build(RunState *run, const Chord *ch, uint32_t *rng) {
     if (n >= 6) run->freqs[5] = ch->freqs[descending ? 1 : 2] * 2.0f;
 }
 
-/* SCALE RUN — sequential pentatonic sweep. Picks a random start,
- * direction, and length (8-14 notes) and walks the pent_freqs[]
- * table in one-step increments, wrapping into the octave above when
- * we run off the top. This is the Claire-de-Lune RH cascade — long
- * continuous lines, not chord-tone hops. */
-static void scale_build(RunState *run, uint32_t *rng) {
+/* SCALE RUN — sequential pentatonic sweep on the current chord's
+ * pentatonic table. Picks a random start, direction, and length
+ * (8-14 notes) and walks in one-step increments, wrapping into the
+ * octave above when we run off the top. The pent argument is the
+ * 10-entry table for the chord we're currently sitting on. */
+static void scale_build(RunState *run, const float *pent, uint32_t *rng) {
     uint32_t r = xs(rng);
     bool descending = (r & 1);
     int len = 8 + (int)((r >> 1) & 7);   /* 8..15 */
@@ -485,24 +527,18 @@ static void scale_build(RunState *run, uint32_t *rng) {
     run->next_idx = 0;
     run->next_t = 0.0f;
     run->note_gap = RUN_NOTE_GAP;
-    /* Slightly louder than chord arps so the sweep cuts through. */
     run->velocity = 0.20f;
     run->release_t = 0.55f;
-    /* Pick a start index so the run stays in-table once we add len
-     * steps; if it would overflow, the upper notes are doubled an
-     * octave higher from the low pent_freqs entries (continuous feel). */
     int max_start = descending ? (PENT_COUNT - 1) : 4;
     int start = (int)((r >> 4) % (uint32_t)(max_start + 1));
-    if (descending) start = (PENT_COUNT - 1) - start;  /* prefer high starts */
+    if (descending) start = (PENT_COUNT - 1) - start;
     for (int i = 0; i < len; i++) {
         int step = descending ? -i : i;
         int idx = start + step;
         float oct_mul = 1.0f;
-        /* Wrap into next octave instead of clamping — Debussy
-         * cascades that climb past their starting range. */
         while (idx >= PENT_COUNT) { idx -= PENT_COUNT; oct_mul *= 2.0f; }
         while (idx < 0)           { idx += PENT_COUNT; oct_mul *= 0.5f; }
-        run->freqs[i] = pent_freqs[idx] * oct_mul;
+        run->freqs[i] = pent[idx] * oct_mul;
     }
 }
 
@@ -574,15 +610,16 @@ void craft_audio_music_tick(float dt) {
             float pick = ((r >> 16) & 0xFFFF) / 65535.0f;
             float p_scale = is_day ? DAY_PCT_SCALE : NIGHT_PCT_SCALE;
             float p_arp   = is_day ? DAY_PCT_ARPEGGIO : 0.0f;
+            const float *pent = pent_per_chord[s_music.chord_idx];
             if (pick < p_scale) {
-                scale_build(&s_music.run, &s_music.rng);
+                scale_build(&s_music.run, pent, &s_music.rng);
             } else if (pick < p_scale + p_arp) {
                 arp_build(&s_music.run, &chord_prog[s_music.chord_idx],
                           &s_music.rng);
             } else {
                 int note = pick_next_melody_note(s_music.last_note, &s_music.rng);
                 s_music.last_note = note;
-                float hz = pent_freqs[note];
+                float hz = pent[note];
                 /* Sustained single note — long release so it bleeds
                  * into the next note like sustain-pedal piano. */
                 float freqs1[1] = { hz };
@@ -704,15 +741,16 @@ int craft_audio_render(int16_t *out, int n) {
         ambient_lp += (noise - ambient_lp) * 0.03f;
 
         float mix = music_dry + wet * REVERB_WET + sfx_mix + ambient_lp * ambient_gain;
-        /* Loudness boost — pre-clamp gain pushes quiet sections up
-         * to use the full output range. Peaks just hit the clamping
-         * wall (effectively a hard limiter), which is cleaner than
-         * running everything at low volume on the device speaker.
-         * 3.0× brings perceived volume up substantially while keeping
-         * distortion confined to brief transients. */
+        /* Loudness boost + soft-clipper. The previous hard ±1 clamp
+         * crackled because the chord+melody+reverb stack often pushes
+         * past the |mix|>0.33 threshold after the 3× boost, slicing
+         * every transient flat. x / sqrt(1 + x²) is the standard
+         * tanh-shaped soft-clip — linear at small signal, saturates
+         * smoothly toward ±1 at peaks. One sqrt per sample (~1 % CPU
+         * at 22 050 Hz) buys clean output across the whole dynamic
+         * range. */
         mix *= 3.0f;
-        if (mix >  1.0f) mix =  1.0f;
-        if (mix < -1.0f) mix = -1.0f;
+        mix = mix / sqrtf(1.0f + mix * mix);
         /* Output scale: 32000 ≈ 98% of int16 max. */
         out[i] = (int16_t)(mix * 32000.0f);
     }

@@ -94,6 +94,12 @@ int craft_world_mod_count(void);
 void craft_world_chunks_persist_window(void);
 void craft_world_chunks_restore_window(void);
 
+/* Drain at most one dirty chunk from the in-SRAM queue to flash.
+ * Cheap no-op when nothing is dirty. Call from the main loop on a
+ * timer so flash hitches spread across seconds instead of bundling
+ * into one stutter on window shift / Save. */
+void craft_world_persist_tick(void);
+
 /* Get/set use *absolute world coordinates*. Out-of-window get
  * returns BLK_AIR (the renderer treats that as sky-equivalent at
  * window edge); out-of-window set still records in the mod table

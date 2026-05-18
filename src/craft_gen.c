@@ -93,80 +93,132 @@ static float mountain_factor(int x, int z, uint32_t seed) {
     return (b - 0.55f) / 0.20f;
 }
 
-/* River factor in [0, 1]. Sharp ridge noise — narrow band around
- * where the underlying fbm crosses 0.5. The 25× multiplier makes
- * the activated band only a few world units wide so rivers come
- * out as small streams rather than valleys. */
-static float river_factor(int x, int z, uint32_t seed) {
-    float n  = fbm((float)x * 0.012f, (float)z * 0.012f, seed ^ 0x7E417A11u);
-    float dr = n - 0.5f;
-    float ridge = 1.0f - fabsf(dr) * 25.0f;
-    if (ridge < 0.0f) ridge = 0.0f;
-    return ridge;
+/* Flatland factor in [0, 1] — independent slow biome noise that
+ * marks regions where terrain compresses to a near-uniform low
+ * elevation. Rivers form preferentially here because the natural
+ * ground stays close to water level over long stretches, giving
+ * river noise something flat to carve through instead of canyons
+ * cut into rolling hills.
+ *
+ * Very low frequency (0.004) so flatland patches span hundreds of
+ * blocks — large enough to host a winding river along their length. */
+static float flatland_factor(int x, int z, uint32_t seed) {
+    float n = fbm((float)x * 0.004f, (float)z * 0.004f, seed ^ 0xF1A71A4Du);
+    if (n < 0.55f) return 0.0f;
+    if (n > 0.78f) return 1.0f;
+    return (n - 0.55f) / 0.23f;
 }
 
-/* Returns 0 = no river, 1-2 = depth below water level. The narrow
- * ridge above means total channel is roughly 3-5 cells wide with
- * the deepest 1-2 cells at the very centre. */
-static int river_carve_depth(int x, int z, uint32_t seed) {
-    float r = river_factor(x, z, seed);
-    if (r < 0.30f) return 0;
-    /* Mountains shrug off rivers. */
-    float m = mountain_factor(x, z, seed);
-    if (m > 0.3f) return 0;
-    float t = (r - 0.30f) / 0.70f;            /* 0..1 across active band */
-    int depth = (int)(t * 2.5f);              /* 0, 1, 2 */
-    if (depth > 2) depth = 2;
-    return depth;
+/* River strength in [0, 1] using Minecraft-style edge detection on
+ * a VERY low-frequency noise (0.003 → features span ~300 blocks so
+ * the river traces a long winding path instead of disconnected
+ * stubs). Where the noise sits within a narrow band on either side
+ * of 0.5, we get a river — strength tapers from 1 at the centre to
+ * 0 at the edges, giving deep mid-channel and shallow banks. */
+static float river_strength(int x, int z, uint32_t seed) {
+    float n = fbm((float)x * 0.003f, (float)z * 0.003f, seed ^ 0x7E417A11u);
+    float dist = fabsf(n - 0.5f);
+    const float band = 0.055f;            /* river half-width in noise units */
+    if (dist >= band) return 0.0f;
+    return 1.0f - dist / band;            /* 1 = centre, 0 = bank edge */
+}
+
+void craft_gen_invalidate_height_cache(void) {
+    /* No-op kept for the public API. An earlier 11 KB cache was
+     * pulled because it overflowed BSS; the cheaper tree_at /
+     * hut_origin_at hash-first reorder achieves most of the same
+     * shift-cost win without any storage. */
 }
 
 static int height_at(int x, int z, uint32_t seed) {
     float nx = (float)x * 0.06f;
     float nz = (float)z * 0.06f;
     float h  = fbm(nx, nz, seed);
-    int  height = (int)(h * 24.0f) + CRAFT_WATER_LEVEL - 4;
-    /* Mountain biome adds up to ~22 blocks of extra elevation. */
-    float m = mountain_factor(x, z, seed);
+
+    /* Flatland biome compresses the height variance and drops the
+     * base level — in fully flat regions terrain hugs water level
+     * with at most a couple of cells of variation. */
+    float f = flatland_factor(x, z, seed);
+    float h_scaled = h * (1.0f - f * 0.82f) + f * 0.18f;
+    int height = (int)(h_scaled * 24.0f) + CRAFT_WATER_LEVEL - 4;
+
+    /* Mountains add elevation but are inhibited by flatland (they
+     * shouldn't co-exist; biome decides which is which). */
+    float m = mountain_factor(x, z, seed) * (1.0f - f);
     height += (int)(m * 22.0f);
-    /* River carving — ONLY where the natural terrain is already a
-     * lowland (within 2 blocks of water level). Without this gate the
-     * winding ridge noise sliced canyons through any hill it crossed.
-     * Now rivers only form where the noise's path happens to coincide
-     * with naturally low ground — which is how real rivers behave. */
+
+    /* River carving — runs anywhere the river noise is in band, but
+     * the carve is gated so it can't cut canyons through hills. If
+     * the natural surface is far above water, the river attempt is
+     * silently suppressed; only lowlands (or flatland biomes that
+     * have flattened the terrain to lowland height) get rivers. */
     if (height <= CRAFT_WATER_LEVEL + 2) {
-        int rd = river_carve_depth(x, z, seed);
-        if (rd > 0) {
-            int river_h = CRAFT_WATER_LEVEL - rd;
+        float rs = river_strength(x, z, seed);
+        if (rs > 0.0f && m < 0.2f) {
+            /* Bed depth tapers with river strength: 3 cells at the
+             * centre line, 1 cell at the bank. */
+            int depth = 1 + (int)(rs * 2.5f);
+            if (depth > 3) depth = 3;
+            int river_h = CRAFT_WATER_LEVEL - depth;
+            /* Never drop more than 4 below the natural surface — the
+             * cap prevents the river noise from gouging a deep
+             * trench when it crosses a mildly raised cell. */
+            int min_h = height - 4;
+            if (river_h < min_h) river_h = min_h;
             if (river_h < height) height = river_h;
         }
     }
+
     if (height < 1) height = 1;
     if (height >= CRAFT_WORLD_Y - 4) height = CRAFT_WORLD_Y - 4;
     return height;
 }
 
-/* Is (x, y, z) inside a cave?  Two-octave 3D value noise with
- * stretched Y so caves form mostly-horizontal chambers rather than
- * vertical shafts. Returns true above the threshold (which gives
- * ~6% cave density). Only valid for cells strictly below the
- * surface; callers should not carve grass, dirt, or water. */
+/* Is (x, y, z) inside a cave? Two cave types mixed together so the
+ * underground reads as a system rather than a single mould:
+ *
+ *   1) Cheese chambers — threshold on summed 3D noise. Rounded
+ *      pockets, the existing style. Threshold relaxed from 0.66 to
+ *      0.62 so they're discoverable without spending too long
+ *      digging.
+ *
+ *   2) Spaghetti tunnels — long thin worms formed by the
+ *      intersection of two independent 3D noises both near 0.5.
+ *      The intersection of two scalar fields traces a 1D curve, so
+ *      pixels in band on both → continuous tube.
+ *
+ * Only valid for cells below the surface; callers gate on y < h - 3
+ * before invoking. Mountains naturally get more cave volume because
+ * their h is taller, expanding the underground envelope. */
 static bool is_cave(int x, int y, int z, uint32_t seed) {
-    /* Two octaves of 3D noise summed, biased toward thin connected
-     * tunnels. Y-scale tighter than X/Z so caves spread sideways. */
+    /* Cheese chambers — rounded pocket density. */
     float n1 = val_noise3(x * 0.10f, y * 0.16f, z * 0.10f, seed ^ 0xCAFE5u);
     float n2 = val_noise3(x * 0.21f, y * 0.30f, z * 0.21f, seed ^ 0xCAFE6u);
     float v  = n1 * 0.65f + n2 * 0.35f;
-    return v > 0.66f;
+    if (v > 0.62f) return true;
+    /* Spaghetti tunnels — long thin worms. Y-scale matches X/Z so
+     * tunnels twist in all three directions, not just horizontally. */
+    float na = val_noise3(x * 0.085f, y * 0.085f, z * 0.085f, seed ^ 0xCAFE7u);
+    if (fabsf(na - 0.5f) >= 0.055f) return false;
+    float nb = val_noise3(x * 0.085f, y * 0.085f, z * 0.085f, seed ^ 0xCAFE8u);
+    if (fabsf(nb - 0.5f) >= 0.055f) return false;
+    return true;
 }
 
 /* Is there a tree spawned at column (x, z) for this seed?
  * No world-bounds gating — trees can exist anywhere in the infinite
- * world; the predicate is purely deterministic on (x, z, seed). */
+ * world; the predicate is purely deterministic on (x, z, seed).
+ *
+ * Hash-first ordering matters: tree_at is called 49×CRAFT_WORLD_X×
+ * CRAFT_WORLD_Z times per window load. The cheap (r & 0x7F)
+ * comparison drops 127/128 of all calls before the expensive
+ * height_at fbm computation runs — turns chunk-shift cost from
+ * dominated by tree-neighbour scans into background noise. */
 static bool tree_at(int x, int z, uint32_t seed) {
-    int h = height_at(x, z, seed);
-    if (h <= CRAFT_WATER_LEVEL + 1) return false;
     uint32_t r = hash3(x, z, seed ^ 0xA1B2C3D4u);
-    return ((r & 0x7F) == 0);
+    if ((r & 0x7F) != 0) return false;
+    int h = height_at(x, z, seed);
+    return h > CRAFT_WATER_LEVEL + 1;
 }
 
 typedef enum {
@@ -381,8 +433,10 @@ static BlockId tree_block_at(TreeType t, int variant, int dx, int dz,
 
 static bool hut_origin_at(int hx, int hz, uint32_t seed) {
     uint32_t r = hash3(hx, hz, seed ^ 0xCAB1F00Du);
-    /* ~1 in 16 384 columns → roughly one hut per 128×128 region. */
-    if ((r & 0x3FFF) != 0) return false;
+    /* ~1 in 4 096 columns → roughly one hut per 64×64 region.
+     * 4× denser than the original 1/16384 so the player actually
+     * encounters one while exploring. */
+    if ((r & 0xFFF) != 0) return false;
     /* Lowland-only — mountain biome shrugs huts off. */
     float m = mountain_factor(hx, hz, seed);
     if (m > 0.20f) return false;
@@ -420,9 +474,18 @@ static int hut_variant(int hx, int hz, uint32_t seed) {
     return (int)(hash3(hx, hz, seed ^ 0x110D5EEDu) & 0xFFu);
 }
 
+/* Local hut chest position — fixed interior corner so the predicate
+ * stays a single equality test. dx=1, dz=1, dy=1: one cell in from
+ * the south-west corner of the hut, on the floor. Far enough from
+ * any wall's door opening to be reachable from every variant. */
+#define HUT_CHEST_DX 1
+#define HUT_CHEST_DZ 1
+#define HUT_CHEST_DY 1
+
 /* What block sits at hut-local (dx, dz, dy)?
  *   dy = 0  : floor (always AIR — keep natural surface)
  *   dy = 1-3: wall perimeter (PLANK) / interior (AIR) / door opening (AIR)
+ *            with a BLK_CHEST at the fixed corner cell
  *   dy = 4  : roof (full PLANK 5×5)
  * dx, dz in [0, HUT_W-1] / [0, HUT_H-1]. */
 static BlockId hut_block_local(int dx, int dz, int dy, int variant) {
@@ -431,6 +494,10 @@ static BlockId hut_block_local(int dx, int dz, int dy, int variant) {
         /* Roof — full square. */
         if (dx >= 0 && dx < HUT_W && dz >= 0 && dz < HUT_H) return BLK_PLANK;
         return BLK_AIR;
+    }
+    /* Chest sits on the floor at a fixed interior corner. */
+    if (dy == HUT_CHEST_DY && dx == HUT_CHEST_DX && dz == HUT_CHEST_DZ) {
+        return BLK_CHEST;
     }
     /* Walls — perimeter only. */
     bool on_perim = (dx == 0 || dx == HUT_W - 1 || dz == 0 || dz == HUT_H - 1);
@@ -632,4 +699,74 @@ Vec3 craft_gen_spawn(void) {
         }
     }
     return v3((float)cx + 0.5f, (float)CRAFT_WATER_LEVEL + 2.0f, (float)cz + 0.5f);
+}
+
+bool craft_gen_is_hut_chest(int wx, int wy, int wz, uint32_t seed) {
+    /* Walk back over every (hx, hz) origin whose 5×5 footprint could
+     * cover (wx, wz). For each that's actually a hut, check whether
+     * (wx, wy, wz) lines up with that hut's chest cell. */
+    for (int dz = -(HUT_H - 1); dz <= 0; dz++) {
+        for (int dx = -(HUT_W - 1); dx <= 0; dx++) {
+            int hx = wx + dx, hz = wz + dz;
+            if (!hut_origin_at(hx, hz, seed)) continue;
+            int gy = hut_floor_y(hx, hz, seed);
+            if (wy != gy + HUT_CHEST_DY) continue;
+            if (-dx != HUT_CHEST_DX) continue;
+            if (-dz != HUT_CHEST_DZ) continue;
+            return true;
+        }
+    }
+    return false;
+}
+
+void craft_gen_seed_hut_chest(CraftChest *c, int wx, int wy, int wz,
+                              uint32_t seed) {
+    uint32_t r = hash3(wx, wy, wz) ^ (seed * 0xA1B2C3D4u);
+    int slot = 0;
+    /* Always: 2-4 sticks. Cheap basic crafting fodder. */
+    c->slots[slot].blk = BLK_STICK;
+    c->slots[slot].n   = 2 + (uint8_t)((r >> 0) & 3);
+    slot++;
+    /* Always: 2-4 planks. */
+    c->slots[slot].blk = BLK_PLANK;
+    c->slots[slot].n   = 2 + (uint8_t)((r >> 2) & 3);
+    slot++;
+    /* 60 %: 1-2 torches. */
+    if ((r & 0x30) != 0) {
+        c->slots[slot].blk = BLK_TORCH;
+        c->slots[slot].n   = 1 + (uint8_t)((r >> 6) & 1);
+        slot++;
+    }
+    /* 35 %: bow + 4-12 arrows. */
+    if (((r >> 7) & 7) < 3) {
+        c->slots[slot].blk = BLK_BOW;
+        c->slots[slot].n   = 1;
+        slot++;
+        c->slots[slot].blk = BLK_ARROW;
+        c->slots[slot].n   = 4 + (uint8_t)((r >> 10) & 7);
+        slot++;
+    }
+    /* 30 %: 1-2 iron ingots. */
+    if (((r >> 14) & 7) < 2) {
+        c->slots[slot].blk = BLK_IRON_INGOT;
+        c->slots[slot].n   = 1 + (uint8_t)((r >> 17) & 1);
+        slot++;
+    }
+    /* 25 %: a tier-rolled pickaxe (wood / stone / iron weighted). */
+    if (((r >> 18) & 3) == 0) {
+        uint32_t tier = (r >> 20) & 7;
+        BlockId pick = BLK_PICKAXE_WOOD;
+        if (tier >= 6)      pick = BLK_PICKAXE_IRON;
+        else if (tier >= 3) pick = BLK_PICKAXE_STONE;
+        c->slots[slot].blk = pick;
+        c->slots[slot].n   = 1;
+        slot++;
+    }
+    /* 15 %: a wood / stone sword. */
+    if (((r >> 23) & 7) == 0) {
+        c->slots[slot].blk = (((r >> 26) & 1) ? BLK_SWORD_STONE : BLK_SWORD_WOOD);
+        c->slots[slot].n   = 1;
+        slot++;
+    }
+    (void)slot;
 }

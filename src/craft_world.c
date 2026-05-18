@@ -48,6 +48,42 @@ typedef struct {
 static ModEntry s_mods[MOD_TABLE_SIZE];
 static int      s_mod_count;
 
+/* --- Dirty-chunk queue ------------------------------------------ *
+ * Every block edit marks its chunk dirty. Persist paths consult
+ * this list instead of scanning the whole window, so unmodified
+ * chunks pay zero flash cost. Background tick drains entries one
+ * at a time to spread the ~60-75 ms flash erase+program across
+ * frames. */
+#define MAX_DIRTY_CHUNKS 32
+typedef struct { int32_t cx, cz; } DirtyChunk;
+static DirtyChunk s_dirty_q[MAX_DIRTY_CHUNKS];
+static int        s_dirty_q_n = 0;
+
+static inline int chunk_of(int w);              /* fwd — used below */
+static void persist_chunk(int cx, int cz);      /* fwd — used below */
+
+static int dirty_find(int cx, int cz) {
+    for (int i = 0; i < s_dirty_q_n; i++) {
+        if (s_dirty_q[i].cx == cx && s_dirty_q[i].cz == cz) return i;
+    }
+    return -1;
+}
+static void dirty_drop_at(int i) {
+    for (int j = i + 1; j < s_dirty_q_n; j++) s_dirty_q[j - 1] = s_dirty_q[j];
+    s_dirty_q_n--;
+}
+static void mark_chunk_dirty(int cx, int cz) {
+    if (dirty_find(cx, cz) >= 0) return;
+    if (s_dirty_q_n >= MAX_DIRTY_CHUNKS) {
+        /* Overflow — drain the oldest synchronously to free a slot. */
+        persist_chunk(s_dirty_q[0].cx, s_dirty_q[0].cz);
+        dirty_drop_at(0);
+    }
+    s_dirty_q[s_dirty_q_n].cx = cx;
+    s_dirty_q[s_dirty_q_n].cz = cz;
+    s_dirty_q_n++;
+}
+
 static uint32_t mod_hash(int wx, int wy, int wz) {
     uint32_t h = (uint32_t)wx * 73856093u
                ^ (uint32_t)wy * 19349663u
@@ -81,6 +117,7 @@ static void mod_set(int wx, int wy, int wz, BlockId blk) {
         e->flags = 1;
     }
     e->blk = blk;
+    mark_chunk_dirty(chunk_of(wx), chunk_of(wz));
 }
 
 static int mod_get(int wx, int wy, int wz) {
@@ -140,13 +177,52 @@ static void window_chunk_range(int *cx0, int *cx1, int *cz0, int *cz1) {
 }
 
 void craft_world_chunks_persist_window(void) {
+    /* Drain dirty chunks inside the current window. Clean chunks
+     * already match flash so we skip them — that's the difference
+     * between a fresh-edited-chunk save (~70 ms) and a no-op (free). */
     int cx0, cx1, cz0, cz1;
     window_chunk_range(&cx0, &cx1, &cz0, &cz1);
-    for (int cz = cz0; cz <= cz1; cz++) {
-        for (int cx = cx0; cx <= cx1; cx++) {
+    int i = 0;
+    while (i < s_dirty_q_n) {
+        int cx = s_dirty_q[i].cx;
+        int cz = s_dirty_q[i].cz;
+        if (cx >= cx0 && cx <= cx1 && cz >= cz0 && cz <= cz1) {
             persist_chunk(cx, cz);
+            dirty_drop_at(i);   /* don't advance — entries shifted left */
+        } else {
+            i++;
         }
     }
+}
+
+/* Persist only chunks that are leaving the window after a shift.
+ * The dirty queue is the source of truth — even leaving chunks that
+ * weren't edited can be skipped. */
+static void chunks_persist_departing(int old_x0, int old_x1, int old_z0, int old_z1,
+                                     int new_x0, int new_x1, int new_z0, int new_z1) {
+    int i = 0;
+    while (i < s_dirty_q_n) {
+        int cx = s_dirty_q[i].cx;
+        int cz = s_dirty_q[i].cz;
+        bool in_old = cx >= old_x0 && cx <= old_x1 && cz >= old_z0 && cz <= old_z1;
+        bool in_new = cx >= new_x0 && cx <= new_x1 && cz >= new_z0 && cz <= new_z1;
+        if (in_old && !in_new) {
+            persist_chunk(cx, cz);
+            dirty_drop_at(i);
+        } else {
+            i++;
+        }
+    }
+}
+
+void craft_world_persist_tick(void) {
+    if (s_dirty_q_n == 0) return;
+    /* Pop the oldest dirty chunk. One flash erase+program per call
+     * (~60-75 ms hitch). Caller spaces invocations on a timer. */
+    int cx = s_dirty_q[0].cx;
+    int cz = s_dirty_q[0].cz;
+    persist_chunk(cx, cz);
+    dirty_drop_at(0);
 }
 
 void craft_world_chunks_restore_window(void) {
@@ -391,6 +467,10 @@ static void window_load(uint32_t seed) {
 void craft_world_load_around(int player_wx, int player_wz, uint32_t seed) {
     craft_world_origin_x = player_wx - CRAFT_WORLD_X / 2;
     craft_world_origin_z = player_wz - CRAFT_WORLD_Z / 2;
+    /* Height cache is keyed on the window origin — drop it before
+     * regenerating columns so the lazy refill writes valid data for
+     * the new region. */
+    craft_gen_invalidate_height_cache();
     /* Restore persisted mods for chunks in the new window BEFORE
      * regen — that way window_load's mod_get lookups see them and
      * the buffer comes out with the player's previous edits already
@@ -441,6 +521,9 @@ static void shift_x(int dx, uint32_t seed) {
         }
     }
     craft_world_origin_x += dx;
+    /* Height cache anchors on origin — drop and re-anchor before
+     * any regen so the lazy fill writes against the new window. */
+    craft_gen_invalidate_height_cache();
 
     int new_lx0 = (dx > 0) ? (CRAFT_WORLD_X - dx) : 0;
     int new_lx1 = (dx > 0) ? CRAFT_WORLD_X : -dx;
@@ -473,6 +556,8 @@ static void shift_z(int dz, uint32_t seed) {
         }
     }
     craft_world_origin_z += dz;
+    /* Re-anchor the height cache to the new origin before regen. */
+    craft_gen_invalidate_height_cache();
 
     int new_lz0 = (dz > 0) ? (CRAFT_WORLD_Z - dz) : 0;
     int new_lz1 = (dz > 0) ? CRAFT_WORLD_Z : -dz;
@@ -496,9 +581,20 @@ void craft_world_maybe_shift(int player_wx, int player_wz, uint32_t seed) {
     while (lz >= CRAFT_WORLD_Z - CRAFT_EDGE_MARGIN) { dz += CRAFT_SHIFT; lz -= CRAFT_SHIFT; }
     if (dx == 0 && dz == 0) return;
 
-    /* Before shifting: flush all current-window chunk mods to flash
-     * so anything that's about to scroll off-window survives. */
-    craft_world_chunks_persist_window();
+    /* Before shifting: persist only chunks that are LEAVING the
+     * window AND are dirty. The mod hash is keyed on world coords —
+     * mods for chunks that stay in window keep living in the hash,
+     * and the background persist_tick will drain them later. */
+    int old_x0, old_x1, old_z0, old_z1;
+    window_chunk_range(&old_x0, &old_x1, &old_z0, &old_z1);
+    int new_origin_x = craft_world_origin_x + dx;
+    int new_origin_z = craft_world_origin_z + dz;
+    int new_x0 = chunk_of(new_origin_x);
+    int new_x1 = chunk_of(new_origin_x + CRAFT_WORLD_X - 1);
+    int new_z0 = chunk_of(new_origin_z);
+    int new_z1 = chunk_of(new_origin_z + CRAFT_WORLD_Z - 1);
+    chunks_persist_departing(old_x0, old_x1, old_z0, old_z1,
+                             new_x0, new_x1, new_z0, new_z1);
 
     /* No overlap → full regen. Happens only on huge teleports. */
     int adx = (dx > 0) ? dx : -dx;
@@ -506,15 +602,16 @@ void craft_world_maybe_shift(int player_wx, int player_wz, uint32_t seed) {
     if (adx >= CRAFT_WORLD_X || adz >= CRAFT_WORLD_Z) {
         craft_world_origin_x += dx;
         craft_world_origin_z += dz;
+        craft_gen_invalidate_height_cache();
         craft_world_chunks_restore_window();
         window_load(seed);
         return;
     }
 
     /* Partial regen: memmove the overlap, regen only the new strip.
-     * X and Z handled independently. For a single-axis 16-cell shift
-     * this drops the work from ~30 ms (full 4096-column regen) to
-     * ~7 ms (one 1024-column strip) — fits inside one frame. */
+     * X and Z handled independently. Each shift_* function updates
+     * the origin and then refreshes the height cache before regen
+     * so the lazy fill lands at the right coords. */
     if (dx != 0) shift_x(dx, seed);
     if (dz != 0) shift_z(dz, seed);
 

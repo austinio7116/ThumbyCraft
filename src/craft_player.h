@@ -81,6 +81,21 @@ typedef struct {
      * Gates rapid repeat hops on bumpy terrain or short walls. */
     float  autostep_cooldown;
 
+    /* Sustained-contact gate for auto-step. Accumulates dt while the
+     * player wanted to move forward but couldn't. Auto-step only fires
+     * once this exceeds a threshold so brushing a single 1-cell bump
+     * doesn't trigger an immediate hop — the player has to be visibly
+     * pressed into the wall. Resets on every successful horizontal
+     * move. */
+    float  stuck_against_wall_t;
+
+    /* Visual lag between the camera and the logical feet position.
+     * After an auto-step the logical Y jumps by +1.0 instantly so
+     * collision and forward motion continue uninterrupted, while
+     * step_lag is set to 1.0 — the camera then lerps up over ~0.15 s
+     * to catch up. Result: smooth elevation change instead of a hop. */
+    float  step_lag;
+
     /* Private — input edge tracking across ticks. Don't poke. */
     bool   _menu_prev;
     bool   _menu_chord_used;
@@ -96,5 +111,15 @@ void craft_player_take_damage(CraftPlayer *p, int amount);
 
 /* Advance state by dt seconds given current input. */
 void craft_player_tick(CraftPlayer *p, const CraftInput *in, float dt);
+
+/* Diagnostic for the "stuck on flat ground" report. Returns true if
+ * the player's AABB at their current position currently intersects
+ * a solid block — meaning forward motion is blocked. */
+bool craft_player_stuck_now(const CraftPlayer *p);
+
+/* Block id directly under the player's foot AABB at the column dx,dz
+ * relative to player position. dx,dz in [-1..+1]. Used by HUD to show
+ * what's in the cells the player is colliding against. */
+int  craft_player_neighbor_block(const CraftPlayer *p, int dx, int dz);
 
 #endif

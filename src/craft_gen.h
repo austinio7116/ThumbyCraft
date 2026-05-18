@@ -13,6 +13,7 @@
 
 #include "craft_types.h"
 #include "craft_blocks.h"
+#include "craft_chests.h"
 
 #define CRAFT_WATER_LEVEL 28
 
@@ -34,5 +35,22 @@ BlockId craft_gen_block_at(int x, int y, int z, uint32_t seed);
  * about 100× faster on a window-wide regen. */
 void craft_gen_column(int wx, int wz, uint32_t seed,
                       uint8_t out[/* CRAFT_WORLD_Y */]);
+
+/* Drop the column-height cache. The generator memoises height_at into
+ * a window-aligned table to amortise the 7×7-neighbour tree scan;
+ * call after every window shift (origin change) so the next column
+ * regens repopulate cleanly. Idempotent. */
+void craft_gen_invalidate_height_cache(void);
+
+/* True if world cell (wx, wy, wz) sits on the chest cell of some hut
+ * for this seed. Used at chest-open time so the loot table fires
+ * exactly once per hut. */
+bool craft_gen_is_hut_chest(int wx, int wy, int wz, uint32_t seed);
+
+/* Populate `c` (assumed freshly-created and zeroed) with deterministic
+ * random loot for the hut at (wx, wy, wz). Same seed + coords always
+ * yield the same contents. */
+void craft_gen_seed_hut_chest(CraftChest *c, int wx, int wy, int wz,
+                              uint32_t seed);
 
 #endif

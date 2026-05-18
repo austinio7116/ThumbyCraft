@@ -102,6 +102,21 @@ void craft_player_take_damage(CraftPlayer *p, int amount) {
     craft_audio_jump();
 }
 
+static bool aabb_blocked(float px, float feet_y, float pz);   /* fwd */
+
+bool craft_player_stuck_now(const CraftPlayer *p) {
+    float feet_y = p->cam.pos.y - PLAYER_EYE;
+    return aabb_blocked(p->cam.pos.x, feet_y, p->cam.pos.z);
+}
+
+int craft_player_neighbor_block(const CraftPlayer *p, int dx, int dz) {
+    float feet_y = p->cam.pos.y - PLAYER_EYE;
+    int cx = (int)floorf(p->cam.pos.x) + dx;
+    int cy = (int)floorf(feet_y);
+    int cz = (int)floorf(p->cam.pos.z) + dz;
+    return (int)craft_world_get(cx, cy, cz);
+}
+
 static bool aabb_blocked(float px, float feet_y, float pz) {
     int x0 = (int)floorf(px - PLAYER_HALF_W);
     int x1 = (int)floorf(px + PLAYER_HALF_W);
@@ -131,7 +146,7 @@ static bool aabb_blocked(float px, float feet_y, float pz) {
  *     chained calls don't stack two upward bumps in one frame
  *     (that's how the old code accidentally let players climb).
  *   - cross-frame: p->autostep_cooldown enforces the time spacing. */
-#define AUTOSTEP_COOLDOWN 0.35f
+#define AUTOSTEP_COOLDOWN 0.40f
 
 static bool try_horizontal(CraftPlayer *p, float nx, float nz,
                            bool *stepped_up) {
@@ -141,16 +156,27 @@ static bool try_horizontal(CraftPlayer *p, float nx, float nz,
         p->cam.pos.z = nz;
         return true;
     }
+    /* Auto-step is INSTANT — no time gate, no cooldown — because the
+     * visible "hop" used to come from teleporting cam.pos.y up by 1.0.
+     * The new model decouples logical position from camera Y: we still
+     * bump cam.pos.y so collision and forward motion continue, but we
+     * also set step_lag so the renderer offsets the camera DOWN by 1
+     * unit and lerps it back to zero over ~0.15 s. The player keeps
+     * moving with no perceived pause; the camera glides up smoothly
+     * to the new ground level. */
     if (!p->fly_mode && p->on_ground &&
         !*stepped_up &&
-        p->autostep_cooldown <= 0.0f &&
         p->vel.y <= 0.001f &&
         !aabb_blocked(nx, feet_y + 1.0f, nz)) {
         p->cam.pos.x = nx;
         p->cam.pos.z = nz;
         p->cam.pos.y += 1.0f;
+        p->step_lag  += 1.0f;
+        /* Cap accumulation so a fast traverse over a staircase doesn't
+         * leave the camera floating metres below the player. */
+        if (p->step_lag > 1.5f) p->step_lag = 1.5f;
         *stepped_up = true;
-        p->autostep_cooldown = AUTOSTEP_COOLDOWN;
+        p->stuck_against_wall_t = 0.0f;
         return true;
     }
     return false;
@@ -159,6 +185,14 @@ static bool try_horizontal(CraftPlayer *p, float nx, float nz,
 void craft_player_tick(CraftPlayer *p, const CraftInput *in, float dt) {
     p->broke_block = false;
     p->placed_block = false;
+    /* Camera-lag decay — catch the visual y up to the logical position
+     * over ~0.17 s (6 m/s × ~0.17 s = 1.0 cell). The visual offset is
+     * applied at render time only; physics here uses cam.pos.y as the
+     * logical position. */
+    if (p->step_lag > 0.0f) {
+        p->step_lag -= 6.0f * dt;
+        if (p->step_lag < 0.0f) p->step_lag = 0.0f;
+    }
     if (p->autostep_cooldown > 0.0f) {
         p->autostep_cooldown -= dt;
         if (p->autostep_cooldown < 0.0f) p->autostep_cooldown = 0.0f;
@@ -261,9 +295,21 @@ void craft_player_tick(CraftPlayer *p, const CraftInput *in, float dt) {
     /* ----- AABB sweep ------------------------------------------ */
     float dx = p->vel.x * dt;
     float dz = p->vel.z * dt;
+    float orig_x = p->cam.pos.x;
+    float orig_z = p->cam.pos.z;
     bool stepped = false;
     if (!try_horizontal(p, p->cam.pos.x + dx, p->cam.pos.z, &stepped)) p->vel.x = 0;
     if (!try_horizontal(p, p->cam.pos.x, p->cam.pos.z + dz, &stepped)) p->vel.z = 0;
+    /* Sustained-contact timer feeds the auto-step gate inside
+     * try_horizontal. Reset whenever the player actually moved (or
+     * stepped up), accumulate while trying-but-stuck. */
+    bool moved = (p->cam.pos.x != orig_x) || (p->cam.pos.z != orig_z) || stepped;
+    if (moved) {
+        p->stuck_against_wall_t = 0.0f;
+    } else if (walk_active) {
+        p->stuck_against_wall_t += dt;
+        if (p->stuck_against_wall_t > 1.0f) p->stuck_against_wall_t = 1.0f;
+    }
 
     float feet_y = p->cam.pos.y - PLAYER_EYE;
     float ny_feet = feet_y + p->vel.y * dt;
@@ -313,7 +359,7 @@ void craft_player_tick(CraftPlayer *p, const CraftInput *in, float dt) {
                 fwd.y * ARROW_SPEED + 1.0f,    /* slight lift compensates for gravity */
                 fwd.z * ARROW_SPEED
             };
-            craft_arrows_spawn(origin, vel);
+            craft_arrows_spawn(origin, vel, true);
             p->inventory[BLK_ARROW]--;
             p->broke_block = true;            /* drives swing animation */
             goto skip_attack;

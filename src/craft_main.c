@@ -44,6 +44,12 @@ static bool s_new_world_req;
  * craft_main_tick so both host and device paths stay in sync. */
 static float s_held_swing_t = 0.0f;
 
+/* Background chunk-persist drain — fires one flash erase+program
+ * every PERSIST_PERIOD seconds. Spreads ~70 ms hitches so they don't
+ * bundle into a multi-chunk stutter on window shift. */
+#define PERSIST_PERIOD 2.0f
+static float s_persist_timer = PERSIST_PERIOD;
+
 /* RNG helper for new-world seeds. Cheap LCG seeded from time
  * accumulator + xorshift, since we don't have rand() everywhere. */
 static uint32_t s_rng = 0x12345678u;
@@ -83,6 +89,37 @@ void craft_main_init(uint16_t *fb, uint32_t seed) {
     craft_drops_init();
     craft_furnace_init();
     craft_chests_init();
+    /* Starter chest 2 blocks east of spawn — pre-stocked with a bow
+     * and arrows so the player can verify the ranged loop without
+     * having to melee a skeleton first. */
+    {
+        /* spawn.y is eye height: grass_y + 1 + 1.6 → (int)spawn.y is
+         * grass_y + 2. Chest sits on the grass at grass_y + 1, so
+         * subtract 1 to land on the surface. */
+        int chest_x = (int)spawn.x + 2;
+        int chest_z = (int)spawn.z;
+        int chest_y = (int)spawn.y - 1;
+        craft_world_set(chest_x, chest_y, chest_z, BLK_CHEST);
+        CraftChest *c = craft_chest_at(chest_x, chest_y, chest_z);
+        if (c) {
+            /* Full tool sampler for testing — every tier + every
+             * material so the user can verify each in the held-item
+             * viewport and combat without having to craft them. */
+            c->slots[ 0].blk = BLK_BOW;            c->slots[ 0].n = 1;
+            c->slots[ 1].blk = BLK_ARROW;          c->slots[ 1].n = 32;
+            c->slots[ 2].blk = BLK_PICKAXE_WOOD;   c->slots[ 2].n = 1;
+            c->slots[ 3].blk = BLK_PICKAXE_STONE;  c->slots[ 3].n = 1;
+            c->slots[ 4].blk = BLK_PICKAXE_IRON;   c->slots[ 4].n = 1;
+            c->slots[ 5].blk = BLK_SWORD_WOOD;     c->slots[ 5].n = 1;
+            c->slots[ 6].blk = BLK_SWORD_STONE;    c->slots[ 6].n = 1;
+            c->slots[ 7].blk = BLK_SWORD_IRON;     c->slots[ 7].n = 1;
+            c->slots[ 8].blk = BLK_TORCH;          c->slots[ 8].n = 16;
+            c->slots[ 9].blk = BLK_FURNACE;        c->slots[ 9].n = 1;
+            c->slots[10].blk = BLK_CHEST;          c->slots[10].n = 1;
+            c->slots[11].blk = BLK_STICK;          c->slots[11].n = 16;
+            c->slots[12].blk = BLK_IRON_INGOT;     c->slots[12].n = 8;
+        }
+    }
     /* Defaults — start in survival with invert-Y on. Player can flip
      * either from the pause menu. */
     s_player.invert_y = true;
@@ -202,6 +239,7 @@ void craft_main_step(const CraftInput *in, float dt, int fps) {
     if (craft_menu_is_open()) {
         CraftMenuResult r = craft_menu_tick(in, &s_player);
         handle_menu_result(r);
+        s_player.cam.pos.y -= s_player.step_lag;
         craft_render_set_time(s_world_time);
         craft_render_begin(&s_player.cam);
         craft_render_strip(&s_player.cam, s_fb, 0, CRAFT_FB_H);
@@ -215,6 +253,7 @@ void craft_main_step(const CraftInput *in, float dt, int fps) {
         craft_render_pick_outline(&s_player.cam, s_fb);
         craft_hud_draw(s_fb, &s_player, fps);
         craft_menu_draw(s_fb, &s_player);
+        s_player.cam.pos.y += s_player.step_lag;
         return;
     }
     s_world_time += dt;
@@ -223,6 +262,11 @@ void craft_main_step(const CraftInput *in, float dt, int fps) {
     held_swing_tick_after_player(dt);
     craft_world_maybe_shift((int)s_player.cam.pos.x,
                             (int)s_player.cam.pos.z, s_seed);
+    s_persist_timer -= dt;
+    if (s_persist_timer <= 0.0f) {
+        craft_world_persist_tick();
+        s_persist_timer = PERSIST_PERIOD;
+    }
     if (s_player.broke_block) {
         Vec3 centre = v3((float)s_player.last_action_x + 0.5f,
                          (float)s_player.last_action_y + 0.5f,
@@ -251,15 +295,25 @@ void craft_main_step(const CraftInput *in, float dt, int fps) {
     }
     if (s_player.request_chest_open) {
         s_player.request_chest_open = false;
-        craft_menu_open_chest(in,
-            s_player.chest_open_x,
-            s_player.chest_open_y,
-            s_player.chest_open_z);
+        int cx = s_player.chest_open_x;
+        int cy = s_player.chest_open_y;
+        int cz = s_player.chest_open_z;
+        /* Seed hut chest loot on first touch. craft_chest_find returns
+         * NULL only if no state record exists yet → fresh open. We
+         * pre-create the record and populate it before handing off
+         * to the menu so the player sees the loot on this open. */
+        if (!craft_chest_find(cx, cy, cz) &&
+            craft_gen_is_hut_chest(cx, cy, cz, s_seed)) {
+            CraftChest *hc = craft_chest_at(cx, cy, cz);
+            if (hc) craft_gen_seed_hut_chest(hc, cx, cy, cz, s_seed);
+        }
+        craft_menu_open_chest(in, cx, cy, cz);
     }
     if (s_player.request_fly_toast) {
         s_player.request_fly_toast = false;
         craft_menu_toast(s_player.fly_mode ? "Fly mode ON" : "Fly mode OFF");
     }
+    s_player.cam.pos.y -= s_player.step_lag;
     craft_render_set_time(s_world_time);
     craft_render_begin(&s_player.cam);
     craft_render_strip(&s_player.cam, s_fb, 0, CRAFT_FB_H);
@@ -268,7 +322,7 @@ void craft_main_step(const CraftInput *in, float dt, int fps) {
     craft_mobs_render(&s_player.cam, s_fb);
     craft_arrows_render(&s_player.cam, s_fb);
     craft_drops_render(&s_player.cam, s_fb);
-        craft_torches_render(&s_player.cam, s_fb);
+    craft_torches_render(&s_player.cam, s_fb);
     craft_particles_render(&s_player.cam, s_fb);
     craft_render_pick_outline(&s_player.cam, s_fb);
     /* Held item overlay sits on top of the world but UNDER the HUD —
@@ -277,6 +331,7 @@ void craft_main_step(const CraftInput *in, float dt, int fps) {
     craft_render_held_item(s_player.hotbar[s_player.hotbar_idx],
                            s_fb, s_held_swing_t);
     craft_hud_draw(s_fb, &s_player, fps);
+    s_player.cam.pos.y += s_player.step_lag;
 }
 
 void craft_main_tick(const CraftInput *in, float dt) {
@@ -292,6 +347,11 @@ void craft_main_tick(const CraftInput *in, float dt) {
     held_swing_tick_after_player(dt);
     craft_world_maybe_shift((int)s_player.cam.pos.x,
                             (int)s_player.cam.pos.z, s_seed);
+    s_persist_timer -= dt;
+    if (s_persist_timer <= 0.0f) {
+        craft_world_persist_tick();
+        s_persist_timer = PERSIST_PERIOD;
+    }
     if (s_player.broke_block) {
         Vec3 centre = v3((float)s_player.last_action_x + 0.5f,
                          (float)s_player.last_action_y + 0.5f,
@@ -301,6 +361,8 @@ void craft_main_tick(const CraftInput *in, float dt) {
     craft_particles_tick(dt);
     craft_mobs_tick(dt, &s_player);
     craft_arrows_tick(dt, &s_player);
+    craft_drops_tick(dt, &s_player);
+    craft_furnace_tick(dt);
     craft_mobs_day_night_tick(dt, craft_render_sun_y(), &s_player);
     craft_audio_music_set_sun(craft_render_sun_y());
     craft_audio_music_tick(dt);
@@ -318,10 +380,19 @@ void craft_main_tick(const CraftInput *in, float dt) {
     }
     if (s_player.request_chest_open) {
         s_player.request_chest_open = false;
-        craft_menu_open_chest(in,
-            s_player.chest_open_x,
-            s_player.chest_open_y,
-            s_player.chest_open_z);
+        int cx = s_player.chest_open_x;
+        int cy = s_player.chest_open_y;
+        int cz = s_player.chest_open_z;
+        /* Seed hut chest loot on first touch. craft_chest_find returns
+         * NULL only if no state record exists yet → fresh open. We
+         * pre-create the record and populate it before handing off
+         * to the menu so the player sees the loot on this open. */
+        if (!craft_chest_find(cx, cy, cz) &&
+            craft_gen_is_hut_chest(cx, cy, cz, s_seed)) {
+            CraftChest *hc = craft_chest_at(cx, cy, cz);
+            if (hc) craft_gen_seed_hut_chest(hc, cx, cy, cz, s_seed);
+        }
+        craft_menu_open_chest(in, cx, cy, cz);
     }
     if (s_player.request_fly_toast) {
         s_player.request_fly_toast = false;
@@ -329,6 +400,11 @@ void craft_main_tick(const CraftInput *in, float dt) {
     }
 }
 void craft_main_render_begin(void) {
+    /* Apply the auto-step camera lag: render sees cam.pos.y slightly
+     * below the player's logical y so the post-step camera rise is
+     * smooth rather than instantaneous. Restored at the end of
+     * craft_main_draw_hud so physics next tick uses the logical y. */
+    s_player.cam.pos.y -= s_player.step_lag;
     craft_render_set_time(s_world_time);
     craft_render_begin(&s_player.cam);
 }
@@ -340,7 +416,8 @@ void craft_main_draw_hud(int fps) {
     craft_render_celestials(&s_player.cam, s_fb);
     craft_mobs_render(&s_player.cam, s_fb);
     craft_arrows_render(&s_player.cam, s_fb);
-        craft_torches_render(&s_player.cam, s_fb);
+    craft_drops_render(&s_player.cam, s_fb);
+    craft_torches_render(&s_player.cam, s_fb);
     craft_particles_render(&s_player.cam, s_fb);
     craft_render_pick_outline(&s_player.cam, s_fb);
     /* Held item overlay sits under the hotbar — the active-slot
@@ -349,6 +426,8 @@ void craft_main_draw_hud(int fps) {
                            s_fb, s_held_swing_t);
     craft_hud_draw(s_fb, &s_player, fps);
     if (craft_menu_is_open()) craft_menu_draw(s_fb, &s_player);
+    /* Restore logical cam y so next tick's physics is correct. */
+    s_player.cam.pos.y += s_player.step_lag;
 }
 
 uint32_t craft_main_seed(void) { return s_seed; }

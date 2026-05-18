@@ -10,6 +10,8 @@
 #include "craft_font.h"
 #include "craft_menu.h"
 #include "craft_world.h"
+#include "craft_drops.h"
+#include "craft_player.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -188,6 +190,29 @@ void craft_hud_draw(uint16_t *fb, const CraftPlayer *p, int fps) {
         craft_font_draw(fb, buf,
                         CRAFT_FB_W - craft_font_width(buf) - 2, 15,
                         rgb565(150, 180, 210));
+        /* "Stuck on flat ground" diagnostic — when the player's AABB
+         * is currently intersecting any solid block we say STUCK and
+         * show the foot Y plus the block id at the centre cell.
+         * Otherwise we still show foot Y + the 3×3 neighbour block ids
+         * around the foot column so we can SEE if there's hidden
+         * geometry the player can't see at eye level. */
+        bool stuck = craft_player_stuck_now(p);
+        float feet_y = p->cam.pos.y - 1.60f;
+        snprintf(buf, sizeof buf, "%s y=%.2f", stuck ? "STK" : "fy",
+                 (double)feet_y);
+        craft_font_draw(fb, buf,
+                        CRAFT_FB_W - craft_font_width(buf) - 2, 22,
+                        stuck ? rgb565(255, 80, 80) : rgb565(120, 200, 120));
+        /* Neighbour cell at foot Y, one cell forward in each axis.
+         * Format: w/e/n/s = block ids west/east/north/south. */
+        int bw = craft_player_neighbor_block(p, -1, 0);
+        int be = craft_player_neighbor_block(p, +1, 0);
+        int bn = craft_player_neighbor_block(p, 0, -1);
+        int bs = craft_player_neighbor_block(p, 0, +1);
+        snprintf(buf, sizeof buf, "w%d e%d n%d s%d", bw, be, bn, bs);
+        craft_font_draw(fb, buf,
+                        CRAFT_FB_W - craft_font_width(buf) - 2, 29,
+                        rgb565(200, 180, 140));
     }
     if (p->fly_mode) {
         craft_font_draw(fb, "FLY", 2, 1, rgb565(120, 220, 255));

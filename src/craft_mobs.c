@@ -325,19 +325,26 @@ static bool mob_is_hostile(MobType t) {
  * the two death sites (player attack + sunlight burn) so the loot
  * lands at the mob's final position regardless of how it expired. */
 static void mob_die_with_loot(CraftMob *m) {
-    /* Slight upward bias so the drop floats just off the ground. */
-    Vec3 p = (Vec3){ m->pos.x, m->pos.y + 0.4f, m->pos.z };
+    /* Drops sit at chest height (~1 m above feet) so they're well
+     * clear of the ground and visible from a distance. */
+    Vec3 p = (Vec3){ m->pos.x, m->pos.y + 1.0f, m->pos.z };
     if (m->type == MOB_SKELETON) {
-        /* Always drops a bow + 2 arrows; a 50 % chance for a 3rd. */
         craft_drops_spawn(BLK_BOW, p);
         craft_drops_spawn(BLK_ARROW, (Vec3){ p.x + 0.15f, p.y, p.z });
         craft_drops_spawn(BLK_ARROW, (Vec3){ p.x - 0.15f, p.y, p.z });
         if (((unsigned)((uintptr_t)m >> 4) & 1) == 0) {
             craft_drops_spawn(BLK_ARROW, (Vec3){ p.x, p.y, p.z + 0.15f });
         }
+    } else if (m->type == MOB_SLIME || m->type == MOB_SPIDER ||
+               m->type == MOB_CREEPER) {
+        /* Debug: every hostile mob drops a bow + 2 arrows so the user
+         * can verify the drops pipeline end-to-end without relying on
+         * the harder-to-melee skeleton. Tier-2 loot pass will scope
+         * this back to per-mob recipes (slime ball, spider eye, etc). */
+        craft_drops_spawn(BLK_BOW, p);
+        craft_drops_spawn(BLK_ARROW, (Vec3){ p.x + 0.15f, p.y, p.z });
+        craft_drops_spawn(BLK_ARROW, (Vec3){ p.x - 0.15f, p.y, p.z });
     }
-    /* Other mobs: no drops yet — wool/feather/etc. land with the
-     * planned Tier 2 mob-loot pass. */
 }
 
 /* --- Find a grass/sand/dirt block under (x, z) ------------------- */
@@ -625,7 +632,7 @@ static void skeleton_ai(CraftMob *m, CraftPlayer *p, float dt) {
             if (dl > 0.001f) {
                 float inv = SKEL_ARROW_SPEED / dl;
                 Vec3 vel = v3(dir.x * inv, dir.y * inv, dir.z * inv);
-                craft_arrows_spawn(from, vel);
+                craft_arrows_spawn(from, vel, false);
             }
         }
     }
@@ -1057,19 +1064,22 @@ void craft_arrows_clear(void) {
     for (int i = 0; i < CRAFT_MAX_ARROWS; i++) craft_arrows[i].alive = false;
 }
 
-void craft_arrows_spawn(Vec3 pos, Vec3 vel) {
+void craft_arrows_spawn(Vec3 pos, Vec3 vel, bool from_player) {
     for (int i = 0; i < CRAFT_MAX_ARROWS; i++) {
         if (craft_arrows[i].alive) continue;
-        craft_arrows[i].alive    = true;
-        craft_arrows[i].pos      = pos;
-        craft_arrows[i].vel      = vel;
-        craft_arrows[i].lifetime = 3.0f;
+        craft_arrows[i].alive       = true;
+        craft_arrows[i].from_player = from_player;
+        craft_arrows[i].pos         = pos;
+        craft_arrows[i].vel         = vel;
+        craft_arrows[i].lifetime    = 3.0f;
         return;
     }
 }
 
-#define ARROW_GRAVITY  -8.0f
-#define ARROW_HIT_R     0.45f      /* player hit radius squared check */
+#define ARROW_GRAVITY      -8.0f
+#define ARROW_HIT_R         0.45f      /* player hit radius squared check */
+#define ARROW_MOB_HIT_R     0.55f      /* mob hit radius squared check */
+#define ARROW_DAMAGE        3          /* per arrow — kills slime/creeper in 1 */
 
 void craft_arrows_tick(float dt, CraftPlayer *p) {
     if (dt > 0.1f) dt = 0.1f;
@@ -1097,15 +1107,39 @@ void craft_arrows_tick(float dt, CraftPlayer *p) {
             a->alive = false;
             continue;
         }
-        /* Player hit (sphere vs player body). No drop — the arrow
-         * embeds in the player. */
-        float dx = a->pos.x - p->cam.pos.x;
-        float dy = a->pos.y - (p->cam.pos.y - 0.8f);
-        float dz = a->pos.z - p->cam.pos.z;
-        if (dx*dx + dz*dz < ARROW_HIT_R && dy > -1.2f && dy < 0.6f) {
-            craft_player_take_damage(p, 1);
-            a->alive = false;
-            continue;
+        if (a->from_player) {
+            /* Mob hit — sphere proximity vs mob chest. Damages and
+             * kills (which triggers mob_die_with_loot → drops). No
+             * arrow drop, the arrow embeds in the mob. */
+            int hit_mob = -1;
+            for (int j = 0; j < CRAFT_MAX_MOBS; j++) {
+                CraftMob *m = &craft_mobs[j];
+                if (!m->alive) continue;
+                float dx = a->pos.x - m->pos.x;
+                float dy = a->pos.y - (m->pos.y + 0.8f);
+                float dz = a->pos.z - m->pos.z;
+                if (dx*dx + dz*dz < ARROW_MOB_HIT_R &&
+                    dy > -0.6f && dy < 1.1f) {
+                    hit_mob = j;
+                    break;
+                }
+            }
+            if (hit_mob >= 0) {
+                craft_mob_damage(hit_mob, ARROW_DAMAGE);
+                a->alive = false;
+                continue;
+            }
+        } else {
+            /* Player hit (sphere vs player body). No drop — the arrow
+             * embeds in the player. */
+            float dx = a->pos.x - p->cam.pos.x;
+            float dy = a->pos.y - (p->cam.pos.y - 0.8f);
+            float dz = a->pos.z - p->cam.pos.z;
+            if (dx*dx + dz*dz < ARROW_HIT_R && dy > -1.2f && dy < 0.6f) {
+                craft_player_take_damage(p, 1);
+                a->alive = false;
+                continue;
+            }
         }
     }
 }

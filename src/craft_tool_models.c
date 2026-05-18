@@ -258,6 +258,22 @@ static const CraftToolPart parts_arrow[] = {
     { -0.180f, -0.185f, 0.000f, 0.028f, 0.028f, 0.020f, COL_FLETCH         },
 };
 
+/* Torch — vertical wooden stick with a glowing flame cluster on top.
+ * BLK_TORCH is in the "placeable" allow-list so without a tool model
+ * the held-item path renders it as a textured cube; that reads as a
+ * brown block instead of a torch. The model puts a tall thin stick
+ * along Y with a small flame stack at the top. */
+#define COL_TORCH_WOOD  0x9341u   /* dark wood brown */
+#define COL_TORCH_HEAD  0xFE60u   /* orange-yellow flame */
+#define COL_TORCH_TIP   0xFFE0u   /* hot yellow tip */
+static const CraftToolPart parts_torch[] = {
+    /* Stick — tall thin column running through the centre. */
+    {  0.000f, -0.150f, 0.000f, 0.025f, 0.100f, 0.025f, COL_TORCH_WOOD },
+    /* Flame stack — two small bright cubes above the stick. */
+    {  0.000f,  0.000f, 0.000f, 0.055f, 0.040f, 0.055f, COL_TORCH_HEAD },
+    {  0.000f,  0.060f, 0.000f, 0.040f, 0.025f, 0.040f, COL_TORCH_TIP  },
+};
+
 #define MODEL(arr)  { sizeof(arr) / sizeof((arr)[0]), (arr) }
 
 void craft_tool_models_init(void) {
@@ -280,6 +296,7 @@ CraftToolModel craft_tool_model(BlockId b) {
         case BLK_SWORD_IRON:    return (CraftToolModel)MODEL(parts_sword_iron);
         case 22:                return (CraftToolModel)MODEL(parts_bow);   /* BLK_BOW   */
         case 23:                return (CraftToolModel)MODEL(parts_arrow); /* BLK_ARROW */
+        case BLK_TORCH:         return (CraftToolModel)MODEL(parts_torch);
         default: {
             CraftToolModel empty = { 0, (const CraftToolPart *)0 };
             return empty;

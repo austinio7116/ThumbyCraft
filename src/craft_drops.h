@@ -54,4 +54,13 @@ void craft_drops_tick(float dt, CraftPlayer *p);
 /* Render all live drops as small spinning cubes. */
 void craft_drops_render(const CraftCamera *cam, uint16_t *fb);
 
+/* Live drop count — for HUD diagnostics while we hunt the
+ * "invisible drops" bug. */
+int craft_drops_live_count(void);
+
+/* Position of the first live drop. Returns false when there are no
+ * live drops. HUD prints this so we can verify where drops are
+ * landing relative to the player. */
+bool craft_drops_first_pos(Vec3 *out);
+
 #endif
