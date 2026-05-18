@@ -21,12 +21,22 @@
 
 #define CRAFT_MAX_TORCHES 64
 
+typedef enum {
+    TORCH_KIND_TORCH = 0,
+    TORCH_KIND_WIRE  = 1,    /* unpowered redstone dust on the floor */
+    TORCH_KIND_WIRE_ON = 2,  /* powered redstone dust — bright */
+} TorchKind;
+
 typedef struct {
     bool    alive;
     int32_t wx, wz;
     int16_t wy;
     uint8_t orient;     /* Face enum — which face of the parent block
-                           the torch is mounted on. */
+                           the torch is mounted on (torches only). */
+    uint8_t kind;       /* TorchKind — torches share this render
+                           pipeline with redstone wires because wires
+                           need the same "non-opaque world cell + small
+                           sprite overlay" treatment. */
 } CraftTorch;
 
 extern CraftTorch craft_torches[CRAFT_MAX_TORCHES];

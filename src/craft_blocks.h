@@ -65,6 +65,13 @@ typedef enum {
     BLK_GOLD_BLOCK      = 41,
     BLK_DIAMOND_BLOCK   = 42,
     BLK_REDSTONE_BLOCK  = 43,
+    /* Redstone circuit blocks. LEVER_* and WIRE_* are state pairs:
+     * lever toggles between OFF/ON via B-interact; wire transitions
+     * automatically driven by craft_redstone's propagation tick. */
+    BLK_LEVER_OFF       = 44,
+    BLK_LEVER_ON        = 45,
+    BLK_REDSTONE_WIRE   = 46,
+    BLK_REDSTONE_WIRE_ON = 47,
     BLK_COUNT
 } BlockId;
 
@@ -113,6 +120,7 @@ const uint16_t *craft_block_texture(BlockId blk, Face face);
 /* Whether this block is opaque (stops a ray). Water and air are
  * non-opaque; everything else is. */
 static inline bool craft_block_opaque(BlockId blk) {
+    if (blk == BLK_REDSTONE_WIRE || blk == BLK_REDSTONE_WIRE_ON) return false;
     return blk != BLK_AIR && blk != BLK_WATER && blk != BLK_GLASS;
 }
 
@@ -123,8 +131,10 @@ static inline bool craft_block_opaque(BlockId blk) {
  * they need an explicit allow-list. */
 static inline bool craft_block_solid(BlockId blk) {
     if (blk == BLK_AIR || blk == BLK_WATER || blk == BLK_TORCH) return false;
+    if (blk == BLK_REDSTONE_WIRE || blk == BLK_REDSTONE_WIRE_ON) return false;
     if (blk == BLK_FURNACE) return true;
     if (blk == BLK_CHEST) return true;
+    if (blk == BLK_LEVER_OFF || blk == BLK_LEVER_ON) return true;
     if (blk >= BLK_SILVER_ORE && blk <= BLK_REDSTONE_ORE)   return true;
     if (blk >= BLK_SILVER_BLOCK && blk <= BLK_REDSTONE_BLOCK) return true;
     if (blk >= BLK_STICK) return false;   /* inventory items */
@@ -136,6 +146,11 @@ static inline bool craft_block_solid(BlockId blk) {
 static inline bool craft_block_placeable(BlockId blk) {
     if (blk == BLK_AIR) return false;
     if (blk == BLK_FURNACE || blk == BLK_CHEST) return true;
+    /* BLK_REDSTONE is an inventory item; placing it converts to
+     * BLK_REDSTONE_WIRE (handled in the player's B-press path), so
+     * accept it as placeable here. BLK_LEVER_OFF is both item and
+     * placed block. */
+    if (blk == BLK_REDSTONE || blk == BLK_LEVER_OFF) return true;
     if (blk >= BLK_SILVER_ORE && blk <= BLK_REDSTONE_ORE)   return true;
     if (blk >= BLK_SILVER_BLOCK && blk <= BLK_REDSTONE_BLOCK) return true;
     if (blk >= BLK_STICK) return false;

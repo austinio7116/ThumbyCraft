@@ -19,6 +19,7 @@
 #include "craft_world.h"
 #include "craft_gen.h"
 #include "craft_torches.h"
+#include "craft_redstone.h"
 #include "craft_chunk_store.h"
 #include <string.h>
 
@@ -438,6 +439,7 @@ void craft_world_set_byte(int wx, int wy, int wz, uint8_t b) {
 void craft_world_set(int wx, int wy, int wz, BlockId blk) {
     if ((unsigned)wy >= CRAFT_WORLD_Y) return;
     BlockId prev = craft_world_get(wx, wy, wz);
+    craft_redstone_note_change(prev, blk);
     mod_set(wx, wy, wz, blk);
     int lx = wx - craft_world_origin_x;
     int lz = wz - craft_world_origin_z;
@@ -464,15 +466,30 @@ void craft_world_set(int wx, int wy, int wz, BlockId blk) {
      *    cobble) don't touch propagation — skip the rebuild to keep
      *    the build/place loop fast. */
     bool torch_change   = (blk == BLK_TORCH || prev == BLK_TORCH);
+    /* Wires and levers ride the torch render pipeline as small overlay
+     * sprites — their list also needs to be rebuilt on placement /
+     * removal / state transition (lever toggle, wire power flip). */
+    #define IS_WIRE_OR_LEVER(b) ((b) == BLK_REDSTONE_WIRE    ||     \
+                                 (b) == BLK_REDSTONE_WIRE_ON ||     \
+                                 (b) == BLK_LEVER_OFF        ||     \
+                                 (b) == BLK_LEVER_ON)
+    bool sprite_change  = torch_change ||
+                          IS_WIRE_OR_LEVER(blk) || IS_WIRE_OR_LEVER(prev);
+    #undef IS_WIRE_OR_LEVER
     bool prev_blocks    = !light_transparent(prev);
     bool new_blocks     = !light_transparent(blk);
     bool transp_changed = (prev_blocks != new_blocks);
-    if (torch_change) {
+    if (sprite_change) {
         if (prev == BLK_TORCH && blk != BLK_TORCH) {
             craft_torches_forget_orient(wx, wy, wz);
         }
         craft_torches_rebuild();
-        craft_world_rebuild_lightmap();
+        /* Torches actually emit light, so a torch change forces a
+         * lightmap rebuild. Wire/lever transitions don't affect
+         * lightmap (wires are non-opaque both ways; levers are
+         * solid both ways), so skip that work. */
+        if (torch_change) craft_world_rebuild_lightmap();
+        else if (transp_changed) craft_world_rebuild_lightmap();
     } else if (transp_changed) {
         craft_world_rebuild_lightmap();
     }
@@ -544,6 +561,7 @@ void craft_world_load_around(int player_wx, int player_wz, uint32_t seed) {
     window_load(seed);
     compute_skyheight_all();
     craft_torches_rebuild();
+    craft_redstone_rescan();
     craft_world_rebuild_lightmap();
     craft_world_dirty = 0;
 }

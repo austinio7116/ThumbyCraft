@@ -382,10 +382,13 @@ void craft_player_tick(CraftPlayer *p, const CraftInput *in, float dt) {
                 /* Sword in active slot boosts damage by tier. */
                 BlockId held = p->hotbar[p->hotbar_idx];
                 int dmg = CRAFT_PLAYER_ATTACK_DAMAGE;
-                if      (held == BLK_SWORD_IRON)  dmg = 4;
-                else if (held == BLK_SWORD_STONE) dmg = 3;
-                else if (held == BLK_SWORD_WOOD)  dmg = 2;
-                craft_mob_damage(mob_i, dmg);
+                if      (held == BLK_SWORD_DIAMOND) dmg = 8;
+                else if (held == BLK_SWORD_GOLD)    dmg = 4;
+                else if (held == BLK_SWORD_SILVER)  dmg = 4;
+                else if (held == BLK_SWORD_IRON)    dmg = 4;
+                else if (held == BLK_SWORD_STONE)   dmg = 3;
+                else if (held == BLK_SWORD_WOOD)    dmg = 2;
+                craft_mob_damage(mob_i, dmg, held);
                 craft_audio_break(BLK_DIRT);   /* generic thud */
             } else if (torch_i >= 0) {
                 /* Break a torch — convert back to AIR + give to inventory. */
@@ -446,6 +449,9 @@ void craft_player_tick(CraftPlayer *p, const CraftInput *in, float dt) {
                     else if (was == BLK_GRASS)         dropped = BLK_DIRT;
                     else if (was == BLK_DIAMOND_ORE)   dropped = BLK_DIAMOND;
                     else if (was == BLK_REDSTONE_ORE)  dropped = BLK_REDSTONE;
+                    else if (was == BLK_REDSTONE_WIRE ||
+                             was == BLK_REDSTONE_WIRE_ON) dropped = BLK_REDSTONE;
+                    else if (was == BLK_LEVER_ON)      dropped = BLK_LEVER_OFF;
                     /* Track inventory counts in BOTH modes — creative
                      * needs them so the crafting picker can know what
                      * the player has mined. Creative just never
@@ -504,6 +510,20 @@ skip_attack: ;
                     p->chest_open_z = h.bz;
                     goto place_done;
                 }
+                /* Lever toggle — B on the lever flips its state in
+                 * place. The actual circuit-side power flow is driven
+                 * by craft_redstone's propagation tick, which reads
+                 * lever state next time it runs (5 Hz). */
+                if (hit_blk == BLK_LEVER_OFF) {
+                    craft_world_set(h.bx, h.by, h.bz, BLK_LEVER_ON);
+                    craft_audio_place(BLK_LEVER_ON);
+                    goto place_done;
+                }
+                if (hit_blk == BLK_LEVER_ON) {
+                    craft_world_set(h.bx, h.by, h.bz, BLK_LEVER_OFF);
+                    craft_audio_place(BLK_LEVER_OFF);
+                    goto place_done;
+                }
             }
             if (h.hit && h.distance < 8.0f) {
                 BlockId blk = p->hotbar[p->hotbar_idx];
@@ -515,7 +535,14 @@ skip_attack: ;
                 BlockId cur = craft_world_get(h.fx, h.fy, h.fz);
                 if (affordable && (cur == BLK_AIR || cur == BLK_WATER)) {
                     BlockId stash = cur;
-                    craft_world_set(h.fx, h.fy, h.fz, blk);
+                    /* Place-time conversion: BLK_REDSTONE is an
+                     * inventory item; in the world it manifests as
+                     * BLK_REDSTONE_WIRE. The inventory column the
+                     * player spends is still BLK_REDSTONE — that's
+                     * decremented at the end of this branch. */
+                    BlockId place_blk = blk;
+                    if (place_blk == BLK_REDSTONE) place_blk = BLK_REDSTONE_WIRE;
+                    craft_world_set(h.fx, h.fy, h.fz, place_blk);
                     float feet_y2 = p->cam.pos.y - PLAYER_EYE;
                     if (aabb_blocked(p->cam.pos.x, feet_y2, p->cam.pos.z)) {
                         craft_world_set(h.fx, h.fy, h.fz, stash);

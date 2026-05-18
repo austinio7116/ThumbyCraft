@@ -496,6 +496,11 @@ static const CraftRecipe RECIPES[] = {
     { { BLK_REDSTONE, BLK_REDSTONE, BLK_REDSTONE,
         BLK_REDSTONE, BLK_REDSTONE, BLK_REDSTONE,
         BLK_REDSTONE, BLK_REDSTONE, BLK_REDSTONE }, BLK_REDSTONE_BLOCK, 1, "Redstone block" },
+
+    /* --- Lever (cobble base + stick handle, vanilla shape) --- */
+    { { BLK_AIR, BLK_STICK,  BLK_AIR,
+        BLK_AIR, BLK_COBBLE, BLK_AIR,
+        BLK_AIR, BLK_AIR,    BLK_AIR }, BLK_LEVER_OFF, 1, "Lever" },
 };
 #define RECIPE_COUNT ((int)(sizeof(RECIPES)/sizeof(RECIPES[0])))
 

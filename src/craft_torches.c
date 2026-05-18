@@ -92,14 +92,22 @@ void craft_torches_rebuild(void) {
         for (int lx = 0; lx < CRAFT_WORLD_X; lx++) {
             for (int wy = 0; wy < CRAFT_WORLD_Y; wy++) {
                 int idx = (wy * CRAFT_WORLD_Z + lz) * CRAFT_WORLD_X + lx;
-                if ((craft_world_blocks[idx] & 0x1F) != BLK_TORCH) continue;
+                BlockId b = (BlockId)(craft_world_blocks[idx] & 0x3F);
+                uint8_t kind;
+                if      (b == BLK_TORCH)             kind = TORCH_KIND_TORCH;
+                else if (b == BLK_REDSTONE_WIRE)     kind = TORCH_KIND_WIRE;
+                else if (b == BLK_REDSTONE_WIRE_ON)  kind = TORCH_KIND_WIRE_ON;
+                else continue;
                 if (s_torch_count >= CRAFT_MAX_TORCHES) goto done;
                 CraftTorch *t = &craft_torches[s_torch_count++];
                 t->alive  = true;
                 t->wx     = lx + ox;
                 t->wz     = lz + oz;
                 t->wy     = (int16_t)wy;
-                t->orient = orient_lookup(t->wx, t->wy, t->wz);
+                t->kind   = kind;
+                t->orient = (kind == TORCH_KIND_TORCH)
+                             ? orient_lookup(t->wx, t->wy, t->wz)
+                             : (uint8_t)FACE_PY;
             }
         }
     }
@@ -122,7 +130,27 @@ typedef struct {
     uint16_t color;
 } TorchCuboid;
 
-static void torch_parts(int orient, TorchCuboid out[2]) {
+static void wire_parts(bool powered, TorchCuboid out[2]) {
+    /* Two thin slabs on the floor of the cell, forming a "+". The
+     * raycaster treats wire cells as non-opaque, so this is the
+     * only thing the player ever sees of a wire. Powered wires use
+     * a brighter red — both slabs share the same colour. */
+    uint16_t c = powered ? rgb565(255, 70, 50)
+                          : rgb565(130, 35, 30);
+    /* East-west bar. */
+    out[0].cx = 0.5f; out[0].cy = 0.03f; out[0].cz = 0.5f;
+    out[0].hx = 0.48f; out[0].hy = 0.025f; out[0].hz = 0.06f;
+    out[0].color = c;
+    /* North-south bar. */
+    out[1].cx = 0.5f; out[1].cy = 0.03f; out[1].cz = 0.5f;
+    out[1].hx = 0.06f; out[1].hy = 0.025f; out[1].hz = 0.48f;
+    out[1].color = c;
+}
+
+static void torch_parts(int kind, int orient, TorchCuboid out[2]) {
+    if (kind == TORCH_KIND_WIRE)    { wire_parts(false, out); return; }
+    if (kind == TORCH_KIND_WIRE_ON) { wire_parts(true,  out); return; }
+
     /* Defaults — floor torch. */
     float sx = 0.5f, sz = 0.5f;
     float fx = 0.5f, fz = 0.5f;
@@ -204,7 +232,7 @@ int craft_torches_pick(const CraftCamera *cam, float max_dist) {
         CraftTorch *t = &craft_torches[i];
         if (!t->alive) continue;
         TorchCuboid parts[2];
-        torch_parts(t->orient, parts);
+        torch_parts(t->kind, t->orient, parts);
         for (int p = 0; p < 2; p++) {
             float bminx = (float)t->wx + parts[p].cx - parts[p].hx;
             float bminy = (float)t->wy + parts[p].cy - parts[p].hy;
@@ -265,7 +293,7 @@ void craft_torches_render(const CraftCamera *cam, uint16_t *fb) {
         if (dist2 > 50.0f * 50.0f) continue;
 
         TorchCuboid parts[2];
-        torch_parts(t->orient, parts);
+        torch_parts(t->kind, t->orient, parts);
 
         /* Compute the screen bbox containing all 8 corners of both
          * parts' world-space AABBs. */
@@ -366,8 +394,9 @@ void craft_torches_render(const CraftCamera *cam, uint16_t *fb) {
                 if (craft_zbuf[idx] <= (uint8_t)q) continue;
 
                 /* Flame stays bright regardless of time of day; stick
-                 * uses normal shading. */
-                if (!best_is_flame) {
+                 * uses normal shading. Wires both slabs always read
+                 * as glowing dust — same treatment as the flame. */
+                if (!best_is_flame && t->kind == TORCH_KIND_TORCH) {
                     best_color = shade565(best_color, 220);
                 }
                 fb[idx] = best_color;

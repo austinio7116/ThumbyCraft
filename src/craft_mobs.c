@@ -61,12 +61,14 @@ static const float mob_speed[MOB_TYPE_COUNT] = {
     1.8f,    /* skeleton — strafes / approaches at moderate pace */
     3.3f,    /* spider — fast */
     2.4f,    /* creeper — slightly faster than slime */
+    2.0f,    /* boss spider — slower than normal spider, intimidating bulk */
 };
 static const int mob_hp_table[MOB_TYPE_COUNT] = {
     3, 3, 1, 2,
     4,  /* skeleton */
     4,  /* spider   */
     3,  /* creeper  */
+    80, /* boss spider — only diamond sword damages (8 dmg/hit ≈ 10 hits) */
 };
 /* Aggro / contact distances and behavioural tunables.
  *
@@ -291,6 +293,34 @@ void craft_mobs_build_sprites(void) {
     m->radius  = 0.32f;   /* head diagonal sets the yaw-invariant envelope */
     m->height  = 1.70f;
 
+    /* BOSS SPIDER — same silhouette as the regular spider, every
+     * dimension and offset scaled by 3, brighter crimson marking
+     * and glowing eyes. ~3.6 wide × 1.5 tall × 3.0 deep — fills the
+     * room over a diamond block. */
+    m = &s_models[MOB_BOSS_SPIDER];
+    uint16_t BOSS    = rgb565(20, 15, 18);
+    uint16_t BOSS_H  = rgb565(45, 32, 38);
+    uint16_t BOSS_L  = rgb565(10,  8, 12);
+    uint16_t BOSS_EYE  = rgb565(255, 80, 60);
+    uint16_t BOSS_MARK = rgb565(220, 30, 30);
+    const float K = 3.0f;
+    m->parts[0]  = (CuboidPart){  0.00f, 0.60f,  0.60f,  0.48f, 0.30f, 0.54f, BOSS_H };
+    m->parts[1]  = (CuboidPart){  0.00f, 0.66f, -0.60f,  0.66f, 0.39f, 0.72f, BOSS   };
+    m->parts[2]  = (CuboidPart){  0.00f, 1.08f, -0.60f,  0.24f, 0.04f, 0.42f, BOSS_MARK };
+    m->parts[3]  = (CuboidPart){ -0.18f, 0.66f,  1.14f,  0.09f, 0.075f, 0.06f, BOSS_EYE };
+    m->parts[4]  = (CuboidPart){  0.18f, 0.66f,  1.14f,  0.09f, 0.075f, 0.06f, BOSS_EYE };
+    m->parts[5]  = (CuboidPart){ -1.26f, 0.48f,  0.84f,  0.66f, 0.075f, 0.09f, BOSS_L };
+    m->parts[6]  = (CuboidPart){ -1.32f, 0.48f,  0.27f,  0.66f, 0.075f, 0.09f, BOSS_L };
+    m->parts[7]  = (CuboidPart){ -1.32f, 0.48f, -0.36f,  0.66f, 0.075f, 0.09f, BOSS_L };
+    m->parts[8]  = (CuboidPart){ -1.26f, 0.48f, -0.96f,  0.66f, 0.075f, 0.09f, BOSS_L };
+    m->parts[9]  = (CuboidPart){  1.26f, 0.48f,  0.84f,  0.66f, 0.075f, 0.09f, BOSS_L };
+    m->parts[10] = (CuboidPart){  1.32f, 0.48f,  0.27f,  0.66f, 0.075f, 0.09f, BOSS_L };
+    m->parts[11] = (CuboidPart){  1.32f, 0.48f, -0.36f,  0.66f, 0.075f, 0.09f, BOSS_L };
+    m->parts[12] = (CuboidPart){  1.26f, 0.48f, -0.96f,  0.66f, 0.075f, 0.09f, BOSS_L };
+    m->n_parts = 13;
+    m->radius  = 0.72f * K;
+    m->height  = 0.50f * K;
+
     /* Sort every model's parts by volume descending. The mob renderer
      * iterates parts per pixel inside the screen bbox with a best_t
      * early-out — if we test the big body cube first it tightens
@@ -432,10 +462,17 @@ void craft_mobs_spawn_hostile(CraftPlayer *p, int n) {
     }
 }
 
-bool craft_mob_damage(int mob_index, int amt) {
+bool craft_mob_damage(int mob_index, int amt, BlockId weapon) {
     if (mob_index < 0 || mob_index >= CRAFT_MAX_MOBS) return false;
     CraftMob *m = &craft_mobs[mob_index];
     if (!m->alive) return false;
+    /* Boss spider filter: only the diamond sword penetrates its
+     * carapace. Anything else flashes the hurt animation (so the
+     * hit registers visually) but deals zero damage. */
+    if (m->type == MOB_BOSS_SPIDER && weapon != BLK_SWORD_DIAMOND) {
+        m->hurt_flash = 0.15f;
+        return false;
+    }
     m->hp -= amt;
     m->hurt_flash = 0.25f;
     /* Knock-back away from current heading. */
@@ -446,6 +483,26 @@ bool craft_mob_damage(int mob_index, int amt) {
         return true;
     }
     return false;
+}
+
+void craft_mobs_spawn_boss(int wx, int wy, int wz) {
+    for (int i = 0; i < CRAFT_MAX_MOBS; i++) {
+        CraftMob *m = &craft_mobs[i];
+        if (m->alive) continue;
+        m->alive    = true;
+        m->type     = MOB_BOSS_SPIDER;
+        m->pos      = v3((float)wx + 0.5f, (float)wy, (float)wz + 0.5f);
+        m->yaw      = 0.0f;
+        m->vel      = v3(0, 0, 0);
+        m->ai_timer = 0.5f;
+        m->hp       = mob_hp_table[MOB_BOSS_SPIDER];
+        m->hurt_flash    = 0.0f;
+        m->fire_cooldown = 0.0f;
+        m->fuse_t        = 0.0f;
+        return;
+    }
+    /* Pool full — silently drop. The redstone module already records
+     * the diamond block as activated, so we won't keep retrying. */
 }
 
 /* Ray-vs-mob picking. Returns index of closest hit mob within max_dist
@@ -789,6 +846,7 @@ void craft_mobs_tick(float dt, CraftPlayer *p) {
             case MOB_SKELETON: skeleton_ai(m, p, dt); break;
             case MOB_SPIDER:   spider_ai(m, p, dt); break;
             case MOB_CREEPER:  creeper_ai(m, p, dt); break;
+            case MOB_BOSS_SPIDER: spider_ai(m, p, dt); break;
             default:
                 if (m->ai_timer <= 0.0f) ai_decide(m);
                 break;
@@ -1125,7 +1183,7 @@ void craft_arrows_tick(float dt, CraftPlayer *p) {
                 }
             }
             if (hit_mob >= 0) {
-                craft_mob_damage(hit_mob, ARROW_DAMAGE);
+                craft_mob_damage(hit_mob, ARROW_DAMAGE, BLK_ARROW);
                 a->alive = false;
                 continue;
             }

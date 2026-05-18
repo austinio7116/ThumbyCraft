@@ -25,6 +25,7 @@ typedef enum {
     MOB_SKELETON,    /* hostile — ranged, stops at ~5 blocks and shoots arrows */
     MOB_SPIDER,      /* hostile — fast melee, low-profile */
     MOB_CREEPER,     /* hostile — melee, freezes + explodes on proximity */
+    MOB_BOSS_SPIDER, /* hostile — giant spider, only diamond sword damages */
     MOB_TYPE_COUNT
 } MobType;
 
@@ -64,9 +65,17 @@ void craft_arrows_spawn(Vec3 pos, Vec3 vel, bool from_player);
 void craft_arrows_tick(float dt, CraftPlayer *p);
 void craft_arrows_render(const CraftCamera *cam, uint16_t *fb);
 
-/* Damage a mob by `amt`. If hp drops to 0, mob dies (alive=false) and
- * the function returns true. */
-bool craft_mob_damage(int mob_index, int amt);
+/* Damage a mob by `amt`, attributing the hit to the given weapon
+ * BlockId (BLK_AIR for fists/contact). Returns true if the mob died.
+ * The weapon argument lets the boss spider filter out any source
+ * other than BLK_SWORD_DIAMOND — the rest of the call sites simply
+ * pass whatever they're currently using. */
+bool craft_mob_damage(int mob_index, int amt, BlockId weapon);
+
+/* Spawn the giant boss spider at the given world coords (one cell
+ * above the diamond block that triggered it). Called by craft_redstone
+ * when an unactivated diamond block becomes powered. */
+void craft_mobs_spawn_boss(int wx, int wy, int wz);
 
 /* Project the player's pick ray and find the closest live mob hit
  * within max_dist. Returns mob index or -1. */

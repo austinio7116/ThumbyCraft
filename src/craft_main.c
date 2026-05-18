@@ -25,6 +25,7 @@
 #include "craft_furnace.h"
 #include "craft_chests.h"
 #include "craft_water.h"
+#include "craft_redstone.h"
 
 #include <string.h>
 
@@ -91,6 +92,7 @@ void craft_main_init(uint16_t *fb, uint32_t seed) {
     craft_furnace_init();
     craft_chests_init();
     craft_water_init();
+    craft_redstone_init();
     /* Starter chest 2 blocks east of spawn — pre-stocked with a bow
      * and arrows so the player can verify the ranged loop without
      * having to melee a skeleton first. */
@@ -107,19 +109,19 @@ void craft_main_init(uint16_t *fb, uint32_t seed) {
             /* Full tool sampler for testing — every tier + every
              * material so the user can verify each in the held-item
              * viewport and combat without having to craft them. */
-            c->slots[ 0].blk = BLK_BOW;            c->slots[ 0].n = 1;
-            c->slots[ 1].blk = BLK_ARROW;          c->slots[ 1].n = 32;
-            c->slots[ 2].blk = BLK_PICKAXE_WOOD;   c->slots[ 2].n = 1;
-            c->slots[ 3].blk = BLK_PICKAXE_STONE;  c->slots[ 3].n = 1;
-            c->slots[ 4].blk = BLK_PICKAXE_IRON;   c->slots[ 4].n = 1;
-            c->slots[ 5].blk = BLK_SWORD_WOOD;     c->slots[ 5].n = 1;
-            c->slots[ 6].blk = BLK_SWORD_STONE;    c->slots[ 6].n = 1;
-            c->slots[ 7].blk = BLK_SWORD_IRON;     c->slots[ 7].n = 1;
-            c->slots[ 8].blk = BLK_TORCH;          c->slots[ 8].n = 16;
-            c->slots[ 9].blk = BLK_FURNACE;        c->slots[ 9].n = 1;
-            c->slots[10].blk = BLK_CHEST;          c->slots[10].n = 1;
-            c->slots[11].blk = BLK_STICK;          c->slots[11].n = 16;
-            c->slots[12].blk = BLK_IRON_INGOT;     c->slots[12].n = 8;
+            c->slots[ 0].blk = BLK_BOW;             c->slots[ 0].n = 1;
+            c->slots[ 1].blk = BLK_ARROW;           c->slots[ 1].n = 32;
+            c->slots[ 2].blk = BLK_PICKAXE_IRON;    c->slots[ 2].n = 1;
+            c->slots[ 3].blk = BLK_PICKAXE_DIAMOND; c->slots[ 3].n = 1;
+            c->slots[ 4].blk = BLK_SWORD_DIAMOND;   c->slots[ 4].n = 1;
+            c->slots[ 5].blk = BLK_DIAMOND_BLOCK;   c->slots[ 5].n = 4;
+            c->slots[ 6].blk = BLK_REDSTONE;        c->slots[ 6].n = 32;
+            c->slots[ 7].blk = BLK_LEVER_OFF;       c->slots[ 7].n = 4;
+            c->slots[ 8].blk = BLK_TORCH;           c->slots[ 8].n = 16;
+            c->slots[ 9].blk = BLK_FURNACE;         c->slots[ 9].n = 1;
+            c->slots[10].blk = BLK_CHEST;           c->slots[10].n = 1;
+            c->slots[11].blk = BLK_STICK;           c->slots[11].n = 16;
+            c->slots[12].blk = BLK_IRON_INGOT;      c->slots[12].n = 8;
         }
     }
     /* Defaults — start in survival with invert-Y on. Player can flip
@@ -231,6 +233,7 @@ static void handle_menu_result(CraftMenuResult r) {
             craft_chests_init();
             craft_furnace_init();
             craft_water_init();
+    craft_redstone_init();
             craft_drops_init();
             craft_particles_init();
 
@@ -307,6 +310,7 @@ void craft_main_step(const CraftInput *in, float dt, int fps) {
     craft_drops_tick(dt, &s_player);
     craft_furnace_tick(dt);
     craft_water_tick(dt);
+    craft_redstone_tick(dt);
     craft_mobs_day_night_tick(dt, craft_render_sun_y(), &s_player);
     craft_audio_music_set_sun(craft_render_sun_y());
     craft_audio_music_set_altitude(s_player.cam.pos.y / (float)CRAFT_WORLD_Y);
@@ -394,6 +398,7 @@ void craft_main_tick(const CraftInput *in, float dt) {
     craft_drops_tick(dt, &s_player);
     craft_furnace_tick(dt);
     craft_water_tick(dt);
+    craft_redstone_tick(dt);
     craft_mobs_day_night_tick(dt, craft_render_sun_y(), &s_player);
     craft_audio_music_set_sun(craft_render_sun_y());
     craft_audio_music_set_altitude(s_player.cam.pos.y / (float)CRAFT_WORLD_Y);

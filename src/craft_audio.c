@@ -190,7 +190,7 @@ void craft_audio_init(void) {
     sfx_rr = SFX_VOICE_FIRST;
     memset(&s_music, 0, sizeof s_music);
     s_music.rng         = 0xA110F00Du;
-    s_music.target_gain = 1.00f;
+    s_music.target_gain = 0.50f;   /* 50% by default — full volume + reverb tails is loud */
     s_music.cur_gain    = 0.0f;
     s_music.t           = 0.0f;
     s_music.seq_t       = 0.0f;

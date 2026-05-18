@@ -53,6 +53,8 @@ add_custom_command(
     COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}/generated
     COMMAND ${CMAKE_BINARY_DIR}/baker/bake_textures ${CRAFT_BAKED_C}
     DEPENDS thumbycraft_baker
+            ${SRC}/craft_blocks.c
+            ${SRC}/craft_blocks.h
     COMMENT "Baking craft_textures atlas to flash"
 )
 add_custom_target(generate_craft_textures DEPENDS ${CRAFT_BAKED_C})
@@ -83,6 +85,7 @@ set(CRAFT_DEVICE_SOURCES
     ${SRC}/craft_furnace.c
     ${SRC}/craft_chests.c
     ${SRC}/craft_water.c
+    ${SRC}/craft_redstone.c
     ${SRC}/craft_main.c
     ${CRAFT_BAKED_C}
 )

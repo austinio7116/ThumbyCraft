@@ -96,6 +96,10 @@ const char *craft_block_name(BlockId blk) {
         case BLK_GOLD_BLOCK:      return "gold block";
         case BLK_DIAMOND_BLOCK:   return "diamond block";
         case BLK_REDSTONE_BLOCK:  return "redstone block";
+        case BLK_LEVER_OFF:       return "lever";
+        case BLK_LEVER_ON:        return "lever (on)";
+        case BLK_REDSTONE_WIRE:
+        case BLK_REDSTONE_WIRE_ON: return "wire";
         default:                return "?";
     }
 }
@@ -827,5 +831,66 @@ void craft_blocks_build_textures(void) {
     solid_block_tex(BLK_GOLD_BLOCK,     245, 210,  55);
     solid_block_tex(BLK_DIAMOND_BLOCK,  130, 240, 250);
     solid_block_tex(BLK_REDSTONE_BLOCK, 210,  40,  40);
+
+    /* LEVER — cobble-style base square with a small wood handle.
+     * The OFF and ON variants flip the handle to one side or the
+     * other and tint it brighter when ON. Same texture on every
+     * face for simplicity (a real lever has facing, but voxel cells
+     * with rotation get expensive). */
+    for (int on = 0; on < 2; on++) {
+        BlockId blk = on ? BLK_LEVER_ON : BLK_LEVER_OFF;
+        uint16_t *side = &craft_textures[(blk * 3 + 1) * CRAFT_TEX_PIXELS];
+        speckle(side, 0x1EFE7u + on * 7u, 105, 105, 115, 35);
+        /* Base plate, rows 11..15. */
+        for (int y = 11; y < CRAFT_TEX_SIZE; y++) {
+            for (int x = 3; x < 13; x++) {
+                side[y * CRAFT_TEX_SIZE + x] = rgb565(90, 90, 100);
+            }
+        }
+        /* Handle — wood diagonal, leaning one way OFF, the other ON,
+         * tip brighter in ON state. */
+        uint16_t wood_d = rgb565(110, 75, 35);
+        uint16_t wood   = rgb565(150, 100, 50);
+        uint16_t tip    = on ? rgb565(255, 60, 40) : rgb565(50, 30, 30);
+        for (int i = 0; i < 7; i++) {
+            int yy = 11 - i;
+            int xx = on ? (7 + i / 2) : (7 - i / 2);
+            if (yy < 0 || yy >= CRAFT_TEX_SIZE) continue;
+            if (xx < 0 || xx >= CRAFT_TEX_SIZE) continue;
+            side[yy * CRAFT_TEX_SIZE + xx] = (i & 1) ? wood : wood_d;
+        }
+        int tx = on ? 10 : 4;
+        int ty = 4;
+        side[ty * CRAFT_TEX_SIZE + tx] = tip;
+        if (tx + 1 < CRAFT_TEX_SIZE) side[ty * CRAFT_TEX_SIZE + tx + 1] = tip;
+        if (ty + 1 < CRAFT_TEX_SIZE) side[(ty + 1) * CRAFT_TEX_SIZE + tx] = tip;
+        memcpy(&craft_textures[(blk * 3 + 0) * CRAFT_TEX_PIXELS],
+               side, sizeof(uint16_t) * CRAFT_TEX_PIXELS);
+        memcpy(&craft_textures[(blk * 3 + 2) * CRAFT_TEX_PIXELS],
+               side, sizeof(uint16_t) * CRAFT_TEX_PIXELS);
+    }
+
+    /* WIRE — thin red cross on a dark backdrop. WIRE_ON brightens
+     * the cross; WIRE off uses a dim red so unpowered wires are
+     * visually distinct from powered ones. */
+    for (int on = 0; on < 2; on++) {
+        BlockId blk = on ? BLK_REDSTONE_WIRE_ON : BLK_REDSTONE_WIRE;
+        uint16_t *side = &craft_textures[(blk * 3 + 1) * CRAFT_TEX_PIXELS];
+        for (int i = 0; i < CRAFT_TEX_PIXELS; i++) side[i] = rgb565(20, 20, 25);
+        uint16_t line = on ? rgb565(255, 60, 50) : rgb565(120, 30, 30);
+        uint16_t mid  = on ? rgb565(255, 100, 80) : rgb565(150, 50, 40);
+        for (int x = 1; x < 15; x++) {
+            side[7 * CRAFT_TEX_SIZE + x] = line;
+            side[8 * CRAFT_TEX_SIZE + x] = mid;
+        }
+        for (int y = 1; y < 15; y++) {
+            side[y * CRAFT_TEX_SIZE + 7] = line;
+            side[y * CRAFT_TEX_SIZE + 8] = mid;
+        }
+        memcpy(&craft_textures[(blk * 3 + 0) * CRAFT_TEX_PIXELS],
+               side, sizeof(uint16_t) * CRAFT_TEX_PIXELS);
+        memcpy(&craft_textures[(blk * 3 + 2) * CRAFT_TEX_PIXELS],
+               side, sizeof(uint16_t) * CRAFT_TEX_PIXELS);
+    }
 }
 #endif /* CRAFT_TEXTURES_BAKED */
