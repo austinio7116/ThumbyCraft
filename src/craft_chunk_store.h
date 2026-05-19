@@ -1,25 +1,26 @@
 /*
- * ThumbyCraft — flash-backed per-chunk mod store.
+ * ThumbyCraft — flash-backed per-chunk mod store (per-world, nonce-filtered).
  *
- * Purpose: persist player edits beyond the SRAM sliding window so
- * buildings survive walking far away, save+load cycles, and power
- * cycles.
+ * Each save slot owns a 1 MB chunk region. Plus one scratch region
+ * for unsaved new worlds. The store is "bound" to one region + nonce
+ * at a time; load/save only see sectors whose embedded nonce matches.
  *
- * Architecture:
- *   - World is divided into CHUNK_SIZE × CHUNK_SIZE chunks (X/Z).
- *   - Each chunk's mods (cells where the player changed the block
- *     id away from the procedural baseline) are stored in one flash
- *     sector (4 KB), keyed by hash(chunk_x, chunk_z) → slot index.
- *   - Linear probe within a small window of slots on collisions.
- *   - One slot can hold ~340 mods (16×16×64 cell chunk → plenty of
- *     headroom for buildings).
+ * The nonce makes "new world" free: instead of physically erasing
+ * 1 MB of flash (~3 s), the engine just picks a fresh random nonce.
+ * Old sectors remain physically present but get filtered out as
+ * stale on every read, and the next save into the same hash position
+ * just erase+programs over them.
  *
- * Lifecycle hooks from craft_world.c:
- *   - On chunk LEAVING the sliding window: gather its mods from the
- *     SRAM mod hash and craft_chunk_store_save(). Remove from hash.
- *   - On chunk ENTERING the sliding window: craft_chunk_store_load()
- *     and re-insert into the SRAM mod hash so the next regen pass
- *     picks them up.
+ * Nonce sources:
+ *   - SCRATCH: in-RAM uint32, random at boot, re-randomised on each
+ *     new-world action.
+ *   - Slot 0..3: the slot's metadata sector seq number. Every save
+ *     bumps the seq, so each save commits a fresh nonce automatically.
+ *
+ * Within each region: 256 sectors hashed by (cx, cz). Linear probe
+ * up to 8 slots on collision. A sector counts as "free for probe"
+ * if its magic is invalid OR its nonce doesn't match the current
+ * binding — both readers and writers treat them the same way.
  *
  * Host build: stub implementation in host/, no persistence.
  */
@@ -33,30 +34,41 @@
 #define CHUNK_STORE_MAX_MODS_PER_CHUNK 340
 
 typedef struct {
-    uint8_t lx;      /* 0..CHUNK_STORE_CHUNK_SIZE-1, chunk-local X */
-    uint8_t y;       /* 0..63 (CRAFT_WORLD_Y-1) */
-    uint8_t lz;      /* 0..CHUNK_STORE_CHUNK_SIZE-1, chunk-local Z */
+    uint8_t lx;
+    uint8_t y;
+    uint8_t lz;
     uint8_t blk;
 } ChunkMod;
 
-/* Initialise the store. world_seed is keyed into each record so a
- * fresh-world boot doesn't accidentally apply mods saved from a
- * previous seed. Idempotent — safe to call repeatedly. */
-void craft_chunk_store_init(uint32_t world_seed);
+/* Bind the store to (region, nonce). All subsequent load/save calls
+ * read/write that region's flash sectors and filter by nonce. Safe
+ * to call repeatedly. */
+void craft_chunk_store_bind(int region, uint32_t nonce);
 
-/* Load any persisted mods for chunk (cx, cz) into out[0..max-1].
- * Returns number of mods loaded (0 if no record / corrupt / seed
- * mismatch). max should be at least CHUNK_STORE_MAX_MODS_PER_CHUNK. */
+/* Currently bound region / nonce. */
+int      craft_chunk_store_bound(void);
+uint32_t craft_chunk_store_bound_nonce(void);
+
+/* Load mods for chunk (cx, cz) from the bound region — but only
+ * sectors whose nonce matches the bound nonce. Returns mod count
+ * (0 on miss / stale / corrupt). */
 int craft_chunk_store_load(int chunk_x, int chunk_z,
                            ChunkMod *out, int max_entries);
 
-/* Persist `n` mods for chunk (cx, cz) to flash. If n==0 the slot is
- * erased (chunk has no mods → free the sector). Returns true on
- * success. */
+/* Persist `n` mods for chunk (cx, cz) into the bound region, stamped
+ * with the bound nonce. n==0 erases the sector. */
 bool craft_chunk_store_save(int chunk_x, int chunk_z,
                             const ChunkMod *mods, int n);
 
-/* Wipe all stored chunks. Call when starting a fresh world. */
-void craft_chunk_store_clear(void);
+/* Bulk-erase a region. Only used for explicit "delete slot" actions
+ * (no such UI yet). Per-region nonce flipping is the cheap way to
+ * invalidate without touching flash. */
+void craft_chunk_store_erase_region(int region);
+
+/* Copy all valid sectors from `src_region` (matching `src_nonce`)
+ * into `dst_region`, re-stamped with `dst_nonce`. Used at save time
+ * to promote scratch chunks into a slot's region. */
+void craft_chunk_store_copy(int src_region, uint32_t src_nonce,
+                            int dst_region, uint32_t dst_nonce);
 
 #endif

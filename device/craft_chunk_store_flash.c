@@ -1,34 +1,24 @@
 /*
- * ThumbyCraft — flash-backed chunk mod store (device impl).
+ * ThumbyCraft — flash-backed chunk store (per-world, nonce-filtered).
  *
- * Flash layout — reserved 256 KB region positioned just below the
- * 16 KB save sectors at the top of flash.
- *
- *   [0]                  +
- *   [code, textures, ...]
- *   [...]                |
- *   [CHUNK_STORE]   ←----+ CRAFT_CHUNK_STORE_OFFSET, 256 KB
- *   [SAVE WEAR-RING] ←-- last 16 KB
- *
- * The chunk store is 64 slots × 4 KB each. Slot index is
- * hash(chunk_x, chunk_z) & 63. On collision we linear-probe up to
- * CS_PROBE slots forward; if none of those match (or are empty),
- * we overwrite the slot at the head of the probe sequence
- * (effectively a "most-recently-used wins" tiebreak — the cost of
- * unbounded hash collisions is bounded eviction, not corruption).
- *
- * Sector format:
- *   u32 magic = 'TCMK'        // 'M'od chu'K'
- *   u32 world_seed             // invalidates records from old worlds
+ * Layout: each region is 1 MB = 256 sectors of 4 KB. Sector format:
+ *   u32 magic    'TCM4'
+ *   u32 nonce    region-binding nonce (must match on read)
  *   i32 chunk_x
  *   i32 chunk_z
- *   u16 mod_count
- *   u16 _pad
- *   ChunkMod[mod_count]        // 4 bytes each
- *   u32 crc32                  // CRC over everything above
- *   (pad to sector boundary with 0xFF)
+ *   u16 mod_count + u16 reserved
+ *   ChunkMod mods[count]   (4 bytes each: lx, y, lz, blk)
+ *   u32 crc32   over [magic .. last mod]
+ *   padding to sector boundary
+ *
+ * Hashing: hash(cx, cz) -> sector index. Linear probe up to 8 slots
+ * on collision. A sector is "free for probe" if its magic is wrong
+ * OR its nonce doesn't match the bound nonce — i.e. stale sectors
+ * from a previous nonce look exactly like empty sectors. That's
+ * what makes "new world" a single-instruction operation (bump nonce).
  */
 #include "craft_chunk_store.h"
+#include "slot_layout.h"
 
 #include "pico/stdlib.h"
 #include "hardware/flash.h"
@@ -37,40 +27,33 @@
 
 #include <string.h>
 
-#define CS_MAGIC        0x4B4D4354u   /* 'TCMK' little-endian */
-#define CS_SECTOR_SIZE  FLASH_SECTOR_SIZE   /* 4096 */
-#define CS_SLOTS        64
-#define CS_PROBE        4
+#define CS_MAGIC        0x344D4354u   /* 'TCM4' — bumped from v1 'TCMK' */
+#define CS_SECTOR_SIZE  FLASH_SECTOR_SIZE
+#define CS_SLOTS        TBC_CHUNK_REGION_SECTORS
+#define CS_SLOTS_MASK   (CS_SLOTS - 1)
+#define CS_PROBE        8
 
-/* Reserved 256 KB below the save sectors. Save occupies 16 KB at
- * the top of the image (4 fixed slots × 4 KB), so chunk store lives
- * at (TOP - 16 KB - 256 KB). For the standalone 2 MB build that's
- * 2,097,152 - 16,384 - 262,144 = 1,818,624 bytes. */
-#ifndef CRAFT_CHUNK_STORE_OFFSET
-#  ifdef THUMBYONE_SLOT_MODE
-#    include "slot_layout.h"
-#    define CRAFT_CHUNK_STORE_OFFSET SLOT_CRAFT_CHUNK_STORE_OFFSET
-#  else
-#    define CRAFT_CHUNK_STORE_OFFSET \
-        (2u * 1024u * 1024u - 16u * 1024u - 256u * 1024u)
-#  endif
-#endif
+#define OFF_MAGIC      0
+#define OFF_NONCE      4
+#define OFF_CX         8
+#define OFF_CZ         12
+#define OFF_COUNT      16
+#define OFF_MODS       20
 
-static uint32_t s_world_seed = 0;
+static int       s_region = -1;
+static uint32_t  s_nonce;
 
 static const uint8_t *flash_at(uint32_t off) {
     return (const uint8_t *)(XIP_BASE + off);
 }
-
 static uint32_t rd32(const uint8_t *p) {
     return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
            ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
-
 static int32_t rd_i32(const uint8_t *p) { return (int32_t)rd32(p); }
-
 static void wr32(uint8_t *p, uint32_t v) {
-    p[0] = v; p[1] = v >> 8; p[2] = v >> 16; p[3] = v >> 24;
+    p[0] = v & 0xFF; p[1] = (v >> 8) & 0xFF;
+    p[2] = (v >> 16) & 0xFF; p[3] = (v >> 24) & 0xFF;
 }
 static void wr_i32(uint8_t *p, int32_t v) { wr32(p, (uint32_t)v); }
 
@@ -84,32 +67,24 @@ static uint32_t crc32_calc(const uint8_t *p, size_t n) {
     return ~c;
 }
 
-/* Mix chunk coords into a 32-bit hash, then take low CS_SLOTS_BITS. */
 static uint32_t slot_hash(int cx, int cz) {
-    uint32_t h = (uint32_t)cx * 0x9E3779B1u ^ (uint32_t)cz * 0x85EBCA77u;
+    uint32_t h = (uint32_t)cx * 0x9E3779B1u + (uint32_t)cz * 0x85EBCA77u;
     h ^= h >> 16;
-    h *= 0xC2B2AE3Du;
-    h ^= h >> 13;
-    return h;
+    return h & CS_SLOTS_MASK;
 }
 
-/* Sector layout offsets. */
-#define OFF_MAGIC      0
-#define OFF_SEED       4
-#define OFF_CX         8
-#define OFF_CZ         12
-#define OFF_COUNT      16
-#define OFF_MODS       20
-/* CRC is right after mods, then sector padded to CS_SECTOR_SIZE. */
+static uint32_t region_base(int r) { return TBC_CHUNK_REGION_OFFSET(r); }
 
-/* Returns true and fills cx/cz/count if the sector at off is a valid
- * record. Validity = correct magic, matching world seed, sane count,
- * and matching CRC. */
-static bool read_header(uint32_t off,
+/* Returns true when the sector at (r, slot) is a valid record with
+ * the supplied nonce. Mismatched-nonce sectors are treated as empty
+ * — that's the whole point of the nonce filter. */
+static bool read_header(int r, int slot, uint32_t nonce,
                         int *out_cx, int *out_cz, int *out_count) {
+    if ((unsigned)slot >= CS_SLOTS) return false;
+    uint32_t off = region_base(r) + (uint32_t)slot * CS_SECTOR_SIZE;
     const uint8_t *p = flash_at(off);
-    if (rd32(p + OFF_MAGIC) != CS_MAGIC) return false;
-    if (rd32(p + OFF_SEED)  != s_world_seed) return false;
+    if (rd32(p + OFF_MAGIC) != CS_MAGIC)  return false;
+    if (rd32(p + OFF_NONCE) != nonce)     return false;
     uint32_t cnt = rd32(p + OFF_COUNT) & 0xFFFFu;
     if (cnt > CHUNK_STORE_MAX_MODS_PER_CHUNK) return false;
     uint32_t data_end = OFF_MODS + cnt * sizeof(ChunkMod);
@@ -122,50 +97,51 @@ static bool read_header(uint32_t off,
     return true;
 }
 
-/* Walk the probe sequence for (cx, cz). Returns sector offset of the
- * matching record if one exists; -1 otherwise.
- * If `or_first_empty` is true, falls through to return the first
- * empty/invalid slot in the probe (suitable for insert). */
-static int32_t find_slot(int cx, int cz, bool or_first_empty) {
+/* Probe chain for (cx, cz) under the given nonce. Returns the slot
+ * with a matching record, or -1.
+ * If or_first_empty: returns the first probe slot that is empty OR
+ * holds a stale (mismatched-nonce) record, suitable for insertion.
+ * If everything in the probe chain is occupied with valid records
+ * for OTHER (cx, cz), evicts the probe head — bounded same-region
+ * eviction only. */
+static int find_slot(int r, uint32_t nonce, int cx, int cz, bool or_first_empty) {
     uint32_t h = slot_hash(cx, cz);
     int first_empty = -1;
     for (int p = 0; p < CS_PROBE; p++) {
-        int slot = (int)((h + (uint32_t)p) & (CS_SLOTS - 1));
-        uint32_t off = CRAFT_CHUNK_STORE_OFFSET + (uint32_t)slot * CS_SECTOR_SIZE;
+        int slot = (int)((h + (uint32_t)p) & CS_SLOTS_MASK);
         int scx, scz, scnt;
-        if (read_header(off, &scx, &scz, &scnt)) {
-            if (scx == cx && scz == cz) return (int32_t)off;
+        if (read_header(r, slot, nonce, &scx, &scz, &scnt)) {
+            if (scx == cx && scz == cz) return slot;
         } else if (first_empty < 0) {
             first_empty = slot;
         }
     }
-    if (or_first_empty && first_empty >= 0) {
-        return (int32_t)(CRAFT_CHUNK_STORE_OFFSET +
-                         (uint32_t)first_empty * CS_SECTOR_SIZE);
-    }
-    if (or_first_empty) {
-        /* No empty slot in the probe sequence — evict slot at head of
-         * probe (deterministic; trade some old chunk for the new one). */
-        int slot = (int)(h & (CS_SLOTS - 1));
-        return (int32_t)(CRAFT_CHUNK_STORE_OFFSET +
-                         (uint32_t)slot * CS_SECTOR_SIZE);
-    }
+    if (or_first_empty && first_empty >= 0) return first_empty;
+    if (or_first_empty) return (int)h;   /* evict probe head */
     return -1;
 }
 
-void craft_chunk_store_init(uint32_t world_seed) {
-    s_world_seed = world_seed;
-    /* Nothing to scan eagerly — load happens on demand per chunk. */
+/* --- Public API ------------------------------------------------- */
+
+void craft_chunk_store_bind(int region, uint32_t nonce) {
+    if ((unsigned)region >= TBC_REGION_COUNT) return;
+    s_region = region;
+    s_nonce  = nonce;
 }
+
+int      craft_chunk_store_bound(void)       { return s_region; }
+uint32_t craft_chunk_store_bound_nonce(void) { return s_nonce; }
 
 int craft_chunk_store_load(int chunk_x, int chunk_z,
                            ChunkMod *out, int max_entries) {
-    int32_t off = find_slot(chunk_x, chunk_z, false);
-    if (off < 0) return 0;
+    if (s_region < 0) return 0;
+    int slot = find_slot(s_region, s_nonce, chunk_x, chunk_z, false);
+    if (slot < 0) return 0;
     int count = 0;
-    if (!read_header((uint32_t)off, NULL, NULL, &count)) return 0;
+    if (!read_header(s_region, slot, s_nonce, NULL, NULL, &count)) return 0;
     if (count > max_entries) count = max_entries;
-    const uint8_t *p = flash_at((uint32_t)off + OFF_MODS);
+    uint32_t off = region_base(s_region) + (uint32_t)slot * CS_SECTOR_SIZE;
+    const uint8_t *p = flash_at(off + OFF_MODS);
     for (int i = 0; i < count; i++) {
         out[i].lx  = p[i * 4 + 0];
         out[i].y   = p[i * 4 + 1];
@@ -175,32 +151,40 @@ int craft_chunk_store_load(int chunk_x, int chunk_z,
     return count;
 }
 
-bool craft_chunk_store_save(int chunk_x, int chunk_z,
-                            const ChunkMod *mods, int n) {
-    if (n > CHUNK_STORE_MAX_MODS_PER_CHUNK) n = CHUNK_STORE_MAX_MODS_PER_CHUNK;
+/* Shared 4 KB staging page for save + copy. Keeps BSS down. */
+uint8_t cs_staging_page[CS_SECTOR_SIZE] __attribute__((aligned(4)));
 
-    /* Empty save = delete: find the existing record (if any) and
-     * erase its sector. Avoid touching flash if there's nothing here. */
-    if (n == 0) {
-        int32_t off = find_slot(chunk_x, chunk_z, false);
-        if (off < 0) return true;
-        uint32_t saved = save_and_disable_interrupts();
-        multicore_lockout_start_blocking();
-        flash_range_erase((uint32_t)off, CS_SECTOR_SIZE);
-        multicore_lockout_end_blocking();
-        restore_interrupts(saved);
-        return true;
-    }
+/* Write a fully-built sector buffer to (region, slot). Erase-then-
+ * program; lockout core 1 across the erase+program window. */
+static void program_sector(int region, int slot, const uint8_t *page) {
+    uint32_t off = region_base(region) + (uint32_t)slot * CS_SECTOR_SIZE;
+    uint32_t saved = save_and_disable_interrupts();
+    multicore_lockout_start_blocking();
+    flash_range_erase(off, CS_SECTOR_SIZE);
+    flash_range_program(off, page, CS_SECTOR_SIZE);
+    multicore_lockout_end_blocking();
+    restore_interrupts(saved);
+}
 
-    int32_t off = find_slot(chunk_x, chunk_z, true);
-    if (off < 0) return false;
+/* Erase a single sector — used for chunk deletes. */
+static void erase_sector(int region, int slot) {
+    uint32_t off = region_base(region) + (uint32_t)slot * CS_SECTOR_SIZE;
+    uint32_t saved = save_and_disable_interrupts();
+    multicore_lockout_start_blocking();
+    flash_range_erase(off, CS_SECTOR_SIZE);
+    multicore_lockout_end_blocking();
+    restore_interrupts(saved);
+}
 
-    static uint8_t page[CS_SECTOR_SIZE] __attribute__((aligned(4)));
-    for (uint32_t i = 0; i < sizeof page; i++) page[i] = 0xFF;
+/* Fill cs_staging_page with a chunk record (nonce-stamped, CRC'd). */
+static void build_sector(uint32_t nonce, int cx, int cz,
+                         const ChunkMod *mods, int n) {
+    uint8_t *page = cs_staging_page;
+    for (uint32_t i = 0; i < CS_SECTOR_SIZE; i++) page[i] = 0xFF;
     wr32   (page + OFF_MAGIC, CS_MAGIC);
-    wr32   (page + OFF_SEED,  s_world_seed);
-    wr_i32 (page + OFF_CX,    chunk_x);
-    wr_i32 (page + OFF_CZ,    chunk_z);
+    wr32   (page + OFF_NONCE, nonce);
+    wr_i32 (page + OFF_CX,    cx);
+    wr_i32 (page + OFF_CZ,    cz);
     page[OFF_COUNT]     = (uint8_t)(n & 0xFF);
     page[OFF_COUNT + 1] = (uint8_t)((n >> 8) & 0xFF);
     page[OFF_COUNT + 2] = 0;
@@ -214,23 +198,73 @@ bool craft_chunk_store_save(int chunk_x, int chunk_z,
     uint32_t data_end = OFF_MODS + (uint32_t)n * sizeof(ChunkMod);
     uint32_t crc = crc32_calc(page, data_end);
     wr32(page + data_end, crc);
+}
 
-    uint32_t saved = save_and_disable_interrupts();
-    multicore_lockout_start_blocking();
-    flash_range_erase((uint32_t)off, CS_SECTOR_SIZE);
-    flash_range_program((uint32_t)off, page, CS_SECTOR_SIZE);
-    multicore_lockout_end_blocking();
-    restore_interrupts(saved);
+bool craft_chunk_store_save(int chunk_x, int chunk_z,
+                            const ChunkMod *mods, int n) {
+    if (s_region < 0) return false;
+    if (n > CHUNK_STORE_MAX_MODS_PER_CHUNK) n = CHUNK_STORE_MAX_MODS_PER_CHUNK;
+
+    if (n == 0) {
+        int slot = find_slot(s_region, s_nonce, chunk_x, chunk_z, false);
+        if (slot < 0) return true;
+        erase_sector(s_region, slot);
+        return true;
+    }
+
+    int slot = find_slot(s_region, s_nonce, chunk_x, chunk_z, true);
+    if (slot < 0) return false;
+
+    build_sector(s_nonce, chunk_x, chunk_z, mods, n);
+    program_sector(s_region, slot, cs_staging_page);
     return true;
 }
 
-void craft_chunk_store_clear(void) {
-    uint32_t saved = save_and_disable_interrupts();
-    multicore_lockout_start_blocking();
-    for (int i = 0; i < CS_SLOTS; i++) {
-        uint32_t off = CRAFT_CHUNK_STORE_OFFSET + (uint32_t)i * CS_SECTOR_SIZE;
-        flash_range_erase(off, CS_SECTOR_SIZE);
+void craft_chunk_store_erase_region(int region) {
+    if ((unsigned)region >= TBC_REGION_COUNT) return;
+    /* Per-sector erase, no progress bar — only invoked from explicit
+     * destructive UI paths (none in Plan A). Roughly 3 s blocking. */
+    for (int s = 0; s < CS_SLOTS; s++) erase_sector(region, s);
+}
+
+void craft_chunk_store_copy(int src_region, uint32_t src_nonce,
+                            int dst_region, uint32_t dst_nonce) {
+    if ((unsigned)src_region >= TBC_REGION_COUNT) return;
+    if ((unsigned)dst_region >= TBC_REGION_COUNT) return;
+    if (src_region == dst_region && src_nonce == dst_nonce) return;
+
+    /* Walk source sectors. For each one whose magic + nonce match
+     * src_nonce, re-build the sector with dst_nonce and program at
+     * the same hash position in dst. Old dst sectors at other hash
+     * positions stay physically present but are stale (different
+     * nonce or never written) — they don't interfere because dst's
+     * binding will filter on dst_nonce. */
+    for (int slot = 0; slot < CS_SLOTS; slot++) {
+        const uint8_t *src = flash_at(region_base(src_region) +
+                                      (uint32_t)slot * CS_SECTOR_SIZE);
+        if (rd32(src + OFF_MAGIC) != CS_MAGIC) continue;
+        if (rd32(src + OFF_NONCE) != src_nonce) continue;
+        uint32_t cnt = rd32(src + OFF_COUNT) & 0xFFFFu;
+        if (cnt == 0 || cnt > CHUNK_STORE_MAX_MODS_PER_CHUNK) continue;
+        int cx = rd_i32(src + OFF_CX);
+        int cz = rd_i32(src + OFF_CZ);
+
+        /* Reuse build_sector via staging page so the CRC + nonce field
+         * are correct under dst_nonce. */
+        for (uint32_t i = 0; i < CS_SECTOR_SIZE; i++) cs_staging_page[i] = 0xFF;
+        wr32   (cs_staging_page + OFF_MAGIC, CS_MAGIC);
+        wr32   (cs_staging_page + OFF_NONCE, dst_nonce);
+        wr_i32 (cs_staging_page + OFF_CX,    cx);
+        wr_i32 (cs_staging_page + OFF_CZ,    cz);
+        cs_staging_page[OFF_COUNT]     = (uint8_t)(cnt & 0xFF);
+        cs_staging_page[OFF_COUNT + 1] = (uint8_t)((cnt >> 8) & 0xFF);
+        cs_staging_page[OFF_COUNT + 2] = 0;
+        cs_staging_page[OFF_COUNT + 3] = 0;
+        uint32_t data_end = OFF_MODS + cnt * sizeof(ChunkMod);
+        for (uint32_t i = OFF_MODS; i < data_end; i++)
+            cs_staging_page[i] = src[i];
+        uint32_t crc = crc32_calc(cs_staging_page, data_end);
+        wr32(cs_staging_page + data_end, crc);
+        program_sector(dst_region, slot, cs_staging_page);
     }
-    multicore_lockout_end_blocking();
-    restore_interrupts(saved);
 }

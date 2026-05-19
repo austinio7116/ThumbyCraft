@@ -37,12 +37,21 @@
 #include "craft_player.h"
 
 #define CRAFT_SAVE_MAGIC   0x54434654u
-#define CRAFT_SAVE_VERSION 2u
+/* v4 — per-world chunk-store layout with explicit chunks_nonce field
+ *      in the record. The nonce is independent of the slot's
+ *      sequence number so in-place saves keep the same nonce (no
+ *      "load shows stripped world" bug). */
+#define CRAFT_SAVE_VERSION 4u
 #define CRAFT_SAVE_MAX_BYTES (4096 - 32)   /* one flash sector minus header */
 
-/* Returns bytes written into `out` (≤ out_cap), or 0 on error.
- * Caller passes the seed used to regenerate the base terrain. */
-size_t craft_save_serialise(uint32_t seed,
+/* Public field offset for the chunks_nonce inside the serialised
+ * record. craft_main_load pre-reads it BEFORE deserialise so the
+ * chunk store can be bound with the right nonce ahead of the
+ * embedded world_load_around. */
+#define CRAFT_SAVE_OFF_CHUNKS_NONCE 12
+
+/* Returns bytes written into `out` (≤ out_cap), or 0 on error. */
+size_t craft_save_serialise(uint32_t seed, uint32_t chunks_nonce,
                             const CraftPlayer *p,
                             uint8_t *out, size_t out_cap);
 

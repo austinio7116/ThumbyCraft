@@ -66,26 +66,28 @@ static float getf(const uint8_t *p) {
  *
  * BLK_COUNT = 26 today → record size = 44 + 26*4 + 4 = 152 bytes.
  * Comfortably fits in any sane buffer. */
-#define HDR_OFF_MAGIC      0
-#define HDR_OFF_VERSION    4
-#define HDR_OFF_SEED       8
-#define HDR_OFF_MODE       12
-#define HDR_OFF_HP         13
-#define HDR_OFF_HOTBARIDX  14
-#define HDR_OFF_PAD        15
-#define HDR_OFF_HOTBAR     16
-#define HDR_OFF_CAM        (HDR_OFF_HOTBAR + CRAFT_HOTBAR_SLOTS)
-#define HDR_OFF_INVENTORY  (HDR_OFF_CAM + 5 * 4)
-#define SAVE_RECORD_BYTES  (HDR_OFF_INVENTORY + BLK_COUNT * 4 + 4)
+#define HDR_OFF_MAGIC         0
+#define HDR_OFF_VERSION       4
+#define HDR_OFF_SEED          8
+#define HDR_OFF_CHUNKS_NONCE  12   /* per-world chunk-store nonce */
+#define HDR_OFF_MODE          16
+#define HDR_OFF_HP            17
+#define HDR_OFF_HOTBARIDX     18
+#define HDR_OFF_PAD           19
+#define HDR_OFF_HOTBAR        20
+#define HDR_OFF_CAM           (HDR_OFF_HOTBAR + CRAFT_HOTBAR_SLOTS)
+#define HDR_OFF_INVENTORY     (HDR_OFF_CAM + 5 * 4)
+#define SAVE_RECORD_BYTES     (HDR_OFF_INVENTORY + BLK_COUNT * 4 + 4)
 
-size_t craft_save_serialise(uint32_t seed,
+size_t craft_save_serialise(uint32_t seed, uint32_t chunks_nonce,
                             const CraftPlayer *p,
                             uint8_t *out, size_t out_cap) {
     if (out_cap < SAVE_RECORD_BYTES) return 0;
 
-    put32(out + HDR_OFF_MAGIC,     CRAFT_SAVE_MAGIC);
-    put32(out + HDR_OFF_VERSION,   CRAFT_SAVE_VERSION);
-    put32(out + HDR_OFF_SEED,      seed);
+    put32(out + HDR_OFF_MAGIC,         CRAFT_SAVE_MAGIC);
+    put32(out + HDR_OFF_VERSION,       CRAFT_SAVE_VERSION);
+    put32(out + HDR_OFF_SEED,          seed);
+    put32(out + HDR_OFF_CHUNKS_NONCE,  chunks_nonce);
     out[HDR_OFF_MODE]      = (uint8_t)p->mode;
     out[HDR_OFF_HP]        = (uint8_t)p->hp;
     out[HDR_OFF_HOTBARIDX] = (uint8_t)p->hotbar_idx;
@@ -116,13 +118,9 @@ bool craft_save_deserialise(const uint8_t *in, size_t n,
 
     uint32_t seed = get32(in + HDR_OFF_SEED);
 
-    /* CRITICAL: re-init the chunk store with the saved seed BEFORE
-     * world_load_around runs. The chunk store rejects any flash
-     * record whose stored seed doesn't match s_world_seed, so if
-     * boot ran chunk_store_init with a random seed, every saved
-     * chunk would be rejected and the player's edits would appear
-     * lost on reload. */
-    craft_chunk_store_init(seed);
+    /* Chunk store binding is the caller's responsibility — it knows
+     * which save slot this blob came from. craft_main_load wires up
+     * craft_chunk_store_bind(slot) before calling deserialise. */
 
     /* Restore player state. */
     p->mode       = (CraftGameMode)in[HDR_OFF_MODE];

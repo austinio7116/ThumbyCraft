@@ -8,6 +8,7 @@
  * fulfil.
  */
 #include "craft_main.h"
+#include "slot_layout.h"
 #include "craft_world.h"
 #include "craft_gen.h"
 #include "craft_render.h"
@@ -85,6 +86,57 @@ void craft_main_set_save_slot(int slot) {
 }
 int craft_main_save_slot(void) { return s_save_slot; }
 
+/* Active chunk-store region — the region the engine reads / writes
+ * during gameplay. Stays at "none" until craft_main_init binds it
+ * (either to scratch for a new world or to a save slot for load).
+ *
+ * Per-region nonce: chunks in flash carry an embedded nonce; the
+ * binding only sees chunks whose nonce matches. SCRATCH's nonce is
+ * an in-RAM uint32 that re-randomises on every new-world action —
+ * that's what makes "New World" free (no flash erase needed).
+ * Save-slot nonces are the slot's metadata seq number; bumping the
+ * seq on every save automatically rotates the nonce. */
+#define TBC_REGION_NONE  (-1)
+static int      s_active_region = TBC_REGION_NONE;
+static uint32_t s_scratch_nonce;
+static uint32_t s_slot_nonce[TBC_SLOT_COUNT];
+
+extern uint32_t craft_platform_rand32(void);
+
+/* The nonce to use when binding `region`. Slot regions read from
+ * s_slot_nonce[], scratch reads from s_scratch_nonce. */
+static uint32_t region_nonce(int region) {
+    if (region == TBC_REGION_SCRATCH) return s_scratch_nonce;
+    if ((unsigned)region < TBC_SLOT_COUNT) return s_slot_nonce[region];
+    return 0;
+}
+
+void craft_main_set_active_region(int region) {
+    s_active_region = region;
+    craft_chunk_store_bind(region, region_nonce(region));
+}
+int  craft_main_active_region(void) { return s_active_region; }
+
+/* Fresh random nonce for SCRATCH. Called at boot and on every
+ * new-world (in-game or title). Old scratch sectors stay physically
+ * on flash but become invisible — find_slot treats them as empty. */
+static void scratch_new_nonce(void) {
+    s_scratch_nonce = craft_platform_rand32();
+    /* Avoid zero / 0xFFFFFFFF which could collide with erased flash
+     * or uninitialised stack patterns. Astronomically unlikely but
+     * cheap to guard against. */
+    if (s_scratch_nonce == 0 || s_scratch_nonce == 0xFFFFFFFFu) {
+        s_scratch_nonce = 0xA5A5A5A5u;
+    }
+}
+
+/* Set slot N's chunk-store nonce. Called by the save flow with the
+ * slot's freshly-bumped seq number. */
+void craft_main_set_slot_nonce(int slot, uint32_t nonce) {
+    if ((unsigned)slot < TBC_SLOT_COUNT) s_slot_nonce[slot] = nonce;
+}
+
+
 /* Flags the platform polls + clears. */
 static bool s_save_req;
 static bool s_load_req;
@@ -117,9 +169,21 @@ void craft_main_init(uint16_t *fb, uint32_t seed) {
     s_fb = fb;
     s_seed = seed;
     craft_world_init();
-    /* Seed the chunk store so the next load_around restores any
-     * mods previously persisted for this seed. */
-    craft_chunk_store_init(seed);
+    /* Pick a fresh scratch nonce on every init so any leftover
+     * scratch sectors from a previous power cycle are invisible.
+     * Boot path or in-game New World both go through here when the
+     * scratch region is the target — slot loads override below. */
+    scratch_new_nonce();
+    /* If no active region was set up by the platform before init
+     * (i.e. boot path skipped set_active_region), default to scratch
+     * — host build, fallback paths, etc. */
+    if (s_active_region == TBC_REGION_NONE) {
+        craft_main_set_active_region(TBC_REGION_SCRATCH);
+    } else {
+        /* Already bound — re-bind so the new scratch nonce takes
+         * effect if the active region is scratch. */
+        craft_main_set_active_region(s_active_region);
+    }
     craft_blocks_build_textures();
     craft_audio_init();
     /* Ambient "wind" hiss disabled — was barely audible at the
@@ -185,6 +249,19 @@ void craft_main_init(uint16_t *fb, uint32_t seed) {
 }
 
 bool craft_main_load(const uint8_t *blob, size_t n) {
+    /* Pre-extract the chunks_nonce from the blob and bind the chunk
+     * store BEFORE deserialise — world_load_around inside deserialise
+     * reads chunks from the active region with the active nonce, so
+     * the binding must be set first. The platform sets the save slot
+     * via craft_main_set_save_slot() before calling us. */
+    if (n < (CRAFT_SAVE_OFF_CHUNKS_NONCE + 4)) return false;
+    uint32_t chunks_nonce = (uint32_t)blob[CRAFT_SAVE_OFF_CHUNKS_NONCE + 0]
+                         | ((uint32_t)blob[CRAFT_SAVE_OFF_CHUNKS_NONCE + 1] << 8)
+                         | ((uint32_t)blob[CRAFT_SAVE_OFF_CHUNKS_NONCE + 2] << 16)
+                         | ((uint32_t)blob[CRAFT_SAVE_OFF_CHUNKS_NONCE + 3] << 24);
+    int slot = craft_main_save_slot();
+    craft_main_set_slot_nonce(slot, chunks_nonce);
+    craft_main_set_active_region(slot);
     uint32_t seed;
     if (!craft_save_deserialise(blob, n, &seed, &s_player)) return false;
     s_seed = seed;
@@ -192,13 +269,37 @@ bool craft_main_load(const uint8_t *blob, size_t n) {
 }
 
 size_t craft_main_save(uint8_t *out, size_t cap) {
-    /* Force-persist every chunk in the window that has mods. The
-     * regular dirty-queue drain only catches chunks marked dirty;
-     * the force variant also re-persists chunks that have mods in
-     * the hash but aren't currently dirty, guaranteeing the chunk
-     * store on flash matches the in-memory state at save time. */
+    /* Force-persist every chunk in the window that has mods to the
+     * CURRENT active region (scratch if unsaved-new-world, slot N if
+     * loaded). This guarantees flash matches SRAM before we either
+     * promote (copy to a new slot) or just rewrite metadata. */
     craft_world_chunks_force_persist_window();
-    return craft_save_serialise(s_seed, &s_player, out, cap);
+
+    int target_slot = craft_main_save_slot();
+    int active = craft_main_active_region();
+    uint32_t target_nonce;
+
+    if (active != target_slot) {
+        /* Promote scratch (or another slot) into target_slot. Pick
+         * a FRESH random nonce — old stale sectors in the target
+         * slot's region (from a previous save) stay invisible
+         * under the new binding. */
+        target_nonce = craft_platform_rand32();
+        if (target_nonce == 0 || target_nonce == 0xFFFFFFFFu) {
+            target_nonce = 0xC3C3C3C3u;
+        }
+        craft_chunk_store_copy(active, region_nonce(active),
+                               target_slot, target_nonce);
+        craft_main_set_slot_nonce(target_slot, target_nonce);
+        craft_main_set_active_region(target_slot);
+    } else {
+        /* In-place save: chunks are already live in target_slot
+         * under the slot's existing nonce. Keep the same nonce so
+         * the chunks remain readable on next load. */
+        target_nonce = region_nonce(target_slot);
+    }
+
+    return craft_save_serialise(s_seed, target_nonce, &s_player, out, cap);
 }
 
 bool craft_main_take_save_request(void) {
@@ -274,19 +375,19 @@ static void handle_menu_result(CraftMenuResult r) {
             uint32_t ns = next_seed();
             s_seed = ns;
 
-            /* Re-key the flash chunk store so records from the prior
-             * world are rejected, AND clear in-SRAM state that's
-             * keyed by world coords (mods, chests, furnaces, water,
-             * drops, particles). Without this, the previous world's
-             * starter chest + any player edits would re-apply on top
-             * of the new procedural terrain — that's the "chest in
-             * the sky" / accumulating-chests behaviour. */
-            craft_chunk_store_init(ns);
+            /* New world goes into the scratch region. With the
+             * nonce filter, "wipe scratch" reduces to picking a
+             * fresh random nonce — old scratch sectors stay
+             * physically on flash but become invisible. Save slots
+             * are untouched and only get overwritten on an
+             * explicit Save → slot N. */
+            scratch_new_nonce();
+            craft_main_set_active_region(TBC_REGION_SCRATCH);
             craft_world_reset_mods();
             craft_chests_init();
             craft_furnace_init();
             craft_water_init();
-    craft_redstone_init();
+            craft_redstone_init();
             craft_drops_init();
             craft_particles_init();
 

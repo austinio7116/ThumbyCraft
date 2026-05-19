@@ -58,6 +58,18 @@ const uint16_t *craft_main_thumb(void);
 void craft_main_set_save_slot(int slot);
 int  craft_main_save_slot(void);
 
+/* Chunk-store region currently in use. Slot index 0..3 = a saved
+ * world; TBC_REGION_SCRATCH (== TBC_SLOT_COUNT) = unsaved new
+ * world. Set by craft_main_init from the title screen / menu. */
+void craft_main_set_active_region(int region);
+int  craft_main_active_region(void);
+
+/* Set the chunk-store binding nonce for slot N. Platform calls this
+ * before save (with the freshly picked seq) and before load (with
+ * the seq read from the slot's metadata sector). */
+void craft_main_set_slot_nonce(int slot, uint32_t nonce);
+
+
 /* Accessor for the player (HUD draw + save). */
 const CraftPlayer *craft_main_player(void);
 

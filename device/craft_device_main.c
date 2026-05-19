@@ -26,6 +26,8 @@
 #include "craft_audio_pwm.h"
 #include "craft_save_flash.h"
 
+#include "slot_layout.h"
+#include "craft_chunk_store.h"
 #include "craft_main.h"
 #include "craft_audio.h"
 #include "craft_player.h"
@@ -121,10 +123,15 @@ static void edge_update(EdgeState *e, bool now, uint32_t t_ms,
 static void drain_requests(void) {
     if (craft_main_take_save_request()) {
         static uint8_t buf[CRAFT_SAVE_MAX_BYTES];
-        size_t n = craft_main_save(buf, sizeof buf);
         int slot = craft_main_save_slot();
-        if (n > 0 && craft_save_flash_write_slot(slot, buf, n,
-                                                 craft_main_thumb()))
+        /* craft_main_save picks/keeps the chunks nonce internally
+         * and stamps it into the serialised blob (HDR_OFF_CHUNKS_NONCE).
+         * The seq is independent and just gives the slot picker its
+         * "newest" ordering. */
+        size_t n = craft_main_save(buf, sizeof buf);
+        if (n > 0 && craft_save_flash_write_slot(
+                         slot, craft_save_flash_pick_next_seq(),
+                         buf, n, craft_main_thumb()))
             craft_menu_toast("World saved");
         else
             craft_menu_toast("Save failed");
@@ -133,10 +140,16 @@ static void drain_requests(void) {
         int slot = craft_main_save_slot();
         const uint8_t *blob;
         size_t blob_n = craft_save_flash_read_slot(slot, &blob);
-        if (blob_n > 0 && craft_main_load(blob, blob_n))
-            craft_menu_toast("World loaded");
-        else
+        if (blob_n > 0) {
+            /* craft_main_load pre-reads chunks_nonce from the blob
+             * and binds the chunk store. No upfront setup needed. */
+            if (craft_main_load(blob, blob_n))
+                craft_menu_toast("World loaded");
+            else
+                craft_menu_toast("Load failed");
+        } else {
             craft_menu_toast("No save found");
+        }
     }
     (void)craft_main_take_new_world_request();   /* engine handles it */
 }
@@ -157,6 +170,12 @@ int main(void) {
 #ifdef THUMBYONE_SLOT_MODE
     thumbyone_slot_init_brightness_and_led(true);
 #endif
+
+    /* Launch core 1 BEFORE the title screen so multicore_lockout
+     * works during pre-game flash operations (e.g. clear scratch
+     * region on New World). Core 1 spins on c1_run until the main
+     * render loop starts setting it. */
+    multicore_launch_core1(core1_main);
 
     splash();
 
@@ -192,34 +211,42 @@ int main(void) {
             const uint8_t *blob;
             size_t blob_n = craft_save_flash_read_slot(slot, &blob);
             if (blob_n > 0) {
-                /* Seed comes from inside the blob; craft_main_init
-                 * needs SOME seed up-front for chunk store + audio
-                 * init, so use slot 0's seed as a placeholder — the
-                 * subsequent craft_main_load re-seeds + reloads
-                 * everything correctly. */
-                uint32_t boot_seed = 0;
-                if (blob_n >= 12) {
-                    boot_seed = (uint32_t)blob[8] |
-                                ((uint32_t)blob[9]  << 8) |
-                                ((uint32_t)blob[10] << 16) |
-                                ((uint32_t)blob[11] << 24);
-                }
+                /* Pre-read seed + chunks_nonce out of the blob so
+                 * craft_main_init can bind the chunk store BEFORE
+                 * world_load_around runs. craft_main_load below
+                 * does the same binding inside (idempotent). */
+                uint32_t boot_seed = (uint32_t)blob[8]
+                                   | ((uint32_t)blob[9]  << 8)
+                                   | ((uint32_t)blob[10] << 16)
+                                   | ((uint32_t)blob[11] << 24);
+                uint32_t chunks_nonce = (uint32_t)blob[CRAFT_SAVE_OFF_CHUNKS_NONCE + 0]
+                                      | ((uint32_t)blob[CRAFT_SAVE_OFF_CHUNKS_NONCE + 1] << 8)
+                                      | ((uint32_t)blob[CRAFT_SAVE_OFF_CHUNKS_NONCE + 2] << 16)
+                                      | ((uint32_t)blob[CRAFT_SAVE_OFF_CHUNKS_NONCE + 3] << 24);
+                craft_main_set_save_slot(slot);
+                craft_main_set_slot_nonce(slot, chunks_nonce);
+                craft_main_set_active_region(slot);
                 craft_main_init(g_fb, boot_seed);
                 craft_main_load(blob, blob_n);
-                craft_main_set_save_slot(slot);
             } else {
-                /* Fallback if slot turned out invalid: new world. */
+                /* Fallback if slot turned out invalid: fresh world
+                 * in scratch. No flash wipe needed — craft_main_init
+                 * picks a fresh scratch nonce that invalidates any
+                 * stale sectors. */
+                craft_main_set_active_region(TBC_REGION_SCRATCH);
                 craft_main_init(g_fb, get_rand_32());
             }
         } else {
-            /* CRAFT_TITLE_NEW: fresh random world. */
+            /* CRAFT_TITLE_NEW: fresh random world. Same path —
+             * nonce rotation is instant. */
+            craft_main_set_active_region(TBC_REGION_SCRATCH);
             uint32_t seed = get_rand_32();
             craft_main_init(g_fb, seed);
         }
     }
 
-    /* Launch core1 for the top-half render. */
-    multicore_launch_core1(core1_main);
+    /* Core 1 was launched earlier (before title screen) so the
+     * multicore_lockout pattern works during pre-game flash ops. */
 
     absolute_time_t prev = get_absolute_time();
     int fps_value = 0, fps_frames = 0;

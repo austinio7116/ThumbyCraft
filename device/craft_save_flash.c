@@ -1,7 +1,7 @@
 /*
  * ThumbyCraft — flash-backed save sink (impl).
  *
- * 4 slots × 12 KB = 48 KB at CRAFT_SAVE_FLASH_OFFSET. Each slot owns
+ * 4 metadata sectors (4 KB each) at TBC_METADATA_BASE. Each slot owns
  * three contiguous 4 KB sectors: one for the metadata + save record,
  * two for the 64×64 RGB565 thumbnail. See craft_save_flash.h for the
  * on-flash layout.
@@ -12,30 +12,27 @@
  * per-slot record sector only sees one erase per save anyway.
  */
 #include "craft_save_flash.h"
+#include "slot_layout.h"
 
 #include "pico/stdlib.h"
 #include "hardware/flash.h"
 #include "hardware/sync.h"
 #include "pico/multicore.h"
 
-#define CRAFT_SAVE_MAGIC_FLASH 0x56534354u   /* 'TCSV' */
-
-#ifndef CRAFT_SAVE_FLASH_OFFSET
-#  ifdef THUMBYONE_SLOT_MODE
-#    include "slot_layout.h"
-#    define CRAFT_SAVE_FLASH_OFFSET SLOT_CRAFT_SAVE_OFFSET
-#  else
-     /* Standalone: top 16 KB (4 slots × 4 KB) of a 2 MB image. */
-#    define CRAFT_SAVE_FLASH_OFFSET (2u * 1024u * 1024u - 16u * 1024u)
-#  endif
-#endif
+/* Magic bumped from v1 ('TCSV' 0x56534354) so v1/v2 save sectors at
+ * the old top-of-flash address don't accidentally pass the new
+ * reader's checks. v3 saves live in their own metadata region at
+ * TBC_METADATA_BASE; old saves at 2 MB - 16 KB are unreachable
+ * regardless. */
+#define CRAFT_SAVE_MAGIC_FLASH 0x33534354u   /* 'TCS3' */
 
 #define SECTOR_SIZE        FLASH_SECTOR_SIZE    /* 4096 */
-#define SECTORS_PER_SLOT   1                    /* 4 KB per slot */
-#define SLOT_STRIDE        (SECTORS_PER_SLOT * SECTOR_SIZE)
+#define SLOT_STRIDE        SECTOR_SIZE          /* 4 KB per metadata sector */
 #define THUMB_BYTES        (CRAFT_SAVE_THUMB_PIX * 2u)  /* 32x32 = 2048 */
-#define THUMB_OFFSET       2048u                 /* offset within slot sector */
+#define THUMB_OFFSET       2048u                 /* offset within metadata sector */
 #define MAX_RECORD_BYTES   (THUMB_OFFSET - 16u)   /* leaves room for crc */
+
+#define SLOT_FLASH_OFFSET(s) TBC_METADATA_OFFSET(s)
 
 static const uint8_t *flash_at(uint32_t off) {
     return (const uint8_t *)(XIP_BASE + off);
@@ -60,7 +57,7 @@ static uint32_t crc32_calc(const uint8_t *p, size_t n) {
  * valid (magic + crc check out), else 0. */
 static uint32_t slot_record_len(int slot) {
     if ((unsigned)slot >= CRAFT_SAVE_SLOT_COUNT) return 0;
-    const uint8_t *p = flash_at(CRAFT_SAVE_FLASH_OFFSET + slot * SLOT_STRIDE);
+    const uint8_t *p = flash_at(SLOT_FLASH_OFFSET(slot));
     if (rd32(p) != CRAFT_SAVE_MAGIC_FLASH) return 0;
     uint32_t len = rd32(p + 8);
     if (len > MAX_RECORD_BYTES) return 0;
@@ -77,18 +74,22 @@ bool craft_save_flash_slot_used(int slot) {
     return slot_record_len(slot) > 0;
 }
 
+uint32_t craft_save_flash_slot_seq(int slot) {
+    if (slot_record_len(slot) == 0) return 0;
+    const uint8_t *p = flash_at(SLOT_FLASH_OFFSET(slot));
+    return rd32(p + 4);   /* offset 4 = seq */
+}
+
 size_t craft_save_flash_read_slot(int slot, const uint8_t **out_ptr) {
     uint32_t len = slot_record_len(slot);
     if (len == 0) { if (out_ptr) *out_ptr = NULL; return 0; }
-    if (out_ptr) *out_ptr = flash_at(CRAFT_SAVE_FLASH_OFFSET +
-                                     slot * SLOT_STRIDE + 12);
+    if (out_ptr) *out_ptr = flash_at(SLOT_FLASH_OFFSET(slot) + 12);
     return len;
 }
 
 const uint16_t *craft_save_flash_read_thumb(int slot) {
     if (!craft_save_flash_slot_used(slot)) return NULL;
-    return (const uint16_t *)flash_at(CRAFT_SAVE_FLASH_OFFSET +
-                                      slot * SLOT_STRIDE + THUMB_OFFSET);
+    return (const uint16_t *)flash_at(SLOT_FLASH_OFFSET(slot) + THUMB_OFFSET);
 }
 
 /* Find the highest seq across all slots; new writes use seq+1 so the
@@ -97,7 +98,7 @@ const uint16_t *craft_save_flash_read_thumb(int slot) {
 static uint32_t newest_seq(void) {
     uint32_t best = 0;
     for (int s = 0; s < CRAFT_SAVE_SLOT_COUNT; s++) {
-        const uint8_t *p = flash_at(CRAFT_SAVE_FLASH_OFFSET + s * SLOT_STRIDE);
+        const uint8_t *p = flash_at(SLOT_FLASH_OFFSET(s));
         if (rd32(p) != CRAFT_SAVE_MAGIC_FLASH) continue;
         if (slot_record_len(s) == 0) continue;
         uint32_t seq = rd32(p + 4);
@@ -106,11 +107,14 @@ static uint32_t newest_seq(void) {
     return best;
 }
 
-bool craft_save_flash_write_slot(int slot,
+uint32_t craft_save_flash_pick_next_seq(void) { return newest_seq() + 1; }
+
+bool craft_save_flash_write_slot(int slot, uint32_t seq,
                                  const uint8_t *buf, size_t n,
                                  const uint16_t *thumb) {
     if ((unsigned)slot >= CRAFT_SAVE_SLOT_COUNT) return false;
     if (n > MAX_RECORD_BYTES) return false;
+    if (seq == 0) seq = newest_seq() + 1;
 
     /* Build the header region in a single staging buffer. The record
      * body can exceed a 256-byte flash page (BLK_COUNT * 4 alone is
@@ -122,15 +126,14 @@ bool craft_save_flash_write_slot(int slot,
     #define HDR_BUF_SIZE    (HDR_BUF_PAGES * FLASH_PAGE_SIZE)
     static uint8_t hdr_buf[HDR_BUF_SIZE] __attribute__((aligned(4)));
     for (size_t i = 0; i < sizeof hdr_buf; i++) hdr_buf[i] = 0xFF;
-    uint32_t next_seq = newest_seq() + 1;
     hdr_buf[0] = CRAFT_SAVE_MAGIC_FLASH & 0xFF;
     hdr_buf[1] = (CRAFT_SAVE_MAGIC_FLASH >> 8) & 0xFF;
     hdr_buf[2] = (CRAFT_SAVE_MAGIC_FLASH >> 16) & 0xFF;
     hdr_buf[3] = (CRAFT_SAVE_MAGIC_FLASH >> 24) & 0xFF;
-    hdr_buf[4] = next_seq & 0xFF;
-    hdr_buf[5] = (next_seq >> 8) & 0xFF;
-    hdr_buf[6] = (next_seq >> 16) & 0xFF;
-    hdr_buf[7] = (next_seq >> 24) & 0xFF;
+    hdr_buf[4] = seq & 0xFF;
+    hdr_buf[5] = (seq >> 8) & 0xFF;
+    hdr_buf[6] = (seq >> 16) & 0xFF;
+    hdr_buf[7] = (seq >> 24) & 0xFF;
     hdr_buf[8]  = (uint32_t)n & 0xFF;
     hdr_buf[9]  = ((uint32_t)n >> 8) & 0xFF;
     hdr_buf[10] = ((uint32_t)n >> 16) & 0xFF;
@@ -151,7 +154,7 @@ bool craft_save_flash_write_slot(int slot,
     if (prog_len > HDR_BUF_SIZE)  prog_len = HDR_BUF_SIZE;
     if (prog_len > THUMB_OFFSET)  prog_len = THUMB_OFFSET;
 
-    uint32_t off = CRAFT_SAVE_FLASH_OFFSET + (uint32_t)slot * SLOT_STRIDE;
+    uint32_t off = SLOT_FLASH_OFFSET(slot);
     uint32_t saved = save_and_disable_interrupts();
     multicore_lockout_start_blocking();
     /* Erase the slot's single 4 KB sector. The header + record live
@@ -179,7 +182,7 @@ size_t craft_save_flash_read(const uint8_t **out_ptr) {
     return craft_save_flash_read_slot(0, out_ptr);
 }
 bool craft_save_flash_write(const uint8_t *buf, size_t n) {
-    return craft_save_flash_write_slot(0, buf, n, NULL);
+    return craft_save_flash_write_slot(0, 0, buf, n, NULL);
 }
 
 /* --- Engine-facing portable hooks (declared in craft_save.h) ----

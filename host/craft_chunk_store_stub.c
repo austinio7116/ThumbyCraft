@@ -1,16 +1,19 @@
 /*
- * ThumbyCraft — chunk mod store (host stub).
+ * ThumbyCraft — chunk store (host stub, nonce-aware API).
  *
- * The host build doesn't need flash persistence — we exercise the
- * gameplay against a transient world only. Stub everything out to
- * no-ops so the shared craft_world.c can call the API unconditionally
- * without ifdef noise.
+ * Host has no flash. The whole API is a no-op; the host's mod hash
+ * survives until the process exits and the next run starts fresh.
  */
 #include "craft_chunk_store.h"
 
-void craft_chunk_store_init(uint32_t world_seed) {
-    (void)world_seed;
+static int      s_region = -1;
+static uint32_t s_nonce;
+
+void craft_chunk_store_bind(int region, uint32_t nonce) {
+    s_region = region; s_nonce = nonce;
 }
+int      craft_chunk_store_bound(void)       { return s_region; }
+uint32_t craft_chunk_store_bound_nonce(void) { return s_nonce; }
 
 int craft_chunk_store_load(int chunk_x, int chunk_z,
                            ChunkMod *out, int max_entries) {
@@ -24,4 +27,8 @@ bool craft_chunk_store_save(int chunk_x, int chunk_z,
     return true;
 }
 
-void craft_chunk_store_clear(void) {}
+void craft_chunk_store_erase_region(int region) { (void)region; }
+void craft_chunk_store_copy(int src_region, uint32_t src_nonce,
+                            int dst_region, uint32_t dst_nonce) {
+    (void)src_region; (void)src_nonce; (void)dst_region; (void)dst_nonce;
+}
