@@ -844,6 +844,30 @@ static inline uint16_t shade565(uint16_t c, int m) {
     return (uint16_t)((r << 11) | (g << 5) | b);
 }
 
+/* Highlight cell — set by the picker each frame so the sprite for
+ * the picked cell renders in a brighter tint. */
+static int  s_hl_wx, s_hl_wy, s_hl_wz;
+static bool s_hl_enabled;
+
+void craft_torches_set_highlight(int wx, int wy, int wz, bool enabled) {
+    s_hl_wx = wx;
+    s_hl_wy = wy;
+    s_hl_wz = wz;
+    s_hl_enabled = enabled;
+}
+
+/* Mix `c` toward white by `t` in [0..255]. Cheap per-channel blend
+ * for the highlight tint. */
+static uint16_t blend_to_white(uint16_t c, int t) {
+    int r = (c >> 11) & 0x1F;
+    int g = (c >>  5) & 0x3F;
+    int b =  c        & 0x1F;
+    r = r + ((0x1F - r) * t >> 8);
+    g = g + ((0x3F - g) * t >> 8);
+    b = b + ((0x1F - b) * t >> 8);
+    return (uint16_t)((r << 11) | (g << 5) | b);
+}
+
 void craft_torches_render(const CraftCamera *cam, uint16_t *fb) {
     if (s_torch_count == 0) return;
 
@@ -862,6 +886,10 @@ void craft_torches_render(const CraftCamera *cam, uint16_t *fb) {
     for (int i = 0; i < CRAFT_MAX_TORCHES; i++) {
         CraftTorch *t = &craft_torches[i];
         if (!t->alive) continue;
+        bool highlight = s_hl_enabled &&
+                         t->wx == s_hl_wx &&
+                         t->wy == s_hl_wy &&
+                         t->wz == s_hl_wz;
 
         /* Cull torches outside the visible distance. */
         float dxp = (float)t->wx + 0.5f - cam->pos.x;
@@ -987,6 +1015,9 @@ void craft_torches_render(const CraftCamera *cam, uint16_t *fb) {
                      * physical wood, not glowing. */
                     best_color = shade565(best_color, 200);
                 }
+                /* Picker highlight — tint toward white on the
+                 * selected cell. */
+                if (highlight) best_color = blend_to_white(best_color, 110);
                 fb[idx] = best_color;
                 craft_zbuf[idx] = (uint8_t)q;
             }

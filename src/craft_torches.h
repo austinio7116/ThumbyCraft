@@ -89,6 +89,12 @@ int  craft_torches_pick(const CraftCamera *cam, float max_dist);
  * after the world strip render, before HUD. */
 void craft_torches_render(const CraftCamera *cam, uint16_t *fb);
 
+/* Highlight a single sprite cell — call before craft_torches_render
+ * each frame with the picker's hit cell so the cuboid for that cell
+ * paints in a brighter "selected" tint. Pass `enabled = false` to
+ * disable highlighting for the next frame. */
+void craft_torches_set_highlight(int wx, int wy, int wz, bool enabled);
+
 /* Build the cuboid model for a sprite-based block (ladder, door,
  * trapdoor, wire, pad) for use by the held-item viewport. Writes
  * up to `max_n` parts to `out`, in CELL-LOCAL coords (0..1 — the

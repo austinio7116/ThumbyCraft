@@ -39,6 +39,7 @@ void craft_render_set_fog(bool on) { s_fog_enabled = on; }
 void craft_render_set_clouds(bool on) { s_clouds_enabled = on; }
 bool craft_render_get_clouds(void) { return s_clouds_enabled; }
 float craft_render_sun_y(void) { return s_sun_y; }
+int   craft_render_brightness_q8(void) { return s_brightness_q8; }
 
 /* Recompute the sky / brightness lookup for the new sun position.
  * Called once per frame from render_begin. */
@@ -248,27 +249,25 @@ INLINE_HOT TraceHit trace_ray(Vec3 origin, Vec3 dir, bool stop_at_water) {
          * top 2 bits, which carry the water-flow level field. */
         BlockId blk = (BlockId)(craft_world_blocks[idx] & 0x3F);
         if (blk == BLK_AIR) continue;
-        /* Torches and redstone wires are smaller-than-cube objects
-         * rendered in a separate 3D post-pass (craft_torches). The
-         * raycaster sees the cell as empty so the player can see
-         * through it and the small sprite sits properly inside it. */
-        if (blk == BLK_TORCH) continue;
-        if (blk == BLK_REDSTONE_WIRE || blk == BLK_REDSTONE_WIRE_ON) continue;
-        /* Ladder + pressure pad + doors + trapdoors render as
-         * thin-slab overlays via the torch post-pass (BOTH closed
-         * and open states). The raycaster skips them so the slab
-         * post-pass owns the pixels; collision still blocks the
-         * closed states via craft_block_solid. */
-        if (blk == BLK_LADDER || blk == BLK_PRESSURE_PAD) continue;
-        if (blk == BLK_DOOR_OFF || blk == BLK_DOOR_ON) continue;
-        if (blk == BLK_TRAPDOOR_OFF || blk == BLK_TRAPDOOR_ON) continue;
-        /* Pistons render via sprite overlay but must STOP the picker
-         * ray so the player can place blocks on the piston's head face.
-         * In pick mode (stop_at_water=true) they behave as solid cells;
-         * during rendering they pass through and the sprite paints. */
-        if ((blk == BLK_PISTON_OFF || blk == BLK_PISTON_ON ||
-             blk == BLK_PISTON_ARM) && !stop_at_water) continue;
-        if (blk == BLK_LEVER_OFF || blk == BLK_LEVER_ON) continue;
+        /* Sprite blocks (torches, wires, ladders, pads, doors, trap-
+         * doors, pistons, levers) render via the craft_torches sprite
+         * post-pass — smaller-than-cube cuboid models drawn AFTER
+         * the world raycaster. During the render pass these cells
+         * pass through (the sprite paints over the cube area). During
+         * pick (stop_at_water=true) the rays STOP on these cells so
+         * the player can aim at them, place blocks on their faces,
+         * and select the whole cell with the picker outline. The
+         * sprite render gates picker highlight on h.bx/by/bz. */
+        bool is_sprite_cell =
+            (blk == BLK_TORCH) ||
+            (blk == BLK_REDSTONE_WIRE) || (blk == BLK_REDSTONE_WIRE_ON) ||
+            (blk == BLK_LADDER)        || (blk == BLK_PRESSURE_PAD) ||
+            (blk == BLK_DOOR_OFF)      || (blk == BLK_DOOR_ON) ||
+            (blk == BLK_TRAPDOOR_OFF)  || (blk == BLK_TRAPDOOR_ON) ||
+            (blk == BLK_PISTON_OFF)    || (blk == BLK_PISTON_ON) ||
+            (blk == BLK_PISTON_ARM) ||
+            (blk == BLK_LEVER_OFF)     || (blk == BLK_LEVER_ON);
+        if (is_sprite_cell && !stop_at_water) continue;
         if (blk == BLK_WATER) {
             if (!stop_at_water) {
                 h.passed_water = true;

@@ -58,9 +58,36 @@ static void splash(void) {
     craft_lcd_wait_idle();
 }
 
-/* --- Core1 render strip ------------------------------------------- */
-static volatile int  c1_y_start, c1_y_end;
-static volatile bool c1_run, c1_done;
+/* --- Core1 render: tile-based work stealing ----------------------
+ *
+ * The screen is sliced into TILE_COUNT horizontal bands of TILE_H
+ * rows each (16 × 8 = 128 rows). Both cores grab tiles from a single
+ * atomic counter — whichever core finishes its current tile first
+ * grabs the next one. Self-balancing under any view direction:
+ * sky-heavy strips and texture-heavy strips redistribute themselves
+ * automatically without core 0 sitting idle waiting on core 1 (or
+ * vice versa).
+ *
+ * Tile size of 8 rows is a sweet spot: per-tile cost ≈ 1024 pixels
+ * × a few μs each ≈ 3–5 ms, far larger than the ~50 ns atomic CAS
+ * overhead. 16 tiles gives a worst-case load mismatch of one tile
+ * (~6 %), much better than the static 50/50 split. */
+#define TILE_H            8
+#define TILE_COUNT        (CRAFT_FB_H / TILE_H)
+
+static volatile uint32_t s_next_tile;
+static volatile bool     c1_run, c1_done;
+
+static void run_tiles(void) {
+    for (;;) {
+        uint32_t t = __atomic_fetch_add(&s_next_tile, 1, __ATOMIC_RELAXED);
+        if (t >= TILE_COUNT) break;
+        int y0 = (int)t * TILE_H;
+        int y1 = y0 + TILE_H;
+        if (y1 > CRAFT_FB_H) y1 = CRAFT_FB_H;
+        craft_main_render_strip(y0, y1);
+    }
+}
 
 static void core1_main(void) {
     /* Register as the lockout victim — when core 0 needs to do a
@@ -72,7 +99,7 @@ static void core1_main(void) {
     for (;;) {
         while (!c1_run) tight_loop_contents();
         c1_run = false;
-        craft_main_render_strip(c1_y_start, c1_y_end);
+        run_tiles();
         c1_done = true;
     }
 }
@@ -113,6 +140,10 @@ static void drain_requests(void) {
     }
     (void)craft_main_take_new_world_request();   /* engine handles it */
 }
+
+/* Platform-random hook used by craft_main's next_seed(). On RP2350
+ * get_rand_32 reads ROSC entropy + boot-rom RNG, fresh per call. */
+uint32_t craft_platform_rand32(void) { return get_rand_32(); }
 
 int main(void) {
     /* Crank to 280 MHz — the raycaster wants every cycle. */
@@ -241,13 +272,14 @@ int main(void) {
          * shared state, can't race with core1). */
         craft_main_render_begin();
 
-        /* Phase 2b: split-render top half on core1, bottom on core0. */
-        c1_y_start = 0;
-        c1_y_end   = CRAFT_FB_H / 2;
+        /* Phase 2b: tile-based work-stealing render. Reset the
+         * shared tile counter and release core 1 — both cores then
+         * grab tiles from `s_next_tile` until they're exhausted. */
+        __atomic_store_n(&s_next_tile, 0, __ATOMIC_RELAXED);
         c1_done = false;
         __sync_synchronize();
         c1_run = true;
-        craft_main_render_strip(CRAFT_FB_H / 2, CRAFT_FB_H);
+        run_tiles();
         while (!c1_done) tight_loop_contents();
         __sync_synchronize();
 

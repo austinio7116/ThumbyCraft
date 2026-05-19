@@ -123,6 +123,10 @@ static void try_save(void) {
     printf("[host] saved %zu bytes\n", n);
 }
 
+/* Platform-random hook used by craft_main's next_seed() — host uses
+ * the C library RNG seeded from time(); see SDL_Init below. */
+uint32_t craft_platform_rand32(void) { return (uint32_t)rand(); }
+
 int main(int argc, char **argv) {
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS | SDL_INIT_AUDIO) != 0) {
         fprintf(stderr, "SDL_Init: %s\n", SDL_GetError()); return 1;
@@ -136,6 +140,9 @@ int main(int argc, char **argv) {
 
     audio_init();
 
+    /* Seed the C library RNG so craft_platform_rand32 (and any later
+     * srand consumers) produce uncorrelated streams across runs. */
+    srand((unsigned)time(NULL));
     uint32_t seed = (argc > 1) ? (uint32_t)atoi(argv[1]) : (uint32_t)time(NULL);
     printf("[host] seed = %u\n", seed);
     craft_main_init(g_fb, seed);

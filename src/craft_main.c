@@ -101,20 +101,21 @@ static float s_held_swing_t = 0.0f;
 #define PERSIST_PERIOD 2.0f
 static float s_persist_timer = PERSIST_PERIOD;
 
-/* RNG helper for new-world seeds. Cheap LCG seeded from time
- * accumulator + xorshift, since we don't have rand() everywhere. */
-static uint32_t s_rng = 0x12345678u;
+/* RNG helper for new-world seeds.
+ *
+ * Previously a fixed-seed xorshift LCG that could produce the same
+ * sequence across boots — two players hitting "New World" right after
+ * power-on would get the same world. Now we pull from the platform's
+ * hardware RNG (Pico SDK get_rand_32 on device, time-of-day on host)
+ * so every new-world action gets uncorrelated entropy. */
+extern uint32_t craft_platform_rand32(void);
 static uint32_t next_seed(void) {
-    s_rng ^= s_rng << 13;
-    s_rng ^= s_rng >> 17;
-    s_rng ^= s_rng << 5;
-    return s_rng ^ (uint32_t)(s_world_time * 1000.0f);
+    return craft_platform_rand32();
 }
 
 void craft_main_init(uint16_t *fb, uint32_t seed) {
     s_fb = fb;
     s_seed = seed;
-    s_rng ^= seed;
     craft_world_init();
     /* Seed the chunk store so the next load_around restores any
      * mods previously persisted for this seed. */
@@ -516,6 +517,15 @@ void craft_main_draw_hud(int fps) {
     craft_mobs_render(&s_player.cam, s_fb);
     craft_arrows_render(&s_player.cam, s_fb);
     craft_drops_render(&s_player.cam, s_fb);
+    /* Pre-compute the picker hit so the sprite render can highlight
+     * the targeted cell in a brighter tint. The render_pick_outline
+     * call below uses the same trace result but only for the
+     * outline; cheap (one trace per frame). */
+    {
+        CraftRayHit ph = craft_render_pick(&s_player.cam);
+        bool en = ph.hit && ph.distance <= 8.0f;
+        craft_torches_set_highlight(ph.bx, ph.by, ph.bz, en);
+    }
     craft_torches_render(&s_player.cam, s_fb);
     craft_particles_render(&s_player.cam, s_fb);
     craft_render_pick_outline(&s_player.cam, s_fb);

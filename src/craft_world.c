@@ -297,11 +297,25 @@ static inline void light_set_max(int idx, uint8_t level) {
     }
 }
 
-/* True if a torch's light can pass through this block — air, water,
- * glass, and the torch itself. Anything else blocks propagation. */
+/* True if a torch's light can pass through this block. Air / water /
+ * glass / torch as before, PLUS every sprite-rendered cell: the
+ * sprite cuboid is small relative to its cell (ladder rails on one
+ * wall, wire dust on the floor, a thin door panel etc.) and the
+ * surrounding cell volume is empty, so the BFS should treat them
+ * the same as air for light propagation. Without this, a wire on
+ * the floor casts a "full cube" shadow that darkens cells behind
+ * it as if the cell were solid. */
 static inline bool light_transparent(BlockId b) {
-    return b == BLK_AIR || b == BLK_WATER ||
-           b == BLK_GLASS || b == BLK_TORCH;
+    if (b == BLK_AIR   || b == BLK_WATER ||
+        b == BLK_GLASS || b == BLK_TORCH) return true;
+    if (b == BLK_LADDER        || b == BLK_PRESSURE_PAD) return true;
+    if (b == BLK_REDSTONE_WIRE || b == BLK_REDSTONE_WIRE_ON) return true;
+    if (b == BLK_DOOR_OFF      || b == BLK_DOOR_ON) return true;
+    if (b == BLK_TRAPDOOR_OFF  || b == BLK_TRAPDOOR_ON) return true;
+    if (b == BLK_LEVER_OFF     || b == BLK_LEVER_ON) return true;
+    if (b == BLK_PISTON_OFF    || b == BLK_PISTON_ON ||
+        b == BLK_PISTON_ARM) return true;
+    return false;
 }
 
 /* Map BFS hop distance → light level. With CRAFT_LIGHT_MAX=3 and
@@ -365,12 +379,22 @@ static void light_flood_from(int sx, int sy, int sz) {
 }
 
 /* --- Sky-height ------------------------------------------------- */
-/* Counts as "blocks sky" anything that's not transparent. Glass
- * lets sunlight through; water shouldn't (Minecraft attenuates
- * water but for cheapness we treat it as opaque to sky here so
- * deep ocean floors are dark, which is the right vibe). */
+/* Counts as "blocks sky" anything that's not transparent. Same set
+ * as light_transparent above so sprite cells (ladder / wire / pad /
+ * door / trapdoor / piston / lever) don't shadow the column below
+ * them. Glass lets sunlight through; water shouldn't (Minecraft
+ * attenuates water but for cheapness we treat it as opaque to sky
+ * here so deep ocean floors are dark, which is the right vibe). */
 static inline bool blocks_sky(BlockId b) {
-    return b != BLK_AIR && b != BLK_GLASS && b != BLK_TORCH;
+    if (b == BLK_AIR   || b == BLK_GLASS || b == BLK_TORCH) return false;
+    if (b == BLK_LADDER        || b == BLK_PRESSURE_PAD) return false;
+    if (b == BLK_REDSTONE_WIRE || b == BLK_REDSTONE_WIRE_ON) return false;
+    if (b == BLK_DOOR_OFF      || b == BLK_DOOR_ON) return false;
+    if (b == BLK_TRAPDOOR_OFF  || b == BLK_TRAPDOOR_ON) return false;
+    if (b == BLK_LEVER_OFF     || b == BLK_LEVER_ON) return false;
+    if (b == BLK_PISTON_OFF    || b == BLK_PISTON_ON ||
+        b == BLK_PISTON_ARM) return false;
+    return true;
 }
 
 static void compute_skyheight_column(int lx, int lz) {

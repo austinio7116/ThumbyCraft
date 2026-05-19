@@ -73,6 +73,12 @@ void craft_render_set_time(float world_time);
  * midnight, 0 at horizon. */
 float craft_render_sun_y(void);
 
+/* Day/night ambient brightness as 0..256 fixed-point Q8. The world
+ * raycaster multiplies its base face_shade table by this before
+ * applying the torch lightmap floor. Exposed so the sprite post-pass
+ * can use the same value when shading cuboid blocks. */
+int   craft_render_brightness_q8(void);
+
 /* Paint the sun + moon discs onto the framebuffer (after the world
  * raycaster, before the HUD). Cheap — does a 3-axis dot-product per
  * disc to project onto the screen, then a textured filled circle.
