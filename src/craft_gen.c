@@ -442,37 +442,130 @@ static BlockId tree_block_at(TreeType t, int variant, int dx, int dz,
     }
 }
 
-/* --- Wooden huts -----------------------------------------------------
+/* --- Buildings ---------------------------------------------------
  *
- * Small 5×5 plank cabins. A hut "exists" at world column (hx, hz) iff
- * hut_origin_at(hx, hz, seed) returns true. The footprint occupies
- * cells [hx..hx+4, hz..hz+4]; walls run y=gy+1..gy+3 around the
- * perimeter, roof at y=gy+4 covers the full 5×5, and a 2-cell door
- * (y=gy+1..2) opens on one side picked by the variant byte. The hut
- * floor (y=gy) is left untouched so the player walks in on the natural
- * surface block (grass).
+ * Eight building designs spawn deterministically in flat lowland
+ * tiles. A building "exists" at column (hx, hz) iff hut_origin_at
+ * returns true; per-type W, H and top-dy come from hut_w / hut_h /
+ * hut_top so each design uses only the footprint it actually needs.
  *
- * Generation is deterministic per (hx, hz, seed) and must be applied
- * identically in craft_gen_block_at and craft_gen_column — the save
- * diff layer relies on per-cell agreement. */
-#define HUT_W 5
-#define HUT_H 5
+ * The world-scan code uses HUT_W=HUT_H=7 as the max bounding-box
+ * dimensions; smaller designs return AIR for cells outside their own
+ * W×H footprint. HUT_TOP_DY=7 accommodates the tallest design
+ * (watchtower / church steeple). Generation is deterministic per
+ * (hx, hz, seed) and must be applied identically in
+ * craft_gen_block_at and craft_gen_column — the save diff layer
+ * relies on per-cell agreement.
+ *
+ *  Type             Footprint   Height  Materials
+ *  ---------------  ----------  ------  ------------------------------
+ *  0 A-Frame Lodge  5×5×5       gabled  PLANK + WOOD corners + GLASS
+ *  1 Hipped Cottage 5×5×5       pyramid PLANK + WOOD corners + GLASS
+ *  2 Longhouse      7×3×5       gabled  PLANK + WOOD corners + GLASS
+ *  3 L-Hipped Cabin 5×5 L 5     hipped  PLANK + WOOD corners
+ *  4 L-Gabled Cabin 5×5 L 5     gabled  PLANK + WOOD corners
+ *  5 Watchtower     3×3×7       crenel. STONE + COBBLE + GLASS + TORCH
+ *  6 Church         5×5×7       gable+  STONE + PLANK + WOOD steeple
+ *                                steepl. + GLASS + TORCH
+ *  7 Castle Keep    7×7×6       battl.  STONE + COBBLE battlements
+ */
+#define HUT_W       7
+#define HUT_H       7
+#define HUT_TOP_DY  7
+
+enum HutType {
+    HUT_TYPE_AFRAME    = 0,
+    HUT_TYPE_HIPPED    = 1,
+    HUT_TYPE_LONGHOUSE = 2,
+    HUT_TYPE_L_HIPPED  = 3,
+    HUT_TYPE_L_GABLED  = 4,
+    HUT_TYPE_TOWER     = 5,
+    HUT_TYPE_CHURCH    = 6,
+    HUT_TYPE_CASTLE    = 7,
+};
+
+static int hut_w(int type) {
+    switch (type) {
+        case HUT_TYPE_LONGHOUSE: return 7;
+        case HUT_TYPE_TOWER:     return 3;
+        case HUT_TYPE_CASTLE:    return 7;
+        default:                 return 5;
+    }
+}
+static int hut_h(int type) {
+    switch (type) {
+        case HUT_TYPE_LONGHOUSE: return 3;
+        case HUT_TYPE_TOWER:     return 3;
+        case HUT_TYPE_CASTLE:    return 7;
+        default:                 return 5;
+    }
+}
+static int hut_top(int type) {
+    switch (type) {
+        case HUT_TYPE_TOWER:  return 7;
+        case HUT_TYPE_CHURCH: return 7;
+        case HUT_TYPE_CASTLE: return 6;
+        default:              return 5;
+    }
+}
+static int hut_chest_dx(int type) {
+    switch (type) {
+        case HUT_TYPE_LONGHOUSE: return 1;   /* back corner of 7×3 hall */
+        case HUT_TYPE_CASTLE:    return 3;   /* centre of 7×7 keep */
+        default:                 return 1;
+    }
+}
+static int hut_chest_dz(int type) {
+    switch (type) {
+        case HUT_TYPE_CASTLE:    return 3;   /* centre of 7×7 keep */
+        default:                 return 1;
+    }
+}
+#define HUT_CHEST_DY 1
+
+/* Door direction — 0=south, 1=north, 2=east, 3=west. */
+static int hut_door_dir(int hx, int hz, uint32_t seed) {
+    return (int)(hash3(hx, hz, seed ^ 0x110D5EEDu) & 3);
+}
+
+/* Building type — 8 visual designs, weighted so the cottage family
+ * (gabled / hipped / longhouse / L-variants — types 0-4) is most
+ * common and the landmark builds (tower / church / castle) are
+ * rarer. Chest loot tier is rolled independently from a separate
+ * hash dimension, so a plain cottage can still hide a legendary
+ * chest. */
+static int hut_type(int hx, int hz, uint32_t seed) {
+    uint32_t r = hash3(hx, hz, seed ^ 0xC0FFEEEEu) & 0xFFu;
+    if (r <  46) return HUT_TYPE_AFRAME;       /* ~18% */
+    if (r <  92) return HUT_TYPE_HIPPED;       /* ~18% */
+    if (r < 128) return HUT_TYPE_LONGHOUSE;    /* ~14% */
+    if (r < 164) return HUT_TYPE_L_HIPPED;     /* ~14% */
+    if (r < 200) return HUT_TYPE_L_GABLED;     /* ~14% */
+    if (r < 224) return HUT_TYPE_TOWER;        /* ~9%  */
+    if (r < 244) return HUT_TYPE_CHURCH;       /* ~8%  */
+    return HUT_TYPE_CASTLE;                    /* ~5%  */
+}
 
 static bool hut_origin_at(int hx, int hz, uint32_t seed) {
     uint32_t r = hash3(hx, hz, seed ^ 0xCAB1F00Du);
-    /* ~1 in 4 096 columns → roughly one hut per 64×64 region.
+    /* ~1 in 4 096 columns → roughly one building per 64×64 region.
      * 4× denser than the original 1/16384 so the player actually
      * encounters one while exploring. */
     if ((r & 0xFFF) != 0) return false;
-    /* Lowland-only — mountain biome shrugs huts off. */
+    /* Lowland-only — mountain biome shrugs buildings off. */
     float m = mountain_factor(hx, hz, seed);
     if (m > 0.20f) return false;
-    /* Above water, naturally flat across the whole footprint. */
+    /* Above water, naturally flat across THIS type's actual footprint
+     * — smaller designs (e.g. 3×3 watchtower) don't need a full 7×7
+     * patch of flat ground, so they spawn more readily on hilly
+     * lowlands than the 7×7 castle does. */
     int ref_h = height_at(hx, hz, seed);
     if (ref_h <= CRAFT_WATER_LEVEL + 1) return false;
+    int type = hut_type(hx, hz, seed);
+    int W = hut_w(type), H = hut_h(type);
     int min_h = ref_h, max_h = ref_h;
-    for (int dz = 0; dz < HUT_H; dz++) {
-        for (int dx = 0; dx < HUT_W; dx++) {
+    for (int dz = 0; dz < H; dz++) {
+        for (int dx = 0; dx < W; dx++) {
             int h = height_at(hx + dx, hz + dz, seed);
             if (h < min_h) min_h = h;
             if (h > max_h) max_h = h;
@@ -483,12 +576,15 @@ static bool hut_origin_at(int hx, int hz, uint32_t seed) {
     return true;
 }
 
-/* Floor Y for the hut at (hx, hz) — taken as the minimum of the
- * footprint so walls always start from a complete grass base. */
+/* Floor Y for the building at (hx, hz) — taken as the minimum of
+ * the per-type footprint so walls always start from a complete
+ * grass base. */
 static int hut_floor_y(int hx, int hz, uint32_t seed) {
+    int type = hut_type(hx, hz, seed);
+    int W = hut_w(type), H = hut_h(type);
     int min_h = height_at(hx, hz, seed);
-    for (int dz = 0; dz < HUT_H; dz++) {
-        for (int dx = 0; dx < HUT_W; dx++) {
+    for (int dz = 0; dz < H; dz++) {
+        for (int dx = 0; dx < W; dx++) {
             int h = height_at(hx + dx, hz + dz, seed);
             if (h < min_h) min_h = h;
         }
@@ -496,148 +592,373 @@ static int hut_floor_y(int hx, int hz, uint32_t seed) {
     return min_h;
 }
 
-/* Door direction — 0=south, 1=north, 2=east, 3=west. */
-static int hut_door_dir(int hx, int hz, uint32_t seed) {
-    return (int)(hash3(hx, hz, seed ^ 0x110D5EEDu) & 3);
+/* --- Per-cell rule helpers --------------------------------------- */
+
+static bool hut_is_perim(int dx, int dz, int W, int H) {
+    return (dx == 0 || dx == W - 1 || dz == 0 || dz == H - 1);
 }
-
-/* Building type — 4 visual variants, weighted so plain plank cabins
- * are most common and ornate stone/cobble buildings are rarer (a
- * minor environmental cue that rarer-looking buildings might be
- * worth detouring to; chest loot is rolled independently though).
- *
- *   0 (50%): plank cabin — all PLANK walls + roof (the original)
- *   1 (25%): log cabin   — WOOD log walls, PLANK roof
- *   2 (15%): stone house — STONE walls, WOOD corner pillars, PLANK
- *                          roof, GLASS windows centred on the three
- *                          non-door walls at chest height
- *   3 (10%): cobble cottage with ridge — COBBLE walls, PLANK roof,
- *                          a WOOD log ridge beam at y+5 running
- *                          perpendicular to the door axis, GLASS
- *                          windows like type 2
- */
-static int hut_type(int hx, int hz, uint32_t seed) {
-    uint32_t r = hash3(hx, hz, seed ^ 0xC0FFEEEEu) & 0xFFu;
-    if (r < 128) return 0;
-    if (r < 192) return 1;
-    if (r < 230) return 2;
-    return 3;
+static bool hut_is_corner(int dx, int dz, int W, int H) {
+    return (dx == 0 || dx == W - 1) && (dz == 0 || dz == H - 1);
 }
-
-/* Local hut chest position — fixed interior corner so the predicate
- * stays a single equality test. dx=1, dz=1, dy=1: one cell in from
- * the south-west corner of the hut, on the floor. Far enough from
- * any wall's door opening to be reachable from every variant. */
-#define HUT_CHEST_DX 1
-#define HUT_CHEST_DZ 1
-#define HUT_CHEST_DY 1
-
-/* Top of the hut's Y range — depends on building type (type 3 adds
- * a ridge log at +5 above the roof slab at +4). */
-#define HUT_TOP_DY 5
-
-/* What block sits at hut-local (dx, dz, dy)?
- *   dy = 0      : floor (always AIR — keep natural surface)
- *   dy = 1..3   : wall perimeter (material per type) / interior AIR
- *                 / door opening (AIR), chest at fixed corner,
- *                 GLASS window at chest height for types 2-3
- *   dy = 4      : roof slab (PLANK for all current types)
- *   dy = 5      : ridge beam (type 3 only — single WOOD line along
- *                 the axis perpendicular to the door wall)
- * dx, dz in [0, HUT_W-1] / [0, HUT_H-1]. */
-static BlockId hut_block_local(int dx, int dz, int dy, int dir, int type) {
-    if (dy <= 0 || dy > HUT_TOP_DY) return BLK_AIR;
-
-    /* Materials picked from the type table. */
-    BlockId wall_block, corner_block, roof_block, window_block, ridge_block;
-    switch (type) {
-        default:
-        case 0:  /* plank cabin */
-            wall_block   = BLK_PLANK;
-            corner_block = BLK_PLANK;
-            roof_block   = BLK_PLANK;
-            window_block = BLK_AIR;
-            ridge_block  = BLK_AIR;
-            break;
-        case 1:  /* log cabin */
-            wall_block   = BLK_WOOD;
-            corner_block = BLK_WOOD;
-            roof_block   = BLK_PLANK;
-            window_block = BLK_AIR;
-            ridge_block  = BLK_AIR;
-            break;
-        case 2:  /* stone house with wood corners */
-            wall_block   = BLK_STONE;
-            corner_block = BLK_WOOD;
-            roof_block   = BLK_PLANK;
-            window_block = BLK_GLASS;
-            ridge_block  = BLK_AIR;
-            break;
-        case 3:  /* cobble cottage with ridge */
-            wall_block   = BLK_COBBLE;
-            corner_block = BLK_COBBLE;
-            roof_block   = BLK_PLANK;
-            window_block = BLK_GLASS;
-            ridge_block  = BLK_WOOD;
-            break;
+/* Door opening — 1 cell wide, 2 cells tall (dy 1..2), centre of
+ * the wall selected by dir. */
+static bool hut_is_door(int dx, int dz, int dy, int dir, int W, int H) {
+    if (dy < 1 || dy > 2) return false;
+    switch (dir) {
+        case 0: return dz == 0     && dx == W / 2;     /* south */
+        case 1: return dz == H - 1 && dx == W / 2;     /* north */
+        case 2: return dx == W - 1 && dz == H / 2;     /* east */
+        case 3: return dx == 0     && dz == H / 2;     /* west */
     }
+    return false;
+}
+/* Centre cell of the wall opposite to the door (chest-height
+ * window). */
+static bool hut_is_back_centre(int dx, int dz, int dir, int W, int H) {
+    switch (dir) {
+        case 0: return dz == H - 1 && dx == W / 2;
+        case 1: return dz == 0     && dx == W / 2;
+        case 2: return dx == 0     && dz == H / 2;
+        case 3: return dx == W - 1 && dz == H / 2;
+    }
+    return false;
+}
+/* Pair of wall cells flanking the centre of the back wall — used by
+ * the hipped cottage's twin back-windows. */
+static bool hut_is_back_pair(int dx, int dz, int dir, int W, int H) {
+    switch (dir) {
+        case 0: return dz == H - 1 && (dx == 1 || dx == W - 2);
+        case 1: return dz == 0     && (dx == 1 || dx == W - 2);
+        case 2: return dx == 0     && (dz == 1 || dz == H - 2);
+        case 3: return dx == W - 1 && (dz == 1 || dz == H - 2);
+    }
+    return false;
+}
+/* True if door is on a wall parallel to the X axis (i.e. dz=0 or
+ * dz=H-1) — so the ridge axis of a gable runs along Z. */
+static bool hut_door_on_z_wall(int dir) { return dir == 0 || dir == 1; }
 
-    /* Ridge beam — type 3 only, sits one cell above the roof along
-     * the axis perpendicular to the door wall. Visible from outside;
-     * gives the cobble cottage its distinctive silhouette. */
+/* --- Per-design block rules --------------------------------------
+ *
+ * Each helper returns the block ID for one local (dx, dz, dy) cell
+ * for ONE building type. dx and dz are already clamped to the
+ * type's actual W×H footprint; dy is in [1, top]. The chest cell
+ * at (chest_dx, chest_dz, 1) is handled by the dispatcher BEFORE
+ * these rules see it, so they can ignore chests entirely. */
+
+/* T0: A-Frame Lodge. 5×5×5. Plank walls, wood corner posts,
+ * back-wall GLASS, plank gabled roof — 3-wide slab + 1-wide ridge
+ * spanning the building along the door-perpendicular axis. */
+static BlockId hut_block_aframe(int dx, int dz, int dy, int dir, int W, int H) {
+    bool z_axis = hut_door_on_z_wall(dir);
     if (dy == 5) {
-        if (ridge_block == BLK_AIR) return BLK_AIR;
-        /* dir 0/1 (door on N or S) → ridge runs E-W along dx, fixed dz=middle.
-         * dir 2/3 (door on E or W) → ridge runs N-S along dz, fixed dx=middle. */
-        if (dir == 0 || dir == 1) {
-            if (dz == HUT_H / 2) return ridge_block;
-        } else {
-            if (dx == HUT_W / 2) return ridge_block;
+        if (z_axis) { if (dx == W / 2) return BLK_PLANK; }
+        else        { if (dz == H / 2) return BLK_PLANK; }
+        return BLK_AIR;
+    }
+    if (dy == 4) {
+        if (z_axis) { if (dx >= 1 && dx <= W - 2) return BLK_PLANK; }
+        else        { if (dz >= 1 && dz <= H - 2) return BLK_PLANK; }
+        return BLK_AIR;
+    }
+    if (!hut_is_perim(dx, dz, W, H)) return BLK_AIR;
+    if (hut_is_door(dx, dz, dy, dir, W, H)) return BLK_AIR;
+    if (dy == 2 && hut_is_back_centre(dx, dz, dir, W, H)) return BLK_GLASS;
+    if (hut_is_corner(dx, dz, W, H)) return BLK_WOOD;
+    return BLK_PLANK;
+}
+
+/* T1: Hipped Cottage. 5×5×5. Plank walls, wood corner posts, two
+ * back-wall GLASS windows flanking the centre, plank 4-sided
+ * pyramid: 5×5 wall top → 3×3 inner ring → "+" cap. */
+static BlockId hut_block_hipped(int dx, int dz, int dy, int dir, int W, int H) {
+    if (dy == 5) {
+        if (dx >= 1 && dx <= W - 2 && dz >= 1 && dz <= H - 2) {
+            if (dx == W / 2 || dz == H / 2) return BLK_PLANK;
         }
         return BLK_AIR;
     }
+    if (dy == 4) {
+        if (dx >= 1 && dx <= W - 2 && dz >= 1 && dz <= H - 2) {
+            bool inner_perim = (dx == 1 || dx == W - 2 || dz == 1 || dz == H - 2);
+            if (inner_perim) return BLK_PLANK;
+        }
+        return BLK_AIR;
+    }
+    if (!hut_is_perim(dx, dz, W, H)) return BLK_AIR;
+    if (hut_is_door(dx, dz, dy, dir, W, H)) return BLK_AIR;
+    if (dy == 2 && hut_is_back_pair(dx, dz, dir, W, H)) return BLK_GLASS;
+    if (hut_is_corner(dx, dz, W, H)) return BLK_WOOD;
+    return BLK_PLANK;
+}
 
-    /* Roof slab — full 5×5. */
-    if (dy == 4) return roof_block;
+/* T2: Longhouse. 7×3×5. Plank walls, wood corner posts. Long axis
+ * is whichever of X or Z is longer (X here since W=7, H=3). A
+ * gabled roof runs along that long axis: 5-wide inner slab at
+ * dy=4 (inset 1 from gable ends), 1-wide ridge at dy=5 spanning
+ * the whole length, plus a gable extension at each gable end so
+ * the gable triangle shows from the short walls. Single back-
+ * centre GLASS window. */
+static BlockId hut_block_longhouse(int dx, int dz, int dy, int dir, int W, int H) {
+    /* Long axis: whichever dimension is largest. For 7×3 footprint
+     * this is the X axis, so ridge runs along X (varies in dx,
+     * fixed at dz=H/2). */
+    bool x_long = (W >= H);
+    if (dy == 5) {
+        if (x_long) { if (dz == H / 2) return BLK_PLANK; }
+        else        { if (dx == W / 2) return BLK_PLANK; }
+        return BLK_AIR;
+    }
+    if (dy == 4) {
+        /* Slab inset 1 from the gable ends. */
+        if (x_long) {
+            if (dx >= 1 && dx <= W - 2) return BLK_PLANK;
+            /* Gable end extension at the middle row so the ridge has
+             * something to land on at the gable end. */
+            if ((dx == 0 || dx == W - 1) && dz == H / 2) return BLK_PLANK;
+        } else {
+            if (dz >= 1 && dz <= H - 2) return BLK_PLANK;
+            if ((dz == 0 || dz == H - 1) && dx == W / 2) return BLK_PLANK;
+        }
+        return BLK_AIR;
+    }
+    if (!hut_is_perim(dx, dz, W, H)) return BLK_AIR;
+    if (hut_is_door(dx, dz, dy, dir, W, H)) return BLK_AIR;
+    if (dy == 2 && hut_is_back_centre(dx, dz, dir, W, H)) return BLK_GLASS;
+    if (hut_is_corner(dx, dz, W, H)) return BLK_WOOD;
+    return BLK_PLANK;
+}
 
-    /* Chest sits on the floor at a fixed interior corner. */
-    if (dy == HUT_CHEST_DY && dx == HUT_CHEST_DX && dz == HUT_CHEST_DZ) {
+/* L-shape cutout: the building occupies a 5×5 bounding box but the
+ * (dx≥3, dz≥3) 2×2 corner is OUTSIDE the structure (AIR all the
+ * way up). Both L-cottage variants share this cutout. */
+static bool hut_l_outside(int dx, int dz) {
+    return dx >= 3 && dz >= 3;
+}
+
+/* T3: L-Hipped Cabin. 5×5 L-shape, 5 tall. Plank walls, wood
+ * corner posts. Roof = 1-wide plank ridge running over the long
+ * (dz=0..4) wing at dx=1, at dy=4. The short wing gets a flat
+ * plank cap at dy=4. Result: a clear "L" silhouette with the
+ * ridge over the longer arm. */
+static BlockId hut_block_l_hipped(int dx, int dz, int dy, int dir, int W, int H) {
+    if (hut_l_outside(dx, dz)) return BLK_AIR;
+    /* Roof. */
+    if (dy == 5) {
+        /* Single ridge plank over the long wing (the 5-row column at
+         * dx ≤ 2). Centre of the long wing is dx=1. */
+        if (dz <= 4 && dx == 1) return BLK_PLANK;
+        return BLK_AIR;
+    }
+    if (dy == 4) {
+        /* Cover the L: inner cells get a plank cap. Skip cells that
+         * are outside the L (already returned above) — and skip the
+         * footprint perimeter so the eaves don't double-up with the
+         * wall tops. Inset 1 cell from the L's outer boundary. */
+        bool inside_l = !hut_l_outside(dx, dz);
+        if (!inside_l) return BLK_AIR;
+        /* Inset rule: any inner cell that is not flush with the L's
+         * outer edge. Use a simple "neighbour-test": a cell is part
+         * of the roof slab if its four neighbours (±dx, ±dz) are
+         * all inside the L. */
+        bool nx_ok = (dx > 0) && !hut_l_outside(dx - 1, dz);
+        bool px_ok = (dx < W - 1) && !hut_l_outside(dx + 1, dz);
+        bool nz_ok = (dz > 0) && !hut_l_outside(dx, dz - 1);
+        bool pz_ok = (dz < H - 1) && !hut_l_outside(dx, dz + 1);
+        if (nx_ok && px_ok && nz_ok && pz_ok) return BLK_PLANK;
+        return BLK_AIR;
+    }
+    /* Walls: an L-shape perimeter is "any cell inside the L whose
+     * 4-neighbour set includes at least one cell OUTSIDE the L (or
+     * outside the 5×5 bounding box)". */
+    bool nx_out = (dx == 0) || hut_l_outside(dx - 1, dz);
+    bool px_out = (dx == W - 1) || hut_l_outside(dx + 1, dz);
+    bool nz_out = (dz == 0) || hut_l_outside(dx, dz - 1);
+    bool pz_out = (dz == H - 1) || hut_l_outside(dx, dz + 1);
+    bool on_perim = nx_out || px_out || nz_out || pz_out;
+    if (!on_perim) return BLK_AIR;
+    if (hut_is_door(dx, dz, dy, dir, W, H)) return BLK_AIR;
+    /* Identify "corner" cells of the L (where 2+ outer-faces meet)
+     * and use WOOD for the post effect. */
+    int outer_faces = (int)nx_out + (int)px_out + (int)nz_out + (int)pz_out;
+    if (outer_faces >= 2) return BLK_WOOD;
+    return BLK_PLANK;
+}
+
+/* T4: L-Gabled Cabin. 5×5 L-shape, 5 tall. Plank walls, wood
+ * corner posts. Roof = a gable ridge along EACH wing, meeting at
+ * the inner corner. Long wing's ridge runs N-S at dx=1; short
+ * wing's ridge runs E-W at dz=1. Both ridges sit at dy=5; dy=4 is
+ * a 3-wide slab along each wing. Visually busier than the hipped
+ * variant — two peaks. */
+static BlockId hut_block_l_gabled(int dx, int dz, int dy, int dir, int W, int H) {
+    if (hut_l_outside(dx, dz)) return BLK_AIR;
+    if (dy == 5) {
+        /* Ridge over long wing (dx=1, all dz 0..4) and short wing
+         * (dz=1, all dx 0..4) — they meet at (1, 1). */
+        if (dx == 1 || dz == 1) return BLK_PLANK;
+        return BLK_AIR;
+    }
+    if (dy == 4) {
+        /* 3-wide slab along long wing (dx 0..2) and short wing
+         * (dz 0..2). Constrained to inside-L cells. */
+        bool long_slab  = (dx <= 2);
+        bool short_slab = (dz <= 2);
+        if ((long_slab || short_slab) && !hut_l_outside(dx, dz)) return BLK_PLANK;
+        return BLK_AIR;
+    }
+    /* Same wall logic as l_hipped. */
+    bool nx_out = (dx == 0) || hut_l_outside(dx - 1, dz);
+    bool px_out = (dx == W - 1) || hut_l_outside(dx + 1, dz);
+    bool nz_out = (dz == 0) || hut_l_outside(dx, dz - 1);
+    bool pz_out = (dz == H - 1) || hut_l_outside(dx, dz + 1);
+    bool on_perim = nx_out || px_out || nz_out || pz_out;
+    if (!on_perim) return BLK_AIR;
+    if (hut_is_door(dx, dz, dy, dir, W, H)) return BLK_AIR;
+    int outer_faces = (int)nx_out + (int)px_out + (int)nz_out + (int)pz_out;
+    if (outer_faces >= 2) return BLK_WOOD;
+    return BLK_PLANK;
+}
+
+/* T5: Watchtower. 3×3×7. Stone shaft, COBBLE crenellated parapet
+ * at the top (4 merlons at the corners, gaps between for the
+ * arrow-slit look), a GLASS slit in the back wall at dy=3, and a
+ * TORCH atop one corner merlon. */
+static BlockId hut_block_tower(int dx, int dz, int dy, int dir, int W, int H) {
+    /* Crenellated parapet at dy=6 — corners only (cobble merlons). */
+    if (dy == 6) {
+        if (hut_is_corner(dx, dz, W, H)) return BLK_COBBLE;
+        return BLK_AIR;
+    }
+    /* Single torch flame sitting on the back-right merlon at dy=7. */
+    if (dy == 7) {
+        switch (dir) {
+            case 0: if (dx == W - 1 && dz == H - 1) return BLK_TORCH; break;
+            case 1: if (dx == W - 1 && dz == 0)     return BLK_TORCH; break;
+            case 2: if (dx == 0     && dz == H - 1) return BLK_TORCH; break;
+            case 3: if (dx == W - 1 && dz == H - 1) return BLK_TORCH; break;
+        }
+        return BLK_AIR;
+    }
+    /* Walls dy 1..5 — perimeter stone. */
+    if (!hut_is_perim(dx, dz, W, H)) return BLK_AIR;
+    if (hut_is_door(dx, dz, dy, dir, W, H)) return BLK_AIR;
+    /* Single GLASS slit at dy=3, back-wall centre. */
+    if (dy == 3 && hut_is_back_centre(dx, dz, dir, W, H)) return BLK_GLASS;
+    return BLK_STONE;
+}
+
+/* T6: Church. 5×5×7. Stone walls with GLASS windows on the side
+ * walls at dy=2 (two cells per side flanking the centre). Steep
+ * plank gabled roof (3-wide slab + 1-wide ridge) on top, then a
+ * 1-cell WOOD log steeple rising 2 cells above the back-centre
+ * with a TORCH belfry at the very top. */
+static BlockId hut_block_church(int dx, int dz, int dy, int dir, int W, int H) {
+    bool z_axis = hut_door_on_z_wall(dir);
+    /* Belfry torch at the very top of the steeple — back-wall centre. */
+    if (dy == 7 && hut_is_back_centre(dx, dz, dir, W, H)) return BLK_TORCH;
+    /* Steeple shaft at dy=6, sitting on the back-centre cell. */
+    if (dy == 6 && hut_is_back_centre(dx, dz, dir, W, H)) return BLK_WOOD;
+    if (dy >= 6) return BLK_AIR;
+    /* Roof dy=5: 1-wide ridge along door-perpendicular axis.
+     * The back-centre cell hosts the steeple base — stamp WOOD
+     * there, plank everywhere else along the ridge. */
+    if (dy == 5) {
+        if (hut_is_back_centre(dx, dz, dir, W, H)) return BLK_WOOD;
+        if (z_axis) { if (dx == W / 2) return BLK_PLANK; }
+        else        { if (dz == H / 2) return BLK_PLANK; }
+        return BLK_AIR;
+    }
+    /* Roof dy=4: 3-wide slab along the ridge axis. */
+    if (dy == 4) {
+        if (z_axis) { if (dx >= 1 && dx <= W - 2) return BLK_PLANK; }
+        else        { if (dz >= 1 && dz <= H - 2) return BLK_PLANK; }
+        return BLK_AIR;
+    }
+    /* Walls. */
+    if (!hut_is_perim(dx, dz, W, H)) return BLK_AIR;
+    if (hut_is_door(dx, dz, dy, dir, W, H)) return BLK_AIR;
+    /* Arched-window GLASS pair on the LONG sides at dy=2 (the
+     * non-door, non-back walls). For the church we want the windows
+     * on the two side walls perpendicular to the door axis. */
+    if (dy == 2) {
+        bool side_window = false;
+        switch (dir) {
+            case 0: case 1:    /* door on z-wall → side walls are dx 0 / W-1 */
+                side_window = (dx == 0 || dx == W - 1) &&
+                              (dz == 1 || dz == H - 2);
+                break;
+            case 2: case 3:    /* door on x-wall → side walls are dz 0 / H-1 */
+                side_window = (dz == 0 || dz == H - 1) &&
+                              (dx == 1 || dx == W - 2);
+                break;
+        }
+        if (side_window) return BLK_GLASS;
+    }
+    return BLK_STONE;
+}
+
+/* T7: Castle Keep. 7×7×6. Stone walls with COBBLE crenellated
+ * battlements at dy=6: cobble on every other cell of the
+ * perimeter (corner-and-alternating-merlon pattern). Wall has
+ * GLASS arrow slits on the side walls at dy=3. Interior is open
+ * (one big hall). Door is 2 cells tall like always. */
+static BlockId hut_block_castle(int dx, int dz, int dy, int dir, int W, int H) {
+    /* Crenellation at dy=6 — perimeter only, alternating cells. */
+    if (dy == 6) {
+        if (!hut_is_perim(dx, dz, W, H)) return BLK_AIR;
+        /* Always include all 4 corners as merlons, then add merlons
+         * at every-other cell along each edge. The pattern is
+         * cobble when (dx+dz) is even on the perimeter — gives a
+         * neat alternating crenellation. */
+        if (((dx + dz) & 1) == 0) return BLK_COBBLE;
+        return BLK_AIR;
+    }
+    /* Walls dy 1..5 — perimeter stone. */
+    if (!hut_is_perim(dx, dz, W, H)) return BLK_AIR;
+    if (hut_is_door(dx, dz, dy, dir, W, H)) return BLK_AIR;
+    /* Arrow-slit GLASS on the non-door walls at dy=3, at the
+     * centre of each side. */
+    if (dy == 3) {
+        bool slit =
+            (dx == W / 2 && dz == 0)     ||
+            (dx == W / 2 && dz == H - 1) ||
+            (dz == H / 2 && dx == 0)     ||
+            (dz == H / 2 && dx == W - 1);
+        /* Don't put a glass slit in the door wall's centre cell — the
+         * door is there. */
+        if (slit && !hut_is_door(dx, dz, /*dy=*/2, dir, W, H)) return BLK_GLASS;
+    }
+    return BLK_STONE;
+}
+
+/* Dispatch hut-local cell to the per-type rule. dx, dz are clamped
+ * to the type's actual footprint; dy is in [1, hut_top(type)]. */
+static BlockId hut_block_local(int dx, int dz, int dy, int dir, int type) {
+    int W = hut_w(type), H = hut_h(type), top = hut_top(type);
+    if (dx < 0 || dx >= W) return BLK_AIR;
+    if (dz < 0 || dz >= H) return BLK_AIR;
+    if (dy <= 0 || dy > top) return BLK_AIR;
+
+    /* Chest at this type's chest cell, floor level. Stamped before
+     * the per-type rule so individual rules can ignore chests. */
+    if (dy == HUT_CHEST_DY &&
+        dx == hut_chest_dx(type) &&
+        dz == hut_chest_dz(type)) {
         return BLK_CHEST;
     }
 
-    /* Walls — perimeter only. */
-    bool on_perim = (dx == 0 || dx == HUT_W - 1 || dz == 0 || dz == HUT_H - 1);
-    if (!on_perim) return BLK_AIR;
-
-    /* Door — 2-cell opening at middle of the chosen wall, dy 1..2. */
-    if (dy <= 2) {
-        bool is_door = false;
-        switch (dir) {
-            case 0: is_door = (dz == 0          && dx == HUT_W / 2); break;
-            case 1: is_door = (dz == HUT_H - 1  && dx == HUT_W / 2); break;
-            case 2: is_door = (dx == HUT_W - 1  && dz == HUT_H / 2); break;
-            case 3: is_door = (dx == 0          && dz == HUT_H / 2); break;
-        }
-        if (is_door) return BLK_AIR;
+    switch (type) {
+        case HUT_TYPE_AFRAME:    return hut_block_aframe   (dx, dz, dy, dir, W, H);
+        case HUT_TYPE_HIPPED:    return hut_block_hipped   (dx, dz, dy, dir, W, H);
+        case HUT_TYPE_LONGHOUSE: return hut_block_longhouse(dx, dz, dy, dir, W, H);
+        case HUT_TYPE_L_HIPPED:  return hut_block_l_hipped (dx, dz, dy, dir, W, H);
+        case HUT_TYPE_L_GABLED:  return hut_block_l_gabled (dx, dz, dy, dir, W, H);
+        case HUT_TYPE_TOWER:     return hut_block_tower    (dx, dz, dy, dir, W, H);
+        case HUT_TYPE_CHURCH:    return hut_block_church   (dx, dz, dy, dir, W, H);
+        case HUT_TYPE_CASTLE:    return hut_block_castle   (dx, dz, dy, dir, W, H);
     }
-
-    /* Window — at chest height (dy=2), at the centre of any non-door
-     * perimeter wall. Door cells were already returned above as AIR,
-     * so a centre cell that gets here is by construction not-a-door. */
-    if (dy == 2 && window_block != BLK_AIR) {
-        bool is_wall_centre =
-            (dz == 0          && dx == HUT_W / 2) ||
-            (dz == HUT_H - 1  && dx == HUT_W / 2) ||
-            (dx == 0          && dz == HUT_H / 2) ||
-            (dx == HUT_W - 1  && dz == HUT_H / 2);
-        if (is_wall_centre) return window_block;
-    }
-
-    /* Corner pillars (dx and dz both at 0 or 4) use corner_block; the
-     * rest of the perimeter uses wall_block. For most types these are
-     * the same; type 2 (stone + wood corners) is where they diverge. */
-    bool is_corner = ((dx == 0 || dx == HUT_W - 1) && (dz == 0 || dz == HUT_H - 1));
-    return is_corner ? corner_block : wall_block;
+    return BLK_AIR;
 }
 
 /* If world cell (x, y, z) lies inside any hut footprint, set *covered
@@ -646,17 +967,23 @@ static BlockId hut_block_local(int dx, int dz, int dy, int dir, int type) {
  * craft_gen_block_at without measurable cost. */
 static BlockId hut_cell(int x, int y, int z, uint32_t seed, bool *covered) {
     *covered = false;
+    /* Scan the maximum 7×7 bounding box so any building type can be
+     * detected. Per-type W×H culling then drops candidates whose
+     * actual footprint doesn't cover (x, z). */
     for (int dz = -(HUT_H - 1); dz <= 0; dz++) {
         for (int dx = -(HUT_W - 1); dx <= 0; dx++) {
             int hx = x + dx, hz = z + dz;
             if (!hut_origin_at(hx, hz, seed)) continue;
+            int type = hut_type(hx, hz, seed);
+            int W = hut_w(type), H = hut_h(type);
+            int lx = -dx, lz = -dz;
+            if (lx >= W || lz >= H) continue;        /* outside this type's footprint */
             int gy = hut_floor_y(hx, hz, seed);
             int dy = y - gy;
-            if (dy <= 0 || dy > HUT_TOP_DY) continue;  /* outside hut Y range */
+            if (dy <= 0 || dy > hut_top(type)) continue;
             *covered = true;
-            int dir  = hut_door_dir(hx, hz, seed);
-            int type = hut_type(hx, hz, seed);
-            return hut_block_local(-dx, -dz, dy, dir, type);
+            int dir = hut_door_dir(hx, hz, seed);
+            return hut_block_local(lx, lz, dy, dir, type);
         }
     }
     return BLK_AIR;
@@ -789,21 +1116,26 @@ void craft_gen_column(int wx, int wz, uint32_t seed,
     }
 
     /* Hut pass — runs AFTER trees so walls/interior overwrite any tree
-     * blocks that landed in the footprint. Scan 5×5 candidate hut
-     * origins whose footprint covers this column. */
+     * blocks that landed in the footprint. Scan up to 7×7 candidate
+     * origins (max bounding box); per-type W×H gates which actually
+     * cover this column. */
     for (int dz = -(HUT_H - 1); dz <= 0; dz++) {
         for (int dx = -(HUT_W - 1); dx <= 0; dx++) {
             int hx = wx + dx, hz = wz + dz;
             if (!hut_origin_at(hx, hz, seed)) continue;
-            int gy = hut_floor_y(hx, hz, seed);
-            int dir  = hut_door_dir(hx, hz, seed);
             int type = hut_type(hx, hz, seed);
-            for (int dy = 1; dy <= HUT_TOP_DY; dy++) {
+            int W = hut_w(type), H = hut_h(type);
+            int lx = -dx, lz = -dz;
+            if (lx >= W || lz >= H) continue;
+            int gy   = hut_floor_y(hx, hz, seed);
+            int dir  = hut_door_dir(hx, hz, seed);
+            int top  = hut_top(type);
+            for (int dy = 1; dy <= top; dy++) {
                 int y = gy + dy;
                 if (y < 0 || y >= CRAFT_WORLD_Y) continue;
                 /* Stamp unconditionally — interior AIR clears any tree
-                 * block sitting where the hut wants empty space. */
-                out[y] = (uint8_t)hut_block_local(-dx, -dz, dy, dir, type);
+                 * block sitting where the building wants empty space. */
+                out[y] = (uint8_t)hut_block_local(lx, lz, dy, dir, type);
             }
         }
     }
@@ -862,17 +1194,21 @@ Vec3 craft_gen_spawn(void) {
 }
 
 bool craft_gen_is_hut_chest(int wx, int wy, int wz, uint32_t seed) {
-    /* Walk back over every (hx, hz) origin whose 5×5 footprint could
-     * cover (wx, wz). For each that's actually a hut, check whether
-     * (wx, wy, wz) lines up with that hut's chest cell. */
+    /* Walk back over every (hx, hz) origin whose footprint could cover
+     * (wx, wz). For each that's actually a building, check whether
+     * (wx, wy, wz) is that type's chest cell. */
     for (int dz = -(HUT_H - 1); dz <= 0; dz++) {
         for (int dx = -(HUT_W - 1); dx <= 0; dx++) {
             int hx = wx + dx, hz = wz + dz;
             if (!hut_origin_at(hx, hz, seed)) continue;
+            int type = hut_type(hx, hz, seed);
+            int W = hut_w(type), H = hut_h(type);
+            int lx = -dx, lz = -dz;
+            if (lx >= W || lz >= H) continue;
             int gy = hut_floor_y(hx, hz, seed);
             if (wy != gy + HUT_CHEST_DY) continue;
-            if (-dx != HUT_CHEST_DX) continue;
-            if (-dz != HUT_CHEST_DZ) continue;
+            if (lx != hut_chest_dx(type)) continue;
+            if (lz != hut_chest_dz(type)) continue;
             return true;
         }
     }
