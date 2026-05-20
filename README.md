@@ -19,11 +19,12 @@ worlds.
 
 ```
 ~30 fps  ·  64³ block window over an infinite world  ·  5 hostile + 3 passive mob types
-+ a giant boss spider  ·  redstone circuits, TNT, pistons, doors, ladders, trapdoors
-furnaces + chests + auto-aim bow combat  ·  4-slot save + screenshot title screen
-Debussy Clair de Lune soundtrack — replays in a random key each loop and occasionally
-plays backwards, with pitch sliding toward bright in caves and deep on mountaintops
-drifting clouds  ·  flash-backed buildings  ·  280 MHz dual-core M33
+8 building variants (A-frame / hipped / longhouse / L-cottages / watchtower / church / castle)
+giant boss spider  ·  redstone circuits, TNT, pistons, doors, ladders, trapdoors
+furnaces + chests with rarity-tiered loot  ·  full chest + furnace persistence across saves
+4 control schemes incl. d-pad-walk + double-tap-hold reverse  ·  4-slot save + screenshot picker
+Debussy Clair de Lune soundtrack — random key each loop, pitch sliding toward bright in caves
+drifting clouds  ·  flash-backed worlds  ·  280 MHz dual-core M33 tile-stealing raycaster
 ```
 
 ---
@@ -58,25 +59,56 @@ For fast iteration on a desktop, see **[Host build](#host-build)** below.
 
 ## Controls
 
+The pause menu's **Controls** entry now opens a **scheme picker** —
+four input layouts that all share the same A / B / MENU bindings,
+they differ only in how the D-pad and LB/RB are wired.  Picked scheme
+persists per save slot.
+
+**Classic** (the default — what the original ThumbyCraft shipped with):
+
 | Button | Action |
 |---|---|
 | **LB** held | Walk forward (gravity on); ascend (fly mode) |
+| **LB** double-tap-then-hold | Walk **backwards** (release-and-repress within 300 ms, hold the 2nd press) |
 | **RB** tap | Jump |
 | **D-pad L/R** | Turn left / right |
 | **D-pad U/D** | Pitch camera up / down |
-| **A** | Break block / attack mob |
-| **B** | Place selected block from hotbar |
+| **A** | Break block / attack mob / draw bow (hold) |
+| **B** | Place selected block / interact (toggle door / lever / chest / furnace) |
 | **MENU + LB / RB** | Hotbar previous / next slot |
 | **MENU + A** | Toggle fly (creative only) |
 | **MENU** (tap & release) | Open pause menu |
 
-The D-pad is **always** the look stick — pitch and turn together
-without modal toggles. Walking is on a separate button so you can scan
-the horizon while moving forward.
+**Classic flip** — LB jumps, RB walks (double-tap-then-hold on RB
+walks backwards). Everything else the same as Classic.
+
+**Walk + strafe** — D-pad becomes the move stick.
+
+| Button | Action |
+|---|---|
+| **D-pad U/D** | Walk forward / backward |
+| **D-pad L/R** | Strafe left / right |
+| **LB** held | Look mode — d-pad becomes turn (L/R) + pitch (U/D) while held |
+| **RB** tap | Jump |
+
+**Walk + turn** — same as Walk + strafe but L/R always turns; LB-held
+overlays pitch onto U/D without changing the turn axis.
+
+| Button | Action |
+|---|---|
+| **D-pad U/D** | Walk forward / backward |
+| **D-pad L/R** | Turn left / right |
+| **LB** held | Hold to pitch on U/D (turn stays on L/R) |
+| **RB** tap | Jump |
 
 **Auto-jump**: 1-block obstacles in front of you get stepped up
 automatically (with a 350 ms cooldown so it doesn't bunny-hop you up
 stairs).
+
+**Hotbar slots clear on depletion** (survival mode only). If you place
+the last torch in a slot, the slot's swatch disappears and you stop
+"holding" it — picking up another torch slots back into the freed
+spot. Creative slots keep their assignment.
 
 ## The world
 
@@ -95,8 +127,30 @@ hole you dug is still there.
   visible on hillsides
 - **Rivers** — narrow winding streams in lowlands, never carving
   through highlands
-- **Wooden huts** — rare 5×5 plank cabins you'll occasionally stumble
-  on. Step through the doorway and shelter in one.
+- **Buildings** (8 variants) — every settlement build has a
+  structured roof: no plain plank boxes. Cottages are common,
+  landmark structures are rare:
+  - **A-Frame Lodge** (5×5) — steep plank gabled roof, wood corner
+    posts, back-wall window.
+  - **Hipped Cottage** (5×5) — 4-sided plank pyramid roof, twin back
+    windows.
+  - **Longhouse** (7×3) — long plank gabled ridge along the long
+    axis.
+  - **L-Hipped Cabin** (L-shaped) — single ridge running the length
+    of the long wing.
+  - **L-Gabled Cabin** (L-shaped) — twin ridges, one per wing,
+    meeting at the inner corner.
+  - **Watchtower** (3×3, 7 tall) — stone shaft with a cobble
+    crenellated parapet; a torch perches on one merlon.
+  - **Church** (5×5, 7 tall) — steep gabled stone-and-plank nave
+    with a wood-log steeple rising 2 above and a torch belfry.
+  - **Castle Keep** (7×7) — stone fortress with alternating cobble
+    battlements all the way around and glass arrow slits on every
+    side. Spawns only where a flat 7×7 patch is available.
+
+  Each building hides a chest at first-touch with **rarity-tiered
+  loot** (see [Chest](#chest-storage) below). Step through the
+  doorway to claim it.
 - **Drifting clouds** — soft procedural cloud layer scrolling slowly
   east across the sky during the day, turning orange at sunrise and
   sunset
@@ -228,6 +282,25 @@ Useful for stockpiling beyond the 8 hotbar slots.
 
 Active chest state caps at 4 simultaneously — additional placed
 chests still exist as world blocks but show empty when first opened.
+
+**Chest + furnace contents persist across saves** (v5 save format).
+Whatever you stored when you saved is exactly what's there when you
+load. Hut chests no longer refill with their original loot on reload
+— if you cleared one out, it stays cleared.
+
+**Hut chest loot** rolls one of four **rarity tiers** on first open,
+driven by an independent hash:
+
+| Tier | Chance | Contents |
+|---|---|---|
+| Common     | 50% | Sticks + planks only |
+| Uncommon   | 30% | Adds iron / bow + arrows / torches / wood pickaxe |
+| Rare       | 15% | Adds stone tools + redstone dust + bigger stacks |
+| Legendary  |  5% | Adds iron tools + gold ingots + ~50% diamond |
+
+Building visual type doesn't drive the loot tier — a plain plank
+cabin can hide a legendary chest and a stone house can be near
+empty. Every detour is worth checking.
 
 ### Tool & sword ladder
 
@@ -419,6 +492,12 @@ Every block you place or break is held in an SRAM mod hash keyed by
 world coords. Persistence to flash happens on **save** — either
 manual via **MENU → Save world**, or automatic per the **Auto save**
 menu setting (default: on events).
+
+**Everything in your session persists across save/load**: chunk
+edits (block changes), chest contents (up to 4 active chests × 16
+slots), furnace state (input / fuel / output with smelt progress
+and fuel timer preserved), control scheme, and auto-save mode.
+Save format is v5; v4 saves from earlier builds no longer load.
 
 **4-slot picker** for both Save and Load. Each slot shows a 32×32
 thumbnail of the last in-game frame before you opened the pause
