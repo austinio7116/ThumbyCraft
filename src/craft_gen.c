@@ -496,9 +496,32 @@ static int hut_floor_y(int hx, int hz, uint32_t seed) {
     return min_h;
 }
 
-/* Per-hut variant byte — bits 0-1 pick the door wall direction. */
-static int hut_variant(int hx, int hz, uint32_t seed) {
-    return (int)(hash3(hx, hz, seed ^ 0x110D5EEDu) & 0xFFu);
+/* Door direction — 0=south, 1=north, 2=east, 3=west. */
+static int hut_door_dir(int hx, int hz, uint32_t seed) {
+    return (int)(hash3(hx, hz, seed ^ 0x110D5EEDu) & 3);
+}
+
+/* Building type — 4 visual variants, weighted so plain plank cabins
+ * are most common and ornate stone/cobble buildings are rarer (a
+ * minor environmental cue that rarer-looking buildings might be
+ * worth detouring to; chest loot is rolled independently though).
+ *
+ *   0 (50%): plank cabin — all PLANK walls + roof (the original)
+ *   1 (25%): log cabin   — WOOD log walls, PLANK roof
+ *   2 (15%): stone house — STONE walls, WOOD corner pillars, PLANK
+ *                          roof, GLASS windows centred on the three
+ *                          non-door walls at chest height
+ *   3 (10%): cobble cottage with ridge — COBBLE walls, PLANK roof,
+ *                          a WOOD log ridge beam at y+5 running
+ *                          perpendicular to the door axis, GLASS
+ *                          windows like type 2
+ */
+static int hut_type(int hx, int hz, uint32_t seed) {
+    uint32_t r = hash3(hx, hz, seed ^ 0xC0FFEEEEu) & 0xFFu;
+    if (r < 128) return 0;
+    if (r < 192) return 1;
+    if (r < 230) return 2;
+    return 3;
 }
 
 /* Local hut chest position — fixed interior corner so the predicate
@@ -509,37 +532,112 @@ static int hut_variant(int hx, int hz, uint32_t seed) {
 #define HUT_CHEST_DZ 1
 #define HUT_CHEST_DY 1
 
+/* Top of the hut's Y range — depends on building type (type 3 adds
+ * a ridge log at +5 above the roof slab at +4). */
+#define HUT_TOP_DY 5
+
 /* What block sits at hut-local (dx, dz, dy)?
- *   dy = 0  : floor (always AIR — keep natural surface)
- *   dy = 1-3: wall perimeter (PLANK) / interior (AIR) / door opening (AIR)
- *            with a BLK_CHEST at the fixed corner cell
- *   dy = 4  : roof (full PLANK 5×5)
+ *   dy = 0      : floor (always AIR — keep natural surface)
+ *   dy = 1..3   : wall perimeter (material per type) / interior AIR
+ *                 / door opening (AIR), chest at fixed corner,
+ *                 GLASS window at chest height for types 2-3
+ *   dy = 4      : roof slab (PLANK for all current types)
+ *   dy = 5      : ridge beam (type 3 only — single WOOD line along
+ *                 the axis perpendicular to the door wall)
  * dx, dz in [0, HUT_W-1] / [0, HUT_H-1]. */
-static BlockId hut_block_local(int dx, int dz, int dy, int variant) {
-    if (dy <= 0 || dy > 4) return BLK_AIR;
-    if (dy == 4) {
-        /* Roof — full square. */
-        if (dx >= 0 && dx < HUT_W && dz >= 0 && dz < HUT_H) return BLK_PLANK;
+static BlockId hut_block_local(int dx, int dz, int dy, int dir, int type) {
+    if (dy <= 0 || dy > HUT_TOP_DY) return BLK_AIR;
+
+    /* Materials picked from the type table. */
+    BlockId wall_block, corner_block, roof_block, window_block, ridge_block;
+    switch (type) {
+        default:
+        case 0:  /* plank cabin */
+            wall_block   = BLK_PLANK;
+            corner_block = BLK_PLANK;
+            roof_block   = BLK_PLANK;
+            window_block = BLK_AIR;
+            ridge_block  = BLK_AIR;
+            break;
+        case 1:  /* log cabin */
+            wall_block   = BLK_WOOD;
+            corner_block = BLK_WOOD;
+            roof_block   = BLK_PLANK;
+            window_block = BLK_AIR;
+            ridge_block  = BLK_AIR;
+            break;
+        case 2:  /* stone house with wood corners */
+            wall_block   = BLK_STONE;
+            corner_block = BLK_WOOD;
+            roof_block   = BLK_PLANK;
+            window_block = BLK_GLASS;
+            ridge_block  = BLK_AIR;
+            break;
+        case 3:  /* cobble cottage with ridge */
+            wall_block   = BLK_COBBLE;
+            corner_block = BLK_COBBLE;
+            roof_block   = BLK_PLANK;
+            window_block = BLK_GLASS;
+            ridge_block  = BLK_WOOD;
+            break;
+    }
+
+    /* Ridge beam — type 3 only, sits one cell above the roof along
+     * the axis perpendicular to the door wall. Visible from outside;
+     * gives the cobble cottage its distinctive silhouette. */
+    if (dy == 5) {
+        if (ridge_block == BLK_AIR) return BLK_AIR;
+        /* dir 0/1 (door on N or S) → ridge runs E-W along dx, fixed dz=middle.
+         * dir 2/3 (door on E or W) → ridge runs N-S along dz, fixed dx=middle. */
+        if (dir == 0 || dir == 1) {
+            if (dz == HUT_H / 2) return ridge_block;
+        } else {
+            if (dx == HUT_W / 2) return ridge_block;
+        }
         return BLK_AIR;
     }
+
+    /* Roof slab — full 5×5. */
+    if (dy == 4) return roof_block;
+
     /* Chest sits on the floor at a fixed interior corner. */
     if (dy == HUT_CHEST_DY && dx == HUT_CHEST_DX && dz == HUT_CHEST_DZ) {
         return BLK_CHEST;
     }
+
     /* Walls — perimeter only. */
     bool on_perim = (dx == 0 || dx == HUT_W - 1 || dz == 0 || dz == HUT_H - 1);
     if (!on_perim) return BLK_AIR;
+
     /* Door — 2-cell opening at middle of the chosen wall, dy 1..2. */
     if (dy <= 2) {
-        int dir = variant & 3;
+        bool is_door = false;
         switch (dir) {
-            case 0: if (dz == 0          && dx == HUT_W / 2) return BLK_AIR; break;  /* south */
-            case 1: if (dz == HUT_H - 1  && dx == HUT_W / 2) return BLK_AIR; break;  /* north */
-            case 2: if (dx == HUT_W - 1  && dz == HUT_H / 2) return BLK_AIR; break;  /* east */
-            case 3: if (dx == 0          && dz == HUT_H / 2) return BLK_AIR; break;  /* west */
+            case 0: is_door = (dz == 0          && dx == HUT_W / 2); break;
+            case 1: is_door = (dz == HUT_H - 1  && dx == HUT_W / 2); break;
+            case 2: is_door = (dx == HUT_W - 1  && dz == HUT_H / 2); break;
+            case 3: is_door = (dx == 0          && dz == HUT_H / 2); break;
         }
+        if (is_door) return BLK_AIR;
     }
-    return BLK_PLANK;
+
+    /* Window — at chest height (dy=2), at the centre of any non-door
+     * perimeter wall. Door cells were already returned above as AIR,
+     * so a centre cell that gets here is by construction not-a-door. */
+    if (dy == 2 && window_block != BLK_AIR) {
+        bool is_wall_centre =
+            (dz == 0          && dx == HUT_W / 2) ||
+            (dz == HUT_H - 1  && dx == HUT_W / 2) ||
+            (dx == 0          && dz == HUT_H / 2) ||
+            (dx == HUT_W - 1  && dz == HUT_H / 2);
+        if (is_wall_centre) return window_block;
+    }
+
+    /* Corner pillars (dx and dz both at 0 or 4) use corner_block; the
+     * rest of the perimeter uses wall_block. For most types these are
+     * the same; type 2 (stone + wood corners) is where they diverge. */
+    bool is_corner = ((dx == 0 || dx == HUT_W - 1) && (dz == 0 || dz == HUT_H - 1));
+    return is_corner ? corner_block : wall_block;
 }
 
 /* If world cell (x, y, z) lies inside any hut footprint, set *covered
@@ -554,10 +652,11 @@ static BlockId hut_cell(int x, int y, int z, uint32_t seed, bool *covered) {
             if (!hut_origin_at(hx, hz, seed)) continue;
             int gy = hut_floor_y(hx, hz, seed);
             int dy = y - gy;
-            if (dy <= 0 || dy > 4) continue;  /* outside hut Y range */
+            if (dy <= 0 || dy > HUT_TOP_DY) continue;  /* outside hut Y range */
             *covered = true;
-            int variant = hut_variant(hx, hz, seed);
-            return hut_block_local(-dx, -dz, dy, variant);
+            int dir  = hut_door_dir(hx, hz, seed);
+            int type = hut_type(hx, hz, seed);
+            return hut_block_local(-dx, -dz, dy, dir, type);
         }
     }
     return BLK_AIR;
@@ -697,13 +796,14 @@ void craft_gen_column(int wx, int wz, uint32_t seed,
             int hx = wx + dx, hz = wz + dz;
             if (!hut_origin_at(hx, hz, seed)) continue;
             int gy = hut_floor_y(hx, hz, seed);
-            int variant = hut_variant(hx, hz, seed);
-            for (int dy = 1; dy <= 4; dy++) {
+            int dir  = hut_door_dir(hx, hz, seed);
+            int type = hut_type(hx, hz, seed);
+            for (int dy = 1; dy <= HUT_TOP_DY; dy++) {
                 int y = gy + dy;
                 if (y < 0 || y >= CRAFT_WORLD_Y) continue;
                 /* Stamp unconditionally — interior AIR clears any tree
                  * block sitting where the hut wants empty space. */
-                out[y] = (uint8_t)hut_block_local(-dx, -dz, dy, variant);
+                out[y] = (uint8_t)hut_block_local(-dx, -dz, dy, dir, type);
             }
         }
     }
@@ -781,52 +881,102 @@ bool craft_gen_is_hut_chest(int wx, int wy, int wz, uint32_t seed) {
 
 void craft_gen_seed_hut_chest(CraftChest *c, int wx, int wy, int wz,
                               uint32_t seed) {
+    /* Each chest rolls one of four rarity tiers, weighted so the
+     * jackpot is rare enough to feel rewarding. Building type is
+     * independent — a plain plank cabin can hide a legendary chest
+     * and a stone house can be near-empty. Keeps exploration
+     * worthwhile regardless of which buildings the player passes.
+     *
+     *   T0 common     (50 %): basic crafting fodder only
+     *   T1 uncommon   (30 %): adds iron / bow / wood pickaxe
+     *   T2 rare       (15 %): stone tools / redstone / bigger stacks
+     *   T3 legendary  ( 5 %): iron tools, gold, occasional diamond
+     */
     uint32_t r = hash3(wx, wy, wz) ^ (seed * 0xA1B2C3D4u);
+    int tier;
+    uint32_t tier_roll = r & 0xFFu;
+    if (tier_roll < 128)       tier = 0;
+    else if (tier_roll < 205)  tier = 1;
+    else if (tier_roll < 243)  tier = 2;
+    else                       tier = 3;
+
     int slot = 0;
-    /* Always: 2-4 sticks. Cheap basic crafting fodder. */
+
+    /* Sticks + planks scale with tier — even T0 gets crafting fodder
+     * so an empty plain chest still pays back the walk. */
     c->slots[slot].blk = BLK_STICK;
-    c->slots[slot].n   = 2 + (uint8_t)((r >> 0) & 3);
+    c->slots[slot].n   = (uint8_t)(2 + ((r >> 8) & 3) + tier);
     slot++;
-    /* Always: 2-4 planks. */
     c->slots[slot].blk = BLK_PLANK;
-    c->slots[slot].n   = 2 + (uint8_t)((r >> 2) & 3);
+    c->slots[slot].n   = (uint8_t)(1 + ((r >> 10) & 3) + tier);
     slot++;
-    /* 60 %: 1-2 torches. */
-    if ((r & 0x30) != 0) {
+
+    /* Torches — always at T1+, 50/50 at T0 (so very early-game caves
+     * aren't immediately lit by every plain chest). */
+    bool torch_drop = (tier >= 1) || (((r >> 12) & 1) == 0);
+    if (torch_drop) {
         c->slots[slot].blk = BLK_TORCH;
-        c->slots[slot].n   = 1 + (uint8_t)((r >> 6) & 1);
+        c->slots[slot].n   = (uint8_t)(1 + ((r >> 13) & (1 + tier)));
         slot++;
     }
-    /* 35 %: bow + 4-12 arrows. */
-    if (((r >> 7) & 7) < 3) {
+
+    /* Bow + arrows — T1+ guaranteed; ~25 % at T0. Arrow count scales. */
+    bool bow_drop = (tier >= 1) || (((r >> 14) & 3) == 0);
+    if (bow_drop) {
         c->slots[slot].blk = BLK_BOW;
         c->slots[slot].n   = 1;
         slot++;
         c->slots[slot].blk = BLK_ARROW;
-        c->slots[slot].n   = 4 + (uint8_t)((r >> 10) & 7);
+        c->slots[slot].n   = (uint8_t)(4 + tier * 3 + ((r >> 16) & 3));
         slot++;
     }
-    /* 30 %: 1-2 iron ingots. */
-    if (((r >> 14) & 7) < 2) {
+
+    /* Iron ingots — T1+. Count scales with tier. */
+    if (tier >= 1) {
         c->slots[slot].blk = BLK_IRON_INGOT;
-        c->slots[slot].n   = 1 + (uint8_t)((r >> 17) & 1);
+        c->slots[slot].n   = (uint8_t)(tier + ((r >> 18) & 1));
         slot++;
     }
-    /* 25 %: a tier-rolled pickaxe (wood / stone / iron weighted). */
-    if (((r >> 18) & 3) == 0) {
-        uint32_t tier = (r >> 20) & 7;
-        BlockId pick = BLK_PICKAXE_WOOD;
-        if (tier >= 6)      pick = BLK_PICKAXE_IRON;
-        else if (tier >= 3) pick = BLK_PICKAXE_STONE;
+
+    /* Pickaxe — T1 wood, T2 stone, T3 iron. */
+    if (tier >= 1) {
+        BlockId pick;
+        switch (tier) {
+            case 1:  pick = BLK_PICKAXE_WOOD;  break;
+            case 2:  pick = BLK_PICKAXE_STONE; break;
+            default: pick = BLK_PICKAXE_IRON;  break;
+        }
         c->slots[slot].blk = pick;
         c->slots[slot].n   = 1;
         slot++;
     }
-    /* 15 %: a wood / stone sword. */
-    if (((r >> 23) & 7) == 0) {
-        c->slots[slot].blk = (((r >> 26) & 1) ? BLK_SWORD_STONE : BLK_SWORD_WOOD);
+
+    /* Sword — T2+ stone, T3 iron. */
+    if (tier >= 2) {
+        c->slots[slot].blk = (tier >= 3) ? BLK_SWORD_IRON : BLK_SWORD_STONE;
         c->slots[slot].n   = 1;
         slot++;
+    }
+
+    /* Redstone dust — T2+ in small amounts, T3 in bulk. Lets the
+     * player start tinkering with circuits without first finding a
+     * vein. */
+    if (tier >= 2) {
+        c->slots[slot].blk = BLK_REDSTONE;
+        c->slots[slot].n   = (uint8_t)((tier == 2 ? 1 : 3) + ((r >> 20) & 1));
+        slot++;
+    }
+
+    /* Legendary T3 extras: gold ingots, ~50 % diamond drop. */
+    if (tier >= 3) {
+        c->slots[slot].blk = BLK_GOLD_INGOT;
+        c->slots[slot].n   = (uint8_t)(1 + ((r >> 22) & 1));
+        slot++;
+        if (((r >> 24) & 1) == 0) {
+            c->slots[slot].blk = BLK_DIAMOND;
+            c->slots[slot].n   = 1;
+            slot++;
+        }
     }
     (void)slot;
 }
