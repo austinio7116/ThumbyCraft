@@ -75,6 +75,21 @@ void        craft_main_set_autosave_level(int level);
 int         craft_main_autosave_level(void);
 const char *craft_main_autosave_label(void);
 
+/* Control scheme: which input layout the player is using. Selected
+ * from the pause menu's Controls page; persisted in the save record
+ * (high nibble of HDR_OFF_PAD). Schemes are 1..4 — see
+ * craft_player.c for the per-scheme input mapping. */
+#define CRAFT_SCHEME_CLASSIC      1   /* LB walk, RB jump, D-pad look */
+#define CRAFT_SCHEME_CLASSIC_FLIP 2   /* LB jump, RB walk, D-pad look */
+#define CRAFT_SCHEME_DPAD_STRAFE  3   /* D-pad fwd/back/strafe, LB look mod, RB jump */
+#define CRAFT_SCHEME_DPAD_TURN    4   /* D-pad fwd/back/turn, LB look mod, RB jump */
+#define CRAFT_SCHEME_MIN          1
+#define CRAFT_SCHEME_MAX          4
+
+void        craft_main_set_scheme(int scheme);
+int         craft_main_scheme(void);
+const char *craft_main_scheme_label(int scheme);    /* short label per scheme */
+
 
 /* Accessor for the player (HUD draw + save). */
 const CraftPlayer *craft_main_player(void);

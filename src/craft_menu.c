@@ -64,7 +64,7 @@ static int   s_sel;
 static int   s_scroll;          /* first visible item on main page */
 static int   s_inv_sel;
 static int   s_recipe_sel;      /* current recipe index on recipe page */
-static int   s_controls_scroll; /* first visible line on controls page */
+static int   s_scheme_focus;   /* 0..3 cursor on scheme picker page */
 
 /* Crafting state — kept across menu opens so partial recipes persist
  * if the player closes the menu accidentally. */
@@ -112,7 +112,7 @@ void craft_menu_open(const CraftInput *in) {
     s_page = PAGE_MAIN;
     s_sel  = 0;
     s_scroll = 0;
-    s_controls_scroll = 0;
+    s_scheme_focus = 0;
     s_inv_sel = 0;
     /* Seed prev-state from the live input — otherwise the next tick
      * misreads a still-being-released button as a fresh edge and
@@ -295,7 +295,13 @@ static CraftMenuResult tick_main_page(const CraftInput *in, const CraftPlayer *p
         }
         if (item->result == CRAFT_MENU_RESULT_CONTROLS) {
             s_page = PAGE_CONTROLS;
-            s_controls_scroll = 0;
+            /* Cursor starts on the currently-active scheme so the
+             * player sees what they're using as soon as the picker
+             * opens. Schemes are 1..4 contiguous in declaration order;
+             * cards array is the same order, so index = scheme - 1. */
+            int idx = craft_main_scheme() - CRAFT_SCHEME_MIN;
+            if (idx < 0 || idx > 3) idx = 0;
+            s_scheme_focus = idx;
             s_dpad_was_pressed = in->up || in->down;
             return CRAFT_MENU_RESULT_NONE;
         }
@@ -810,33 +816,54 @@ static CraftMenuResult tick_recipes_page(const CraftInput *in) {
 }
 
 /* --- Controls page ---------------------------------------------- */
-static const char *CONTROLS_LINES[] = {
-    "LOOK",
-    " D-pad L/R  turn",
-    " D-pad U/D  pitch",
-    "",
-    "MOVE",
-    " LB hold    walk fwd",
-    " RB         jump",
-    "",
-    "INTERACT",
-    " A          break",
-    " B          place",
-    "",
-    "PAUSE MENU",
-    " MENU       open",
-    " MENU+LB/RB hotbar",
-    " MENU+A     fly",
-    "",
-    "CRAFT PAGE",
-    " LB/RB      pick",
-    " A          place",
-    " A on out   craft",
-    "",
-    "B: back",
+/* Scheme picker — one card per scheme. Lines are ASCII layouts
+ * sized for the 128 px-wide panel. */
+#define SCHEME_CARD_LINES 4
+typedef struct {
+    int          scheme;          /* CRAFT_SCHEME_* */
+    const char  *name;            /* short label */
+    const char  *lines[SCHEME_CARD_LINES];   /* 3-4 mini lines */
+} SchemeCard;
+
+static const SchemeCard SCHEME_CARDS[] = {
+    {
+        CRAFT_SCHEME_CLASSIC,      "Classic",
+        {
+            "D-pad: turn + pitch",
+            "LB hold: walk fwd",
+            "RB tap: jump",
+            "2x LB hold: reverse",
+        },
+    },
+    {
+        CRAFT_SCHEME_CLASSIC_FLIP, "Classic flip",
+        {
+            "D-pad: turn + pitch",
+            "RB hold: walk fwd",
+            "LB tap: jump",
+            "2x RB hold: reverse",
+        },
+    },
+    {
+        CRAFT_SCHEME_DPAD_STRAFE,  "Walk + strafe",
+        {
+            "D-pad U/D: walk f/b",
+            "D-pad L/R: strafe",
+            "LB hold: look mode",
+            "RB tap: jump",
+        },
+    },
+    {
+        CRAFT_SCHEME_DPAD_TURN,    "Walk + turn",
+        {
+            "D-pad U/D: walk f/b",
+            "D-pad L/R: turn",
+            "LB hold + U/D: pitch",
+            "RB tap: jump",
+        },
+    },
 };
-#define CONTROLS_LINE_COUNT ((int)(sizeof(CONTROLS_LINES)/sizeof(CONTROLS_LINES[0])))
-#define CONTROLS_VISIBLE 14
+#define SCHEME_CARD_COUNT ((int)(sizeof(SCHEME_CARDS)/sizeof(SCHEME_CARDS[0])))
 
 /* Forward declarations of draw primitives defined further down. */
 static void rect(uint16_t *fb, int x, int y, int w, int h, uint16_t c);
@@ -961,30 +988,29 @@ static void draw_slot_picker_page(uint16_t *fb) {
 }
 
 static CraftMenuResult tick_controls_page(const CraftInput *in) {
+    /* UP / DOWN moves the cursor between scheme cards (no
+     * autorepeat — there are only 4 cards so a press-per-step is
+     * fine and avoids overshoots). */
     bool dpad_now = in->up || in->down;
     if (dpad_now && !s_dpad_was_pressed) {
-        if (in->up)   s_controls_scroll--;
-        if (in->down) s_controls_scroll++;
-        s_dpad_repeat_t = DPAD_INITIAL_DELAY;
-    } else if (dpad_now) {
-        s_dpad_repeat_t -= 1.0f / 30.0f;
-        if (s_dpad_repeat_t <= 0.0f) {
-            if (in->up)   s_controls_scroll--;
-            if (in->down) s_controls_scroll++;
-            s_dpad_repeat_t = DPAD_REPEAT;
-        }
+        if (in->up)   s_scheme_focus--;
+        if (in->down) s_scheme_focus++;
     }
     s_dpad_was_pressed = dpad_now;
-    int max_scroll = CONTROLS_LINE_COUNT - CONTROLS_VISIBLE;
-    if (max_scroll < 0) max_scroll = 0;
-    if (s_controls_scroll < 0) s_controls_scroll = 0;
-    if (s_controls_scroll > max_scroll) s_controls_scroll = max_scroll;
+    if (s_scheme_focus < 0)                    s_scheme_focus = 0;
+    if (s_scheme_focus >= SCHEME_CARD_COUNT)   s_scheme_focus = SCHEME_CARD_COUNT - 1;
 
+    bool a_just_released    = !in->a    && s_input_prev_a;
     bool b_just_released    = !in->b    && s_input_prev_b;
     bool menu_just_released = !in->menu && s_input_prev_menu;
     s_input_prev_a    = in->a;
     s_input_prev_b    = in->b;
     s_input_prev_menu = in->menu;
+    if (a_just_released) {
+        craft_main_set_scheme(SCHEME_CARDS[s_scheme_focus].scheme);
+        /* Stay on the page so the player sees the * marker move to
+         * the new active row — confirms the pick visually. */
+    }
     if (menu_just_released) { s_open = false; return CRAFT_MENU_RESULT_RESUME; }
     if (b_just_released)    { s_page = PAGE_MAIN; return CRAFT_MENU_RESULT_NONE; }
     return CRAFT_MENU_RESULT_NONE;
@@ -1640,7 +1666,7 @@ static void draw_recipes_page(uint16_t *fb, const CraftPlayer *p) {
 
 static void draw_controls_page(uint16_t *fb, const CraftPlayer *p) {
     (void)p;
-    int panel_w = 120, panel_h = 110;
+    int panel_w = 124, panel_h = 122;
     int x0 = (CRAFT_FB_W - panel_w) / 2;
     int y0 = (CRAFT_FB_H - panel_h) / 2;
     rect(fb, x0, y0, panel_w, panel_h, rgb565(30, 30, 40));
@@ -1651,32 +1677,55 @@ static void draw_controls_page(uint16_t *fb, const CraftPlayer *p) {
 
     const char *title = "Controls";
     int tw = craft_font_width(title);
-    craft_font_draw(fb, title, x0 + (panel_w - tw) / 2, y0 + 4, 0xFFFF);
-    rect(fb, x0 + 6, y0 + 11, panel_w - 12, 1, rgb565(80, 80, 100));
+    craft_font_draw(fb, title, x0 + (panel_w - tw) / 2, y0 + 3, 0xFFFF);
+    rect(fb, x0 + 6, y0 + 10, panel_w - 12, 1, rgb565(80, 80, 100));
 
-    int line_y = y0 + 14;
-    int visible_end = s_controls_scroll + CONTROLS_VISIBLE;
-    if (visible_end > CONTROLS_LINE_COUNT) visible_end = CONTROLS_LINE_COUNT;
-    for (int i = s_controls_scroll; i < visible_end; i++) {
-        const char *t = CONTROLS_LINES[i];
-        uint16_t col = (t[0] != ' ' && t[0] != 0)
-                       ? rgb565(180, 220, 255)   /* section header */
-                       : rgb565(220, 220, 230);  /* line */
-        craft_font_draw(fb, t, x0 + 5, line_y, col);
-        line_y += 6;
+    /* Each card is 26 px tall: header row (8 px) + up to 3 detail
+     * lines (6 px each) — only the focused card draws its full
+     * details, the others show just the title row to keep the
+     * panel readable on a 128 px screen. */
+    int active_scheme = craft_main_scheme();
+    int card_y = y0 + 13;
+    for (int i = 0; i < SCHEME_CARD_COUNT; i++) {
+        const SchemeCard *c = &SCHEME_CARDS[i];
+        bool focused = (i == s_scheme_focus);
+        bool active  = (c->scheme == active_scheme);
+
+        /* Cursor + name row. Focused row gets a subtle highlight bar
+         * so the cursor is unmistakable. Active row gets a "*"
+         * trailing marker. */
+        if (focused) {
+            rect(fb, x0 + 2, card_y - 1, panel_w - 4, 9, rgb565(55, 55, 80));
+        }
+        const char *marker = focused ? ">" : " ";
+        craft_font_draw(fb, marker, x0 + 4, card_y, rgb565(255, 220, 120));
+        uint16_t name_col = focused ? 0xFFFF : rgb565(180, 200, 230);
+        craft_font_draw(fb, c->name,  x0 + 10, card_y, name_col);
+        if (active) {
+            int nw = craft_font_width(c->name);
+            craft_font_draw(fb, "*",  x0 + 12 + nw, card_y, rgb565(120, 240, 120));
+        }
+        card_y += 8;
+
+        /* Focused card expands with its detail lines. */
+        if (focused) {
+            for (int j = 0; j < SCHEME_CARD_LINES; j++) {
+                if (!c->lines[j]) break;
+                craft_font_draw(fb, c->lines[j],
+                                x0 + 12, card_y, rgb565(200, 200, 215));
+                card_y += 6;
+            }
+            card_y += 2;
+        } else {
+            card_y += 1;
+        }
     }
 
-    /* Scroll arrows. */
-    int arrow_x = x0 + panel_w - 6;
-    if (s_controls_scroll > 0) {
-        rect(fb, arrow_x,     y0 + 14, 3, 1, 0xFFFF);
-        rect(fb, arrow_x + 1, y0 + 13, 1, 1, 0xFFFF);
-    }
-    if (visible_end < CONTROLS_LINE_COUNT) {
-        int by = y0 + 14 + CONTROLS_VISIBLE * 6 - 4;
-        rect(fb, arrow_x,     by, 3, 1, 0xFFFF);
-        rect(fb, arrow_x + 1, by + 1, 1, 1, 0xFFFF);
-    }
+    /* Footer: button hints. */
+    const char *hint = "A pick  B back";
+    int hw = craft_font_width(hint);
+    craft_font_draw(fb, hint, x0 + (panel_w - hw) / 2,
+                    y0 + panel_h - 9, rgb565(150, 160, 180));
 }
 
 static void draw_furnace_page(uint16_t *fb, const CraftPlayer *p) {

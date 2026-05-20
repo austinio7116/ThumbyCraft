@@ -179,6 +179,27 @@ const char *craft_main_autosave_label(void) {
     return autosave_label(s_autosave_level);
 }
 
+/* Control scheme state (1..4). Default is CLASSIC — the original
+ * input layout — so new worlds and saves predating the scheme
+ * field land on the existing behavior with no surprises. */
+static int s_scheme = CRAFT_SCHEME_CLASSIC;
+
+void craft_main_set_scheme(int scheme) {
+    if (scheme < CRAFT_SCHEME_MIN) scheme = CRAFT_SCHEME_MIN;
+    if (scheme > CRAFT_SCHEME_MAX) scheme = CRAFT_SCHEME_MAX;
+    s_scheme = scheme;
+}
+int craft_main_scheme(void) { return s_scheme; }
+const char *craft_main_scheme_label(int scheme) {
+    switch (scheme) {
+        case CRAFT_SCHEME_CLASSIC:      return "Classic";
+        case CRAFT_SCHEME_CLASSIC_FLIP: return "Classic flip";
+        case CRAFT_SCHEME_DPAD_STRAFE:  return "Walk + strafe";
+        case CRAFT_SCHEME_DPAD_TURN:    return "Walk + turn";
+        default:                        return "?";
+    }
+}
+
 /* Event hooks — call sites in the game logic invoke these to flag
  * a natural pause point. The actual save fires through autosave_tick
  * so all four modes share one debounce window and toast message. */

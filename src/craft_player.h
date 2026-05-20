@@ -107,6 +107,18 @@ typedef struct {
     bool   _menu_chord_used;
     bool   _lb_prev;
     bool   _lb_consumed_by_chord;
+    bool   _rb_prev;
+    bool   _rb_consumed_by_chord;
+
+    /* Walk-button double-tap-then-hold reverse gesture (schemes 1, 2
+     * only — the LB-walk / RB-walk layouts where the d-pad isn't the
+     * forward/back control). After the walk button is released a
+     * 300 ms window opens; if the next press lands inside that
+     * window, holding it walks in reverse instead of forward. Resets
+     * on release. */
+    float  _walk_dtap_t;          /* seconds since last walk-btn release */
+    bool   _walk_dtap_armed;      /* in 300 ms window, watching for re-press */
+    bool   _walk_reverse;         /* currently in reverse-hold */
 
     /* Ladder climb state. `climbing` latches true while the player
      * is actively grabbing the ladder (LB held, adjacent to ladder).

@@ -28,6 +28,7 @@
  * included). RB held ascends straight up.
  */
 #include "craft_player.h"
+#include "craft_main.h"
 #include "craft_world.h"
 #include "craft_render.h"
 #include "craft_audio.h"
@@ -217,9 +218,11 @@ void craft_player_tick(CraftPlayer *p, const CraftInput *in, float dt) {
     bool menu_just_released = !in->menu && p->_menu_prev;
     if (menu_just_pressed) p->_menu_chord_used = false;
 
-    /* ----- LB state (walk button + chord suppression) ---------- */
+    /* ----- LB/RB state (walk-button + chord suppression) -------- */
     bool lb_just_pressed  = in->lb && !p->_lb_prev;
+    bool rb_just_pressed  = in->rb && !p->_rb_prev;
     if (lb_just_pressed) p->_lb_consumed_by_chord = false;
+    if (rb_just_pressed) p->_rb_consumed_by_chord = false;
 
     /* ----- MENU + chord actions -------------------------------- */
     if (in->menu) {
@@ -231,6 +234,10 @@ void craft_player_tick(CraftPlayer *p, const CraftInput *in, float dt) {
         if (in->rb_pressed) {
             p->hotbar_idx = (p->hotbar_idx + 1) % CRAFT_HOTBAR_SLOTS;
             p->_menu_chord_used = true;
+            /* In CLASSIC_FLIP the walk button is RB — suppress walking
+             * after the menu chord consumes the press, same pattern as
+             * LB in CLASSIC. */
+            p->_rb_consumed_by_chord = true;
         }
         if (in->a_pressed) {
             /* Fly toggle only allowed in creative mode. */
@@ -249,34 +256,159 @@ void craft_player_tick(CraftPlayer *p, const CraftInput *in, float dt) {
     }
     p->_menu_prev = in->menu;
 
-    /* ----- Look + turn (D-pad is ALWAYS the look stick) -------- */
-    if (in->left)  p->cam.yaw -= TURN_SPEED * dt;
-    if (in->right) p->cam.yaw += TURN_SPEED * dt;
-    float pitch_sign = p->invert_y ? -1.0f : 1.0f;
-    if (in->up)    p->cam.pitch += PITCH_SPEED * dt * pitch_sign;
-    if (in->down)  p->cam.pitch -= PITCH_SPEED * dt * pitch_sign;
+    /* ----- Look / move dispatch by scheme ----------------------
+     *
+     *   1. CLASSIC      — LB walk, RB jump, D-pad LR turn, UD pitch
+     *   2. CLASSIC_FLIP — LB jump, RB walk, D-pad LR turn, UD pitch
+     *   3. DPAD_STRAFE  — D-pad UD walk fwd/back, LR strafe;
+     *                     LB held flips D-pad into look mode
+     *                     (LR turn, UD pitch); RB tap jump.
+     *   4. DPAD_TURN    — D-pad UD walk fwd/back, LR turn;
+     *                     LB held flips D-pad UD into pitch
+     *                     (LR stays turn); RB tap jump.
+     *
+     * Schemes 1 + 2 use a double-tap-then-hold gesture on the walk
+     * button (LB or RB respectively) to walk in reverse instead of
+     * forward — see walk_dtap_update() below. */
+    int scheme = craft_main_scheme();
+
+    /* Which D-pad axes drive yaw vs pitch this frame. */
+    bool dpad_pitches, dpad_turns_lr, dpad_strafes_lr;
+    if (scheme == CRAFT_SCHEME_CLASSIC || scheme == CRAFT_SCHEME_CLASSIC_FLIP) {
+        dpad_pitches    = true;
+        dpad_turns_lr   = true;
+        dpad_strafes_lr = false;
+    } else if (scheme == CRAFT_SCHEME_DPAD_STRAFE) {
+        /* Look modifier: LB-held flips D-pad from move into look. */
+        bool look_mod   = in->lb && !p->_lb_consumed_by_chord;
+        dpad_pitches    = look_mod;          /* UD only pitches when LB held */
+        dpad_turns_lr   = look_mod;          /* LR turns only when LB held */
+        dpad_strafes_lr = !look_mod;         /* default LR is strafe */
+    } else { /* DPAD_TURN */
+        bool look_mod   = in->lb && !p->_lb_consumed_by_chord;
+        dpad_pitches    = look_mod;          /* UD only pitches when LB held */
+        dpad_turns_lr   = true;              /* LR always turns */
+        dpad_strafes_lr = false;
+    }
+
+    if (dpad_turns_lr) {
+        if (in->left)  p->cam.yaw -= TURN_SPEED * dt;
+        if (in->right) p->cam.yaw += TURN_SPEED * dt;
+    }
+    if (dpad_pitches) {
+        float pitch_sign = p->invert_y ? -1.0f : 1.0f;
+        if (in->up)    p->cam.pitch += PITCH_SPEED * dt * pitch_sign;
+        if (in->down)  p->cam.pitch -= PITCH_SPEED * dt * pitch_sign;
+    }
     const float pmax = 85.0f * 3.14159265f / 180.0f;
     if (p->cam.pitch >  pmax) p->cam.pitch =  pmax;
     if (p->cam.pitch < -pmax) p->cam.pitch = -pmax;
-    p->_lb_prev = in->lb;
 
     /* ----- Camera basis vectors -------------------------------- */
     float cy = cosf(p->cam.yaw),  sy = sinf(p->cam.yaw);
     float cp = cosf(p->cam.pitch), sp = sinf(p->cam.pitch);
     Vec3 fwd_full = v3(sy * cp, sp, cy * cp);
     Vec3 fwd_h    = v3(sy, 0.0f, cy);
+    /* Player-right (horizontal). Perpendicular to fwd_h, pointing to
+     * the player's right hand. Used for strafe in DPAD_STRAFE. */
+    Vec3 right_h  = v3(cy, 0.0f, -sy);
 
-    /* ----- Build wish vector — LB held = walk forward ---------- */
-    Vec3 wish = v3(0, 0, 0);
-    bool walk_active = in->lb && !p->_lb_consumed_by_chord;
-    if (walk_active) {
-        Vec3 fwd = p->fly_mode ? fwd_full : fwd_h;
-        wish = fwd;
+    /* ----- Walk-button double-tap-hold state (schemes 1+2 only) -
+     *
+     * Walk-btn = LB in scheme 1, RB in scheme 2. Releasing it opens
+     * a 300 ms window; if a fresh press lands inside that window,
+     * the resulting hold walks in reverse instead of forward.
+     * Resets on release. Schemes 3 and 4 use D-pad DOWN for reverse
+     * so the dtap state stays parked. */
+    bool walk_btn;
+    bool walk_btn_just_pressed;
+    bool walk_btn_consumed;
+    if (scheme == CRAFT_SCHEME_CLASSIC_FLIP) {
+        walk_btn              = in->rb;
+        walk_btn_just_pressed = rb_just_pressed;
+        walk_btn_consumed     = p->_rb_consumed_by_chord;
+    } else {
+        /* Scheme 1, plus the parked path for 3/4 (where this state
+         * just stays idle). */
+        walk_btn              = in->lb;
+        walk_btn_just_pressed = lb_just_pressed;
+        walk_btn_consumed     = p->_lb_consumed_by_chord;
+    }
+    bool walk_btn_just_released =
+        !walk_btn && ((scheme == CRAFT_SCHEME_CLASSIC_FLIP) ? p->_rb_prev : p->_lb_prev);
+
+    if (scheme == CRAFT_SCHEME_CLASSIC || scheme == CRAFT_SCHEME_CLASSIC_FLIP) {
+        if (walk_btn_just_released) {
+            p->_walk_dtap_t     = 0.0f;
+            p->_walk_dtap_armed = true;
+            p->_walk_reverse    = false;
+        } else if (p->_walk_dtap_armed) {
+            p->_walk_dtap_t += dt;
+            if (p->_walk_dtap_t > 0.30f) p->_walk_dtap_armed = false;
+        }
+        if (walk_btn_just_pressed && p->_walk_dtap_armed && !walk_btn_consumed) {
+            p->_walk_reverse    = true;
+            p->_walk_dtap_armed = false;
+        }
+    } else {
+        /* Park the dtap state so a scheme switch can't start with a
+         * latched "in reverse" flag. */
+        p->_walk_dtap_armed = false;
+        p->_walk_reverse    = false;
     }
 
+    /* ----- Build wish vector ----------------------------------- */
+    Vec3 wish = v3(0, 0, 0);
+    Vec3 fwd  = p->fly_mode ? fwd_full : fwd_h;
+    /* `walk_active` feeds the auto-step "stuck against wall" timer
+     * further down (see line near vel.x/vel.z assignment). Treat it
+     * as "player is trying to move horizontally this frame" so the
+     * timer ticks up only while the wish-vector is non-zero. */
+    bool walk_active;  /* assigned after wish-vector population below */
+
+    if (scheme == CRAFT_SCHEME_CLASSIC || scheme == CRAFT_SCHEME_CLASSIC_FLIP) {
+        /* Walk = walk_btn held, direction flips when _walk_reverse. */
+        bool walk_active = walk_btn && !walk_btn_consumed;
+        if (walk_active) {
+            if (p->_walk_reverse) {
+                wish = v3(-fwd.x, -fwd.y, -fwd.z);
+            } else {
+                wish = fwd;
+            }
+        }
+    } else {
+        /* Schemes 3/4: D-pad UP/DOWN walk fwd/back when NOT in look
+         * modifier mode. LB-hold (the modifier) parks D-pad UD into
+         * pitch, so it can't walk simultaneously. */
+        bool look_mod = in->lb && !p->_lb_consumed_by_chord;
+        if (!look_mod) {
+            if (in->up)   wish = fwd;
+            if (in->down) wish = v3(-fwd.x, -fwd.y, -fwd.z);
+            if (scheme == CRAFT_SCHEME_DPAD_STRAFE) {
+                if (in->left) {
+                    wish.x -= right_h.x;
+                    wish.z -= right_h.z;
+                }
+                if (in->right) {
+                    wish.x += right_h.x;
+                    wish.z += right_h.z;
+                }
+            }
+            /* DPAD_TURN: LR is already turning via yaw above. */
+        }
+    }
+    walk_active = (wish.x != 0.0f) || (wish.z != 0.0f);
+
     if (p->fly_mode) {
-        /* RB held = ascend directly. */
-        if (in->rb) wish.y += 1.0f;
+        /* Fly mode "ascend straight up" button:
+         *   schemes 1, 3, 4 — RB held (RB is the spare button there)
+         *   scheme 2        — RB is the walk button, so ascend is
+         *                     reached by walking + looking up; no
+         *                     extra straight-up override.
+         */
+        bool rb_ascend = in->rb;
+        if (scheme == CRAFT_SCHEME_CLASSIC_FLIP) rb_ascend = false;
+        if (rb_ascend) wish.y += 1.0f;
         float wl = sqrtf(wish.x*wish.x + wish.y*wish.y + wish.z*wish.z);
         if (wl > 0.001f) {
             float s = FLY_SPEED / wl;
@@ -298,16 +430,19 @@ void craft_player_tick(CraftPlayer *p, const CraftInput *in, float dt) {
         p->vel.y += GRAVITY * dt;
         /* Ladder climbing.
          *
-         * Engagement is explicit — the player must HOLD LB while
-         * standing in a cell whose chest- or feet-height neighbour
-         * is a ladder. Without LB, gravity applies normally; you
-         * fall past ladders unless you choose to grab them.
+         * Engagement varies by scheme:
+         *   schemes 1, 2 — HOLD the walk button (LB or RB) with
+         *                  positive pitch to ascend; pitch <= -0.05
+         *                  descends once engaged. Direction is by
+         *                  pitch.
+         *   schemes 3, 4 — D-pad UP held to ascend, D-pad DOWN held
+         *                  to descend. Direction is by D-pad axis;
+         *                  no pitch dependency.
          *
-         * Direction follows pitch: looking up ascends, looking down
-         * descends. Once descending, the moment you touch the
-         * ground we latch a lockout so the next ladder cell in a
-         * corridor floor doesn't immediately re-grab you. You
-         * release LB + repress with upward pitch to re-engage. */
+         * In every scheme: once the climber lands on the ground a
+         * lockout latches so the next ladder cell in a corridor
+         * floor doesn't immediately re-grab. Release the engage
+         * button + fresh press in the engage direction to re-grab. */
         int cx = (int)floorf(p->cam.pos.x);
         int cz = (int)floorf(p->cam.pos.z);
         int cy_feet = (int)floorf(p->cam.pos.y - PLAYER_EYE);
@@ -323,16 +458,31 @@ void craft_player_tick(CraftPlayer *p, const CraftInput *in, float dt) {
             if (craft_world_get(ax, cy_feet, az)  == BLK_LADDER) ladder_adj = true;
             if (craft_world_get(ax, cy_chest, az) == BLK_LADDER) ladder_adj = true;
         }
-        /* Lockout clears the moment LB is released — fresh press
-         * with upward pitch is the only way to re-engage. */
-        if (!in->lb) p->climb_lockout = false;
 
-        bool lb_engage = in->lb && !in->menu && ladder_adj &&
-                         !p->climb_lockout &&
-                         (p->climbing || p->cam.pitch >= 0.10f);
-        if (lb_engage) {
+        bool climb_engage = false;
+        float climb_vel = 0.0f;
+        if (scheme == CRAFT_SCHEME_CLASSIC || scheme == CRAFT_SCHEME_CLASSIC_FLIP) {
+            /* Lockout clears the moment the walk-button is released. */
+            if (!walk_btn) p->climb_lockout = false;
+            climb_engage = walk_btn && !walk_btn_consumed && !in->menu &&
+                           ladder_adj && !p->climb_lockout &&
+                           (p->climbing || p->cam.pitch >= 0.10f);
+            if (climb_engage)
+                climb_vel = (p->cam.pitch >= -0.05f) ? 3.5f : -3.5f;
+        } else {
+            /* Schemes 3/4: D-pad UP / DOWN engage. Lockout clears
+             * when neither UP nor DOWN is held. */
+            if (!in->up && !in->down) p->climb_lockout = false;
+            bool up_eng   = in->up   && ladder_adj && !p->climb_lockout && !in->menu;
+            bool down_eng = in->down && ladder_adj && !p->climb_lockout && !in->menu;
+            climb_engage = (p->climbing && (up_eng || down_eng)) ||
+                           (!p->climbing && up_eng);
+            if (climb_engage)
+                climb_vel = in->down ? -3.5f : 3.5f;
+        }
+        if (climb_engage) {
             p->climbing  = true;
-            p->vel.y     = (p->cam.pitch >= -0.05f) ? 3.5f : -3.5f;
+            p->vel.y     = climb_vel;
             p->vel.x     = 0.0f;
             p->vel.z     = 0.0f;
             p->fall_peak_y = p->cam.pos.y;
@@ -341,15 +491,26 @@ void craft_player_tick(CraftPlayer *p, const CraftInput *in, float dt) {
              * next tick treats this as a fresh grab attempt. */
             if (p->climbing) p->climbing = false;
         }
-        /* RB tap on ground = jump. Suppressed while MENU is held —
-         * otherwise MENU+RB (hotbar-next chord) launches the player
-         * mid-cycle, and MENU+LB users who flick RB by accident
-         * get a surprise hop. */
-        if (in->rb_pressed && (p->on_ground || ladder_adj) && !in->menu) {
+        /* Jump:
+         *   schemes 1, 3, 4 — RB tap
+         *   scheme 2        — LB tap (LB is the jump button there)
+         *
+         * Suppressed while MENU is held so MENU+LB/RB hotbar chords
+         * don't accidentally launch the player. */
+        bool jump_pressed;
+        if (scheme == CRAFT_SCHEME_CLASSIC_FLIP) {
+            jump_pressed = in->lb_pressed && !p->_lb_consumed_by_chord;
+        } else {
+            jump_pressed = in->rb_pressed;
+        }
+        if (jump_pressed && (p->on_ground || ladder_adj) && !in->menu) {
             p->vel.y = JUMP_VEL;
             p->on_ground = false;
         }
     }
+
+    p->_lb_prev = in->lb;
+    p->_rb_prev = in->rb;
 
     /* ----- AABB sweep ------------------------------------------ */
     float dx = p->vel.x * dt;

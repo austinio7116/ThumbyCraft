@@ -93,7 +93,18 @@ size_t craft_save_serialise(uint32_t seed, uint32_t chunks_nonce,
     out[HDR_OFF_MODE]      = (uint8_t)p->mode;
     out[HDR_OFF_HP]        = (uint8_t)p->hp;
     out[HDR_OFF_HOTBARIDX] = (uint8_t)p->hotbar_idx;
-    out[HDR_OFF_PAD]       = autosave_level;
+    /* PAD byte packs two fields into 4-bit nibbles:
+     *   low  nibble = autosave_level (1..4)
+     *   high nibble = control scheme (1..4)
+     * Old saves that predate the scheme field have high nibble = 0,
+     * which deserialise() maps to CRAFT_SCHEME_CLASSIC (the original
+     * input layout). */
+    {
+        uint8_t scheme  = (uint8_t)craft_main_scheme();
+        uint8_t pad     = (uint8_t)((autosave_level & 0x0F) |
+                                    ((scheme & 0x0F) << 4));
+        out[HDR_OFF_PAD] = pad;
+    }
     for (int i = 0; i < CRAFT_HOTBAR_SLOTS; i++) {
         out[HDR_OFF_HOTBAR + i] = (uint8_t)p->hotbar[i];
     }
@@ -129,12 +140,19 @@ bool craft_save_deserialise(const uint8_t *in, size_t n,
     p->hp         = in[HDR_OFF_HP];
     p->hotbar_idx = in[HDR_OFF_HOTBARIDX];
     if (p->hotbar_idx >= CRAFT_HOTBAR_SLOTS) p->hotbar_idx = 0;
-    /* Restore the persisted autosave level (1..4). 0 means a save
-     * from before this field existed — default to 1 (off). */
+    /* Restore the persisted autosave level (low nibble of PAD) +
+     * control scheme (high nibble of PAD). Pre-scheme saves have a
+     * zero high nibble — fall back to CRAFT_SCHEME_CLASSIC. Pre-
+     * autosave saves have a zero low nibble — fall back to 1 (off). */
     {
-        uint8_t lv = in[HDR_OFF_PAD];
+        uint8_t pad    = in[HDR_OFF_PAD];
+        uint8_t lv     = pad & 0x0F;
+        uint8_t scheme = (uint8_t)((pad >> 4) & 0x0F);
         if (lv < 1 || lv > 4) lv = 1;
+        if (scheme < CRAFT_SCHEME_MIN || scheme > CRAFT_SCHEME_MAX)
+            scheme = CRAFT_SCHEME_CLASSIC;
         craft_main_set_autosave_level(lv);
+        craft_main_set_scheme(scheme);
     }
     for (int i = 0; i < CRAFT_HOTBAR_SLOTS; i++) {
         p->hotbar[i] = (BlockId)in[HDR_OFF_HOTBAR + i];
