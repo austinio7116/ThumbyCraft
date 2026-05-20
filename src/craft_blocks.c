@@ -14,9 +14,13 @@
  * every frame. */
 #ifdef CRAFT_TEXTURES_BAKED
 extern const uint16_t craft_textures_baked[CRAFT_TEX_COUNT * CRAFT_TEX_PIXELS];
-/* Slot 0 = water top, slot 1 = water side. animate_water writes here
- * and craft_block_texture redirects water lookups to this scratch. */
-static uint16_t craft_water_anim_tex[2 * CRAFT_TEX_PIXELS];
+/* Two pre-rendered water frames, [frame][face: 0=top,1=side]. The
+ * frames are visibly distinct (different jitter + band offset) so the
+ * alternation reads as obvious surface motion. animate_water just
+ * toggles which one craft_block_texture returns. */
+static uint16_t craft_water_frames[2][2 * CRAFT_TEX_PIXELS];
+static int      craft_water_frame_idx;
+static bool     craft_water_frames_built;
 #else
 uint16_t craft_textures[CRAFT_TEX_COUNT * CRAFT_TEX_PIXELS];
 #endif
@@ -37,12 +41,12 @@ static int slot_for(BlockId blk, Face face) {
 const uint16_t *craft_block_texture(BlockId blk, Face face) {
     int s = slot_for(blk, face);
 #ifdef CRAFT_TEXTURES_BAKED
-    /* Animated water — return the writable scratch instead of flash.
-     * Bottom face (FACE_NY) is never animated, so it still uses
-     * the baked copy. */
+    /* Animated water — return the current frame from the in-RAM
+     * frame pair. Bottom face (FACE_NY) keeps the baked copy. */
     if (blk == BLK_WATER) {
-        if (face == FACE_PY) return &craft_water_anim_tex[0 * CRAFT_TEX_PIXELS];
-        if (face != FACE_NY) return &craft_water_anim_tex[1 * CRAFT_TEX_PIXELS];
+        int fr = craft_water_frame_idx & 1;
+        if (face == FACE_PY) return &craft_water_frames[fr][0 * CRAFT_TEX_PIXELS];
+        if (face != FACE_NY) return &craft_water_frames[fr][1 * CRAFT_TEX_PIXELS];
     }
     return &craft_textures_baked[s * CRAFT_TEX_PIXELS];
 #else
@@ -203,25 +207,45 @@ static void water_pattern(uint16_t *dst, uint32_t seed) {
     }
 }
 
-void craft_blocks_animate_water(float t) {
-#ifdef CRAFT_TEXTURES_BAKED
-    uint16_t *top  = &craft_water_anim_tex[0 * CRAFT_TEX_PIXELS];
-    uint16_t *side = &craft_water_anim_tex[1 * CRAFT_TEX_PIXELS];
-#else
-    uint16_t *top  = &craft_textures[(BLK_WATER * 3 + 0) * CRAFT_TEX_PIXELS];
-    uint16_t *side = &craft_textures[(BLK_WATER * 3 + 1) * CRAFT_TEX_PIXELS];
-#endif
-    int offset = (int)(t * 8.0f);
+/* Bake one water frame into out_top + out_side. Variant 0 / 1 produce
+ * two visibly distinct patterns (different band offset + different
+ * jitter seed) that alternate to give clear surface motion. */
+static void bake_water_frame(uint16_t *out_top, uint16_t *out_side, int variant) {
+    uint32_t s = 0xC0FFEEu ^ (variant ? 0x9E3779B9u : 0u);
+    int band_shift = variant ? 1 : 0;
     for (int y = 0; y < CRAFT_TEX_SIZE; y++) {
-        int phase = ((y + offset) / 2) & 1;
-        int band = phase ? 18 : -6;
+        int phase = ((y + band_shift) / 2) & 1;
+        int band  = phase ? 18 : -6;
         for (int x = 0; x < CRAFT_TEX_SIZE; x++) {
-            int jitter = (((x * 73 + y * 41 + offset * 13) & 0x1f) - 16) / 2;
-            uint16_t c = rgb565(30 + jitter, 90 + jitter, 180 + band + jitter);
-            side[y * CRAFT_TEX_SIZE + x] = c;
-            top [y * CRAFT_TEX_SIZE + x] = c;
+            int j = ((int)(xs32(&s) & 0x1f) - 16) / 2;
+            uint16_t c = rgb565(30 + j, 90 + j, 180 + band + j);
+            out_side[y * CRAFT_TEX_SIZE + x] = c;
+            out_top [y * CRAFT_TEX_SIZE + x] = c;
         }
     }
+}
+
+void craft_blocks_animate_water(float t) {
+#ifdef CRAFT_TEXTURES_BAKED
+    /* Lazy first-time build — guard for the case where build_textures
+     * hasn't run yet (shouldn't normally happen, but harmless). */
+    if (!craft_water_frames_built) {
+        bake_water_frame(&craft_water_frames[0][0 * CRAFT_TEX_PIXELS],
+                         &craft_water_frames[0][1 * CRAFT_TEX_PIXELS], 0);
+        bake_water_frame(&craft_water_frames[1][0 * CRAFT_TEX_PIXELS],
+                         &craft_water_frames[1][1 * CRAFT_TEX_PIXELS], 1);
+        craft_water_frames_built = true;
+    }
+    /* 4 Hz toggle — same cadence as classic Minecraft water. */
+    craft_water_frame_idx = ((int)(t * 4.0f)) & 1;
+#else
+    /* Unbaked (host development) path — write the chosen frame
+     * straight into the atlas slot used by the renderer. */
+    uint16_t *top  = &craft_textures[(BLK_WATER * 3 + 0) * CRAFT_TEX_PIXELS];
+    uint16_t *side = &craft_textures[(BLK_WATER * 3 + 1) * CRAFT_TEX_PIXELS];
+    int variant = ((int)(t * 4.0f)) & 1;
+    bake_water_frame(top, side, variant);
+#endif
 }
 
 /* Glass — mostly transparent-feeling pale tile with a darker frame. */
@@ -250,15 +274,14 @@ static void leaves_pattern(uint16_t *dst, uint32_t seed) {
 
 #ifdef CRAFT_TEXTURES_BAKED
 void craft_blocks_build_textures(void) {
-    /* No-op — atlas lives in flash. We still need to seed the water
-     * animation scratch with the baked water side/top so the first
-     * frame before animate_water runs isn't garbage. */
-    memcpy(&craft_water_anim_tex[0 * CRAFT_TEX_PIXELS],
-           &craft_textures_baked[(BLK_WATER * 3 + 0) * CRAFT_TEX_PIXELS],
-           sizeof(uint16_t) * CRAFT_TEX_PIXELS);
-    memcpy(&craft_water_anim_tex[1 * CRAFT_TEX_PIXELS],
-           &craft_textures_baked[(BLK_WATER * 3 + 1) * CRAFT_TEX_PIXELS],
-           sizeof(uint16_t) * CRAFT_TEX_PIXELS);
+    /* Atlas lives in flash; we just need to bake the two animated
+     * water frames once into the in-RAM frame pair. */
+    bake_water_frame(&craft_water_frames[0][0 * CRAFT_TEX_PIXELS],
+                     &craft_water_frames[0][1 * CRAFT_TEX_PIXELS], 0);
+    bake_water_frame(&craft_water_frames[1][0 * CRAFT_TEX_PIXELS],
+                     &craft_water_frames[1][1 * CRAFT_TEX_PIXELS], 1);
+    craft_water_frames_built = true;
+    craft_water_frame_idx = 0;
 }
 #else
 /* Generate an ore tile: speckled-stone base with ~18 small material

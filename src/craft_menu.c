@@ -15,6 +15,7 @@
 #include "craft_chests.h"
 #include "craft_save.h"
 #include "craft_main.h"
+#include "craft_render.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -41,6 +42,8 @@ static const MenuItem ITEMS[] = {
     { "SFX vol",       CRAFT_MENU_RESULT_SFX_VOL,    false },
     { "New world",     CRAFT_MENU_RESULT_NEW_WORLD,  true  },
     { "Auto save",     CRAFT_MENU_RESULT_AUTOSAVE,   false },
+    { "Far LOD",       CRAFT_MENU_RESULT_FAR_LOD,    false },
+    { "Interlace",     CRAFT_MENU_RESULT_INTERLACE,  false },
 };
 #define ITEM_COUNT ((int)(sizeof(ITEMS) / sizeof(ITEMS[0])))
 
@@ -1337,6 +1340,20 @@ static void draw_main_page(uint16_t *fb, const CraftPlayer *p) {
             const char *st = craft_main_autosave_label();
             int sw = craft_font_width(st);
             bool on = (craft_main_autosave_level() > 1);
+            craft_font_draw(fb, st, x0 + panel_w - sw - 6, item_y,
+                            on ? rgb565(120, 220, 255)
+                               : rgb565(120, 120, 130));
+        } else if (ITEMS[i].result == CRAFT_MENU_RESULT_FAR_LOD) {
+            bool on = craft_render_get_far_lod();
+            const char *st = on ? "ON" : "OFF";
+            int sw = craft_font_width(st);
+            craft_font_draw(fb, st, x0 + panel_w - sw - 6, item_y,
+                            on ? rgb565(120, 220, 255)
+                               : rgb565(120, 120, 130));
+        } else if (ITEMS[i].result == CRAFT_MENU_RESULT_INTERLACE) {
+            bool on = craft_render_get_interlace();
+            const char *st = on ? "ON" : "OFF";
+            int sw = craft_font_width(st);
             craft_font_draw(fb, st, x0 + panel_w - sw - 6, item_y,
                             on ? rgb565(120, 220, 255)
                                : rgb565(120, 120, 130));

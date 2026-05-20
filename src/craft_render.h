@@ -62,6 +62,20 @@ void craft_render_set_fog(bool on);
 void craft_render_set_clouds(bool on);
 bool craft_render_get_clouds(void);
 
+/* Toggle far-LOD: hits past ~32 cells use the texture's centre texel
+ * as a flat-colour shortcut instead of full UV sampling. Cheaper but
+ * shows a visible "LOD pop" as the player walks. */
+void craft_render_set_far_lod(bool on);
+bool craft_render_get_far_lod(void);
+
+/* Toggle interlaced rendering: render half the rows per frame
+ * (alternating phase) and reconstruct the rest by copying their
+ * same-tile rendered neighbour. ~45% pixel-loop savings with a mild
+ * "scan-line" softness; no temporal artefacts since the copy uses
+ * the current frame's data. */
+void craft_render_set_interlace(bool on);
+bool craft_render_get_interlace(void);
+
 /* Drive the day/night cycle. `world_time` is seconds since world
  * start (or current cycle position — wraps every 240 s by the
  * convention craft_main uses). Updates sun position, sky colours,

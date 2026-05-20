@@ -535,6 +535,18 @@ static void handle_menu_result(CraftMenuResult r) {
             s_player.invert_y = !s_player.invert_y;
             craft_menu_toast(s_player.invert_y ? "Invert Y ON" : "Invert Y OFF");
             break;
+        case CRAFT_MENU_RESULT_FAR_LOD: {
+            bool on = !craft_render_get_far_lod();
+            craft_render_set_far_lod(on);
+            craft_menu_toast(on ? "Far LOD ON" : "Far LOD OFF");
+            break;
+        }
+        case CRAFT_MENU_RESULT_INTERLACE: {
+            bool on = !craft_render_get_interlace();
+            craft_render_set_interlace(on);
+            craft_menu_toast(on ? "Interlace ON" : "Interlace OFF");
+            break;
+        }
         case CRAFT_MENU_RESULT_MUSIC: {
             bool on = !craft_audio_music_is_enabled();
             craft_audio_music_enable(on);

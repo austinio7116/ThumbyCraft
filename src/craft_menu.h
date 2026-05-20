@@ -35,7 +35,9 @@ typedef enum {
     CRAFT_MENU_RESULT_CRAFT,       /* enter 3×3 crafting sub-page */
     CRAFT_MENU_RESULT_RECIPES,     /* enter recipe-book sub-page */
     CRAFT_MENU_RESULT_CONTROLS,    /* enter controls cheat-sheet */
-    CRAFT_MENU_RESULT_AUTOSAVE     /* cycle auto-save level 1..4 */
+    CRAFT_MENU_RESULT_AUTOSAVE,    /* cycle auto-save level 1..4 */
+    CRAFT_MENU_RESULT_FAR_LOD,     /* toggle far-distance texture LOD */
+    CRAFT_MENU_RESULT_INTERLACE    /* toggle interlaced row rendering */
 } CraftMenuResult;
 
 /* Open the menu. `in` is the current input snapshot — used to seed

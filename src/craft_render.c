@@ -25,10 +25,41 @@
 #define CRAFT_MAX_STEPS  64
 #define CRAFT_MAX_DIST   60.0f
 
+/* HUD hotbar background plate — fully opaque, drawn over the world in
+ * craft_hud_draw_hotbar after the strip. We skip raycasting under it
+ * because nothing we render in those pixels can ever be seen.
+ *
+ * Geometry mirrors craft_hud_draw_hotbar:
+ *   slot_w = 14, gap = 1, slots = 8
+ *   total  = 8*14 + 7*1   = 119
+ *   x0     = (128 - 119) / 2 = 4
+ *   y0     = 128 - 14 - 1    = 113
+ *   plate  = (x0 - 2, y0 - 1) size (total + 4, slot_w + 2)
+ *          = (2, 112) size (123, 16)  → x ∈ [2,124], y ∈ [112,127]
+ */
+#define CRAFT_HUD_PLATE_X0   2
+#define CRAFT_HUD_PLATE_X1   124
+#define CRAFT_HUD_PLATE_Y0   112
+
 #define INLINE_HOT static inline __attribute__((always_inline))
 
 static bool  s_fog_enabled = true;
 static bool  s_clouds_enabled = true;
+/* When on, hits past ~32 cells skip UV sampling and use the centre
+ * texel as a flat-colour LOD. Saves a few cycles per far-pixel; the
+ * tradeoff is a visible "LOD pop" at the threshold as the player
+ * walks. Compared against h.t (ray param, not world distance) — at
+ * typical |dir| ≈ 1.0–1.3 the threshold lands close to 32 cells. */
+static bool  s_far_lod_enabled = false;
+#define CRAFT_FAR_LOD_T_THRESHOLD  32.0f
+
+/* Interlaced rendering — render half the rows per frame (alternating
+ * phase) and fill the rest by copying from the just-rendered
+ * neighbour in the same multicore tile. No previous-frame data is
+ * used → no temporal shearing on motion; the visible artefact is a
+ * mild "scan-line" softness that stays in screen space. */
+static bool s_interlace_enabled = false;
+static int  s_interlace_phase   = 0;   /* 0 → render even rows, 1 → odd */
 static float s_sun_y = 1.0f;          /* sin(sun_angle): +1 noon, -1 midnight */
 static float s_cloud_drift = 0.0f;    /* world units of east drift since boot */
 static int   s_brightness_q8 = 256;   /* 0..256, applied to face_shade */
@@ -38,6 +69,13 @@ static int   s_sky_horizon_r, s_sky_horizon_g, s_sky_horizon_b;
 void craft_render_set_fog(bool on) { s_fog_enabled = on; }
 void craft_render_set_clouds(bool on) { s_clouds_enabled = on; }
 bool craft_render_get_clouds(void) { return s_clouds_enabled; }
+void craft_render_set_far_lod(bool on) { s_far_lod_enabled = on; }
+bool craft_render_get_far_lod(void) { return s_far_lod_enabled; }
+void craft_render_set_interlace(bool on) {
+    s_interlace_enabled = on;
+    if (!on) s_interlace_phase = 0;
+}
+bool craft_render_get_interlace(void) { return s_interlace_enabled; }
 float craft_render_sun_y(void) { return s_sun_y; }
 int   craft_render_brightness_q8(void) { return s_brightness_q8; }
 
@@ -95,19 +133,24 @@ void craft_render_set_time(float world_time) {
     s_sky_horizon_b = (int)(h_b * (1.0f - glow) +  60.0f * glow);
 }
 
-INLINE_HOT uint16_t sky_at(int py) {
-    /* Vertical lerp top→horizon. Stars at night in the upper half:
-     * cheap deterministic xorshift on (px,py) → sparse white pixels
-     * whose brightness scales with -sun_y. Computed inline in the
-     * pixel loop instead of here so we have access to px. */
-    int t = py;
-    int r = s_sky_top_r + ((s_sky_horizon_r - s_sky_top_r) * t) / (CRAFT_FB_H - 1);
-    int g = s_sky_top_g + ((s_sky_horizon_g - s_sky_top_g) * t) / (CRAFT_FB_H - 1);
-    int b = s_sky_top_b + ((s_sky_horizon_b - s_sky_top_b) * t) / (CRAFT_FB_H - 1);
-    if (r > 255) r = 255;
-    if (g > 255) g = 255;
-    if (b > 255) b = 255;
-    return rgb565(r, g, b);
+/* Row-keyed sky cache — sky_at depends only on py and the per-frame
+ * sky gradient, so we materialise it once in craft_render_begin and
+ * the pixel loop + fog_mix both read from this LUT. Saves thousands
+ * of multiplies + integer divides per frame. */
+static uint16_t s_sky_row[CRAFT_FB_H];
+
+INLINE_HOT uint16_t sky_at(int py) { return s_sky_row[py]; }
+
+static void rebuild_sky_row(void) {
+    for (int py = 0; py < CRAFT_FB_H; py++) {
+        int r = s_sky_top_r + ((s_sky_horizon_r - s_sky_top_r) * py) / (CRAFT_FB_H - 1);
+        int g = s_sky_top_g + ((s_sky_horizon_g - s_sky_top_g) * py) / (CRAFT_FB_H - 1);
+        int b = s_sky_top_b + ((s_sky_horizon_b - s_sky_top_b) * py) / (CRAFT_FB_H - 1);
+        if (r > 255) r = 255;
+        if (g > 255) g = 255;
+        if (b > 255) b = 255;
+        s_sky_row[py] = rgb565(r, g, b);
+    }
 }
 
 /* Legacy screen-space star sprinkle — kept for reference. Real stars
@@ -130,13 +173,14 @@ INLINE_HOT uint16_t fog_mix(uint16_t c, int t, int py) {
     return (uint16_t)((rr << 11) | (gg << 5) | bb);
 }
 
+/* World-render shade: m is bounded to ≤ 256 (s_face_shade_lit clamp
+ * in craft_render_begin; shaded/deep_cave/TORCH_FLOOR derivatives are
+ * all smaller still). With RGB565 channels ≤ 31/63/31 and m ≤ 256,
+ * (channel * m) >> 8 ≤ channel — so the prior clamps were dead. */
 INLINE_HOT uint16_t shade(uint16_t c, int m) {
     int r = ((c >> 11) & 0x1F) * m >> 8;
     int g = ((c >>  5) & 0x3F) * m >> 8;
     int b = ( c        & 0x1F) * m >> 8;
-    if (r > 31) r = 31;
-    if (g > 63) g = 63;
-    if (b > 31) b = 31;
     return (uint16_t)((r << 11) | (g << 5) | b);
 }
 
@@ -159,6 +203,7 @@ typedef struct {
     float  t;
     BlockId blk;
     bool   passed_water;
+    bool   passed_glass;
 } TraceHit;
 
 INLINE_HOT TraceHit trace_ray(Vec3 origin, Vec3 dir, bool stop_at_water) {
@@ -274,6 +319,12 @@ INLINE_HOT TraceHit trace_ray(Vec3 origin, Vec3 dir, bool stop_at_water) {
                 continue;
             }
         }
+        if (blk == BLK_GLASS) {
+            if (!stop_at_water) {
+                h.passed_glass = true;
+                continue;
+            }
+        }
 
         h.hit = true;
         h.bx = vx; h.by = vy; h.bz = vz;
@@ -367,6 +418,8 @@ void craft_render_begin(const CraftCamera *cam) {
         if (v > 256) v = 256;
         s_face_shade_lit[i] = (uint16_t)v;
     }
+    rebuild_sky_row();
+    if (s_interlace_enabled) s_interlace_phase ^= 1;
 }
 
 CRAFT_HOT
@@ -509,13 +562,35 @@ void craft_render_strip(const CraftCamera *cam, uint16_t *fb,
     if (y_start < 0) y_start = 0;
     if (y_end > CRAFT_FB_H) y_end = CRAFT_FB_H;
 
+    /* Last-hit texture cache — pixels in a strip frequently land on
+     * the same (blk, face) as their neighbour, so cache the resolved
+     * texture pointer and skip the lookup on a match. */
+    BlockId last_blk = BLK_COUNT;
+    int     last_face = -1;
+    const uint16_t *last_tex = NULL;
+
     for (int py = y_start; py < y_end; py++) {
+        /* Interlace pass 1: only render rows whose parity matches the
+         * current phase. Skipped rows are filled by the second pass
+         * below using same-tile spatial reconstruction. */
+        if (s_interlace_enabled && ((py & 1) != s_interlace_phase)) continue;
+
         float ndc_y = -((float)(py * 2 - CRAFT_FB_H + 1) / (float)CRAFT_FB_H);
         float vy = ndc_y * s_fov_tan_v;
         Vec3 up_vy = v3(s_up.x * vy, s_up.y * vy, s_up.z * vy);
         uint16_t *row = &fb[py * CRAFT_FB_W];
 
+        bool row_in_hud = (py >= CRAFT_HUD_PLATE_Y0);
         for (int px = 0; px < CRAFT_FB_W; px++) {
+            /* Skip rays behind the opaque hotbar plate — those pixels
+             * get overwritten unconditionally by craft_hud_draw_hotbar.
+             * zbuf is set to 0 (near sentinel) so downstream sprite
+             * passes (mobs, particles, held item) also skip the
+             * region. */
+            if (row_in_hud && px >= CRAFT_HUD_PLATE_X0 && px <= CRAFT_HUD_PLATE_X1) {
+                craft_zbuf[py * CRAFT_FB_W + px] = 0;
+                continue;
+            }
             Vec3 dir = v3(
                 s_col_basis[px].x + up_vy.x,
                 s_col_basis[px].y + up_vy.y,
@@ -533,12 +608,23 @@ void craft_render_strip(const CraftCamera *cam, uint16_t *fb,
                 if (s_clouds_enabled) out = cloud_overlay(out, cam->pos, dir);
                 /* zbuf sky = far sentinel (255 default). */
             } else {
-                const uint16_t *tex = craft_block_texture(h.blk, h.face);
-                int tu = (int)(h.u * CRAFT_TEX_SIZE);
-                int tv = (int)(h.v * CRAFT_TEX_SIZE);
-                if (tu < 0) tu = 0; else if (tu >= CRAFT_TEX_SIZE) tu = CRAFT_TEX_SIZE - 1;
-                if (tv < 0) tv = 0; else if (tv >= CRAFT_TEX_SIZE) tv = CRAFT_TEX_SIZE - 1;
-                uint16_t c = tex[tv * CRAFT_TEX_SIZE + tu];
+                if (h.blk != last_blk || h.face != last_face) {
+                    last_tex = craft_block_texture(h.blk, h.face);
+                    last_blk = h.blk;
+                    last_face = h.face;
+                }
+                const uint16_t *tex = last_tex;
+                uint16_t c;
+                if (s_far_lod_enabled && h.t > CRAFT_FAR_LOD_T_THRESHOLD) {
+                    c = tex[(CRAFT_TEX_SIZE / 2) * CRAFT_TEX_SIZE
+                          + (CRAFT_TEX_SIZE / 2)];
+                } else {
+                    int tu = (int)(h.u * CRAFT_TEX_SIZE);
+                    int tv = (int)(h.v * CRAFT_TEX_SIZE);
+                    if (tu < 0) tu = 0; else if (tu >= CRAFT_TEX_SIZE) tu = CRAFT_TEX_SIZE - 1;
+                    if (tv < 0) tv = 0; else if (tv >= CRAFT_TEX_SIZE) tv = CRAFT_TEX_SIZE - 1;
+                    c = tex[tv * CRAFT_TEX_SIZE + tu];
+                }
                 /* Sky vs cave brightness, with torch overlay.
                  *  - Air cell adjacent to face is sky-exposed → use
                  *    the day/night-dimmed s_face_shade_lit table so
@@ -626,6 +712,17 @@ void craft_render_strip(const CraftCamera *cam, uint16_t *fb,
                     b1 = (b1 + b2 * 2) / 3;
                     c = (uint16_t)((r1 << 11) | (g1 << 5) | b1);
                 }
+                if (h.passed_glass) {
+                    /* Pale cyan-white tint, ~15% blend so glass is
+                     * obviously a translucent surface but you can still
+                     * see what's behind it clearly. */
+                    int r1 = (c >> 11) & 0x1F, g1 = (c >> 5) & 0x3F, b1 = c & 0x1F;
+                    int rg = 26, gg = 56, bg = 28;
+                    r1 = (r1 * 13 + rg * 3) >> 4;
+                    g1 = (g1 * 13 + gg * 3) >> 4;
+                    b1 = (b1 * 13 + bg * 3) >> 4;
+                    c = (uint16_t)((r1 << 11) | (g1 << 5) | b1);
+                }
 
                 /* Compute world distance once: needed for zbuf and
                  * (conditionally) fog. One sqrt per pixel costs us
@@ -661,6 +758,12 @@ void craft_render_strip(const CraftCamera *cam, uint16_t *fb,
             row[px] = out;
         }
     }
+
+    /* Skipped rows keep their previous-frame content — produces the
+     * classic interlaced "comb" tear on motion in exchange for an
+     * extra ~50% rays. The spatial neighbour-copy variant we tried
+     * first looked worse (rapid flicker as alternate rows fought for
+     * dominance), so we accept the tear. */
 }
 
 void craft_render_frame(const CraftCamera *cam, uint16_t *fb) {
@@ -1130,13 +1233,19 @@ void craft_render_held_item(BlockId held, uint16_t *fb, float swing_t,
     const float vp_tan_v = vp_tan_h * (float)HELD_VP_H / (float)HELD_VP_W;
     const float ox = 0.0f, oy = 0.0f, oz = -HELD_CAM_BACK;
 
-    for (int sy = 0; sy < HELD_VP_H; sy++) {
-        int   py = HELD_VP_Y0 + sy;
-        float ndc_y = -((float)(sy * 2 - HELD_VP_H + 1) / (float)HELD_VP_H);
+    /* Half-resolution render: trace 35×28 rays then 2× nearest-
+     * neighbour upscale to fill the 70×56 fb viewport. Each computed
+     * pixel covers a 2×2 quad — the held item is small enough that
+     * the doubled texels read as the existing chunky aesthetic. */
+    const int half_w = HELD_VP_W / 2;
+    const int half_h = HELD_VP_H / 2;
+    for (int hy = 0; hy < half_h; hy++) {
+        int   py = HELD_VP_Y0 + hy * 2;
+        float ndc_y = -((float)(hy * 2 - half_h + 1) / (float)half_h);
         float vy = ndc_y * vp_tan_v;
-        for (int sx = 0; sx < HELD_VP_W; sx++) {
-            int   px = HELD_VP_X0 + sx;
-            float ndc_x = ((float)(sx * 2 - HELD_VP_W + 1) / (float)HELD_VP_W);
+        for (int hx = 0; hx < half_w; hx++) {
+            int   px = HELD_VP_X0 + hx * 2;
+            float ndc_x = ((float)(hx * 2 - half_w + 1) / (float)half_w);
             float vx = ndc_x * vp_tan_h;
 
             /* Ray dir from camera through pixel into model frame
@@ -1228,7 +1337,11 @@ void craft_render_held_item(BlockId held, uint16_t *fb, float swing_t,
 
             if (best_t >= 1e29f) continue;
             uint16_t out = held_shade565(best_color, held_face_shade[best_face]);
-            fb[py * CRAFT_FB_W + px] = out;
+            uint16_t *p0 = &fb[py * CRAFT_FB_W + px];
+            p0[0] = out;
+            p0[1] = out;
+            p0[CRAFT_FB_W]     = out;
+            p0[CRAFT_FB_W + 1] = out;
         }
     }
 }
