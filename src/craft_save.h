@@ -44,8 +44,13 @@
  * v5 — chest + furnace SRAM tables are now serialised into the save
  *      blob (was lost on load → hut chests refilled with
  *      deterministic loot every reload). v4 saves no longer load —
- *      the only carriers are recent dev worlds. */
-#define CRAFT_SAVE_VERSION 5u
+ *      the only carriers are recent dev worlds.
+ * v6 — torch/lever/piston/door/trapdoor/ladder orient hash table is
+ *      now serialised too (was lost on load → every mechanical block
+ *      came back with the default FACE_PY mount). v5 saves still load
+ *      via dual-read; they just come back without orient data. */
+#define CRAFT_SAVE_VERSION 6u
+#define CRAFT_SAVE_VERSION_V5 5u   /* legacy, read-only */
 #define CRAFT_SAVE_MAX_BYTES (4096 - 32)   /* one flash sector minus header */
 
 /* Public field offset for the chunks_nonce inside the serialised

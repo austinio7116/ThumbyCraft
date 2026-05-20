@@ -17,6 +17,7 @@
 #include "craft_chunk_store.h"
 #include "craft_chests.h"
 #include "craft_furnace.h"
+#include "craft_torches.h"
 
 #include <string.h>
 
@@ -82,14 +83,20 @@ static float getf(const uint8_t *p) {
 #define HDR_OFF_INVENTORY     (HDR_OFF_CAM + 5 * 4)
 #define HDR_OFF_CHESTS        (HDR_OFF_INVENTORY + BLK_COUNT * 4)
 #define HDR_OFF_FURNACES      (HDR_OFF_CHESTS + CRAFT_CHESTS_BLOB_BYTES)
-#define HDR_OFF_CRC           (HDR_OFF_FURNACES + CRAFT_FURNACES_BLOB_BYTES)
-#define SAVE_RECORD_BYTES     (HDR_OFF_CRC + 4)
+#define HDR_OFF_ORIENTS       (HDR_OFF_FURNACES + CRAFT_FURNACES_BLOB_BYTES)
+/* v5 record terminator (no orient blob): CRC sits immediately after
+ * the furnace blob — same byte position the old HDR_OFF_CRC pointed
+ * at. v6 grows the record by the orient blob (variable-size). */
+#define HDR_OFF_CRC_V5        HDR_OFF_ORIENTS
+#define SAVE_RECORD_BYTES_V5  (HDR_OFF_CRC_V5 + 4)
+#define SAVE_RECORD_MIN_BYTES SAVE_RECORD_BYTES_V5
+#define SAVE_RECORD_MAX_BYTES (HDR_OFF_ORIENTS + CRAFT_ORIENTS_BLOB_MAX_BYTES + 4)
 
 size_t craft_save_serialise(uint32_t seed, uint32_t chunks_nonce,
                             uint8_t autosave_level,
                             const CraftPlayer *p,
                             uint8_t *out, size_t out_cap) {
-    if (out_cap < SAVE_RECORD_BYTES) return 0;
+    if (out_cap < SAVE_RECORD_MAX_BYTES) return 0;
 
     put32(out + HDR_OFF_MAGIC,         CRAFT_SAVE_MAGIC);
     put32(out + HDR_OFF_VERSION,       CRAFT_SAVE_VERSION);
@@ -124,18 +131,40 @@ size_t craft_save_serialise(uint32_t seed, uint32_t chunks_nonce,
     /* Active chest + furnace tables (was lost on load before v5). */
     craft_chests_serialise(  out + HDR_OFF_CHESTS);
     craft_furnaces_serialise(out + HDR_OFF_FURNACES);
-    uint32_t c = crc32(out, HDR_OFF_CRC);
-    put32(out + HDR_OFF_CRC, c);
-    return SAVE_RECORD_BYTES;
+    /* Mechanical-block orient hash (new in v6 — was lost on load,
+     * caused levers/pistons/doors to default to floor-mount). */
+    size_t orient_bytes = craft_torches_orient_serialise(
+        out + HDR_OFF_ORIENTS, out_cap - HDR_OFF_ORIENTS - 4);
+    size_t crc_off = HDR_OFF_ORIENTS + orient_bytes;
+    uint32_t c = crc32(out, crc_off);
+    put32(out + crc_off, c);
+    return crc_off + 4;
 }
 
 bool craft_save_deserialise(const uint8_t *in, size_t n,
                             uint32_t *out_seed, CraftPlayer *p) {
-    if (n < SAVE_RECORD_BYTES)                return false;
-    if (get32(in + HDR_OFF_MAGIC)   != CRAFT_SAVE_MAGIC)   return false;
-    if (get32(in + HDR_OFF_VERSION) != CRAFT_SAVE_VERSION) return false;
-    uint32_t stored_crc = get32(in + HDR_OFF_CRC);
-    if (crc32(in, HDR_OFF_CRC) != stored_crc)              return false;
+    if (n < SAVE_RECORD_MIN_BYTES)                         return false;
+    if (get32(in + HDR_OFF_MAGIC) != CRAFT_SAVE_MAGIC)     return false;
+    uint32_t version = get32(in + HDR_OFF_VERSION);
+    /* Dual-read: v5 has no orient blob, v6 appends a length-prefixed
+     * one. Compute the CRC offset based on the version we found. */
+    size_t crc_off;
+    size_t orient_bytes = 0;
+    if (version == CRAFT_SAVE_VERSION_V5) {
+        crc_off = HDR_OFF_CRC_V5;
+    } else if (version == CRAFT_SAVE_VERSION) {
+        if (n < HDR_OFF_ORIENTS + 2 + 4) return false;
+        uint16_t orient_count = (uint16_t)in[HDR_OFF_ORIENTS] |
+                                ((uint16_t)in[HDR_OFF_ORIENTS + 1] << 8);
+        if (orient_count > 256) return false;
+        orient_bytes = 2 + (size_t)orient_count * CRAFT_ORIENTS_BLOB_PER_ENTRY;
+        crc_off = HDR_OFF_ORIENTS + orient_bytes;
+        if (n < crc_off + 4) return false;
+    } else {
+        return false;
+    }
+    uint32_t stored_crc = get32(in + crc_off);
+    if (crc32(in, crc_off) != stored_crc)                  return false;
 
     uint32_t seed = get32(in + HDR_OFF_SEED);
 
@@ -179,6 +208,17 @@ bool craft_save_deserialise(const uint8_t *in, size_t n,
      * previous world get cleared. */
     craft_chests_deserialise(  in + HDR_OFF_CHESTS);
     craft_furnaces_deserialise(in + HDR_OFF_FURNACES);
+    /* Orient table (new in v6). v5 saves get an empty table → blocks
+     * come back with the default FACE_PY mount (existing v5 behaviour
+     * — we don't have the data to do better). */
+    if (version == CRAFT_SAVE_VERSION) {
+        (void)craft_torches_orient_deserialise(in + HDR_OFF_ORIENTS,
+                                               orient_bytes);
+    } else {
+        /* v5: wipe so a stale orient table from a previous load
+         * doesn't bleed in. */
+        (void)craft_torches_orient_deserialise((const uint8_t *)"\x00\x00", 2);
+    }
 
     /* World comes back via the chunk store — load_around regenerates
      * the procedural terrain around the player's restored position

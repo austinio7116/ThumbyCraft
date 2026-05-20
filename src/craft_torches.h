@@ -16,6 +16,7 @@
 #ifndef CRAFT_TORCHES_H
 #define CRAFT_TORCHES_H
 
+#include <stddef.h>
 #include "craft_types.h"
 #include "craft_render.h"
 
@@ -72,6 +73,20 @@ int  craft_torches_lookup_orient(int wx, int wy, int wz);
 
 /* Forget orientation for a torch being removed. */
 void craft_torches_forget_orient(int wx, int wy, int wz);
+
+/* --- Save persistence -------------------------------------------- *
+ * Walk the orient hash and emit a length-prefixed list of occupied
+ * cells: u16 count, followed by N × (i32 wx + i32 wz + u8 wy + u8
+ * orient) = 10 bytes per entry. Worst-case 2 + 256*10 = 2562 B.
+ * Returns bytes written. */
+#define CRAFT_ORIENTS_BLOB_PER_ENTRY 10
+#define CRAFT_ORIENTS_BLOB_MAX_BYTES (2 + 256 * CRAFT_ORIENTS_BLOB_PER_ENTRY)
+size_t craft_torches_orient_serialise(uint8_t *out, size_t out_cap);
+
+/* Reset + restore the orient hash from a serialised blob. Truncates
+ * silently if the count exceeds 256 (defensive — should never happen
+ * with our own writer). Returns true on a clean parse. */
+bool   craft_torches_orient_deserialise(const uint8_t *in, size_t in_n);
 
 /* Refresh the resident torch list from BLK_TORCH cells in the
  * current world window. Pulls the cached orientation per torch

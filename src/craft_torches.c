@@ -81,6 +81,75 @@ int craft_torches_lookup_orient(int wx, int wy, int wz) {
     return e ? (int)e->orient : (int)FACE_PY;
 }
 
+/* --- Save persistence -------------------------------------------- */
+
+static void put_u16_le(uint8_t *p, uint16_t v) {
+    p[0] = (uint8_t) v;
+    p[1] = (uint8_t)(v >> 8);
+}
+static uint16_t get_u16_le(const uint8_t *p) {
+    return (uint16_t)(p[0] | (p[1] << 8));
+}
+static void put_i32_le(uint8_t *p, int32_t v) {
+    p[0] = (uint8_t) v;
+    p[1] = (uint8_t)(v >> 8);
+    p[2] = (uint8_t)(v >> 16);
+    p[3] = (uint8_t)(v >> 24);
+}
+static int32_t get_i32_le(const uint8_t *p) {
+    return (int32_t)((uint32_t)p[0]
+                   | ((uint32_t)p[1] <<  8)
+                   | ((uint32_t)p[2] << 16)
+                   | ((uint32_t)p[3] << 24));
+}
+
+size_t craft_torches_orient_serialise(uint8_t *out, size_t out_cap) {
+    /* Count occupied entries first so we can stamp the header. */
+    uint16_t n = 0;
+    for (int i = 0; i < ORIENT_HASH_SIZE; i++) {
+        if (s_orient[i].flags & 1) n++;
+    }
+    size_t need = 2 + (size_t)n * CRAFT_ORIENTS_BLOB_PER_ENTRY;
+    if (need > out_cap) return 0;
+    put_u16_le(out, n);
+    uint8_t *p = out + 2;
+    for (int i = 0; i < ORIENT_HASH_SIZE; i++) {
+        const OrientEntry *e = &s_orient[i];
+        if (!(e->flags & 1)) continue;
+        put_i32_le(p + 0, e->wx);
+        put_i32_le(p + 4, e->wz);
+        p[8] = (uint8_t)(e->wy & 0xFF);
+        p[9] = e->orient;
+        p += CRAFT_ORIENTS_BLOB_PER_ENTRY;
+    }
+    return need;
+}
+
+bool craft_torches_orient_deserialise(const uint8_t *in, size_t in_n) {
+    if (in_n < 2) return false;
+    memset(s_orient, 0, sizeof s_orient);
+    uint16_t n = get_u16_le(in);
+    if (n > ORIENT_HASH_SIZE) n = ORIENT_HASH_SIZE;
+    if (in_n < (size_t)(2 + n * CRAFT_ORIENTS_BLOB_PER_ENTRY)) return false;
+    const uint8_t *p = in + 2;
+    for (uint16_t i = 0; i < n; i++) {
+        int32_t wx = get_i32_le(p + 0);
+        int32_t wz = get_i32_le(p + 4);
+        /* wy was serialised as a signed byte truncation of int16; it
+         * always fits in [0, CRAFT_WORLD_Y), so unsigned widen. */
+        int wy = (int)p[8];
+        uint8_t orient = p[9];
+        OrientEntry *e = orient_find((int)wx, wy, (int)wz, true);
+        if (e) {
+            e->wx = wx; e->wz = wz; e->wy = (int16_t)wy;
+            e->orient = orient;
+            e->flags  = 1;
+        }
+        p += CRAFT_ORIENTS_BLOB_PER_ENTRY;
+    }
+    return true;
+}
+
 static uint8_t orient_lookup(int wx, int wy, int wz) {
     OrientEntry *e = orient_find(wx, wy, wz, false);
     return e ? e->orient : FACE_PY;   /* default: floor torch */
