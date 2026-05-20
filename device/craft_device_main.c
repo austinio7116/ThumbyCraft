@@ -29,6 +29,13 @@
 #include "slot_layout.h"
 #include "craft_chunk_store.h"
 #include "craft_main.h"
+
+#ifdef THUMBYONE_SLOT_MODE
+#include "ff.h"
+#include "thumbyone_fs.h"
+static FATFS   g_fs;
+static uint8_t g_fs_work[FF_MAX_SS] __attribute__((aligned(4)));
+#endif
 #include "craft_audio.h"
 #include "craft_player.h"
 #include "craft_font.h"
@@ -169,6 +176,12 @@ int main(void) {
 
 #ifdef THUMBYONE_SLOT_MODE
     thumbyone_slot_init_brightness_and_led(true);
+    /* Mount the shared FAT volume — chunk store + save metadata
+     * read/write through it. mount_or_format formats on a fresh /
+     * corrupted volume (first-boot recovery); normal boots pick up
+     * the volume the lobby already prepared. The static FATFS +
+     * work buffer outlive main(). */
+    (void)thumbyone_fs_mount_or_format(&g_fs, g_fs_work, sizeof g_fs_work);
 #endif
 
     /* Launch core 1 BEFORE the title screen so multicore_lockout

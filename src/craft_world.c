@@ -157,6 +157,13 @@ static void persist_chunk(int cx, int cz) {
 }
 
 static void restore_chunk(int cx, int cz) {
+    /* If the chunk is still in the dirty queue, its newest mods are
+     * already in the SRAM mod hash — flash has an older copy that
+     * mod_set would overwrite. Skip the flash read in that case.
+     * This is what lets chunks_persist_departing defer to
+     * persist_tick without losing edits when the player walks back
+     * over the deferred region. */
+    if (dirty_find(cx, cz) >= 0) return;
     static ChunkMod buf[CHUNK_STORE_MAX_MODS_PER_CHUNK];
     int n = craft_chunk_store_load(cx, cz, buf, CHUNK_STORE_MAX_MODS_PER_CHUNK);
     for (int i = 0; i < n; i++) {
@@ -201,19 +208,22 @@ void craft_world_chunks_persist_window(void) {
  * weren't edited can be skipped. */
 static void chunks_persist_departing(int old_x0, int old_x1, int old_z0, int old_z1,
                                      int new_x0, int new_x1, int new_z0, int new_z1) {
-    int i = 0;
-    while (i < s_dirty_q_n) {
-        int cx = s_dirty_q[i].cx;
-        int cz = s_dirty_q[i].cz;
-        bool in_old = cx >= old_x0 && cx <= old_x1 && cz >= old_z0 && cz <= old_z1;
-        bool in_new = cx >= new_x0 && cx <= new_x1 && cz >= new_z0 && cz <= new_z1;
-        if (in_old && !in_new) {
-            persist_chunk(cx, cz);
-            dirty_drop_at(i);
-        } else {
-            i++;
-        }
-    }
+    /* No-op on the hot path. Chunks leaving the window remain in
+     * the dirty queue and the SRAM mod hash; the background
+     * persist_tick drains them one chunk per tick — that spreads
+     * the per-write cost (~30 ms on FatFs, ~25 ms on raw flash)
+     * across many frames instead of bursting all leaving chunks
+     * at shift time, which is what caused the "major hitching
+     * every chunk change" report.
+     *
+     * Correctness: restore_chunk skips chunks that are still in
+     * the dirty queue, so re-entering a deferred chunk's region
+     * reads from the in-RAM mods (newest) rather than the flash
+     * copy (older). force_persist_window still drains synchronously
+     * on save so the user-visible "save" hitch IS bounded by
+     * what they've actually edited. */
+    (void)old_x0; (void)old_x1; (void)old_z0; (void)old_z1;
+    (void)new_x0; (void)new_x1; (void)new_z0; (void)new_z1;
 }
 
 void craft_world_persist_tick(void) {

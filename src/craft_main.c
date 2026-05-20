@@ -149,8 +149,20 @@ static float s_held_swing_t = 0.0f;
 
 /* Background chunk-persist drain — fires one flash erase+program
  * every PERSIST_PERIOD seconds. Spreads ~70 ms hitches so they don't
- * bundle into a multi-chunk stutter on window shift. */
+ * bundle into a multi-chunk stutter on window shift.
+ *
+ * In slot mode the chunk store is on FatFs, where each per-chunk
+ * write costs ~30-50 ms (FAT directory + cluster + file). That hitch
+ * is too obvious to schedule in the background while the player is
+ * walking — so we slow the tick way down. The dirty queue still
+ * drains on save (force_persist_window), and the cap of 32 dirty
+ * chunks force-flushes the oldest on overflow, so progress can't
+ * be lost. */
+#ifdef THUMBYONE_SLOT_MODE
+#define PERSIST_PERIOD 30.0f
+#else
 #define PERSIST_PERIOD 2.0f
+#endif
 static float s_persist_timer = PERSIST_PERIOD;
 
 /* RNG helper for new-world seeds.

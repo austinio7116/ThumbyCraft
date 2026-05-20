@@ -59,13 +59,27 @@ add_custom_command(
 )
 add_custom_target(generate_craft_textures DEPENDS ${CRAFT_BAKED_C})
 
+# Storage backend selection. Standalone uses raw flash regions
+# (slot_layout.h offsets); ThumbyOne slot mode uses FatFs files on
+# the shared FAT volume so the data survives reflashing the slot.
+if (THUMBYONE_SLOT_MODE)
+    set(CRAFT_STORAGE_SRC
+        ${DEVICE}/craft_save_fatfs.c
+        ${DEVICE}/craft_chunk_store_fatfs.c
+    )
+else()
+    set(CRAFT_STORAGE_SRC
+        ${DEVICE}/craft_save_flash.c
+        ${DEVICE}/craft_chunk_store_flash.c
+    )
+endif()
+
 set(CRAFT_DEVICE_SOURCES
     ${DEVICE}/craft_device_main.c
     ${DEVICE}/craft_lcd_gc9107.c
     ${DEVICE}/craft_buttons.c
     ${DEVICE}/craft_audio_pwm.c
-    ${DEVICE}/craft_save_flash.c
-    ${DEVICE}/craft_chunk_store_flash.c
+    ${CRAFT_STORAGE_SRC}
 
     ${SRC}/craft_world.c
     ${SRC}/craft_blocks.c
@@ -91,71 +105,95 @@ set(CRAFT_DEVICE_SOURCES
     ${CRAFT_BAKED_C}
 )
 
-# Standalone target. In slot mode, ThumbyOne's top-level CMakeLists
-# is responsible for linking our sources into its own executable.
-if (NOT THUMBYONE_SLOT_MODE)
-    add_executable(thumbycraft ${CRAFT_DEVICE_SOURCES})
-
-    target_include_directories(thumbycraft PRIVATE
-        ${SRC}
-        ${DEVICE}
+# In slot mode, pull in FatFs sources + ThumbyOne's shared helpers
+# (FS mount, LED + backlight + settings for the brightness chord).
+# Same executable shape as standalone — produces firmware_thumbycraft.uf2
+# which the top-level lobby build rebases to THUMBYONE_CRAFT_OFFSET
+# and combines into firmware_thumbyone.uf2.
+if (THUMBYONE_SLOT_MODE)
+    list(APPEND CRAFT_DEVICE_SOURCES
+        ${THUMBYONE_COMMON_SRC}          # thumbyone_handoff.c (xip_fast_setup)
+        ${THUMBYONE_FATFS_SRC}
+        ${THUMBYONE_COMMON_FS_SRC}
+        ${THUMBYONE_COMMON_LED_SRC}
+        ${THUMBYONE_COMMON_BACKLIGHT_SRC}
+        ${THUMBYONE_COMMON_SETTINGS_SRC}
     )
-
-    target_compile_options(thumbycraft PRIVATE
-        -O3 -g
-        -Wall -Wextra
-        -Wno-unused-parameter -Wno-unused-function -Wno-unused-but-set-variable
-        -ffast-math
-        # The raycaster wants the FPU front-and-centre.
-        -mcpu=cortex-m33 -mthumb -mfloat-abi=softfp -mfpu=fpv5-sp-d16
-    )
-
-    target_link_libraries(thumbycraft
-        pico_stdlib
-        pico_multicore
-        pico_rand
-        hardware_spi
-        hardware_dma
-        hardware_pwm
-        hardware_irq
-        hardware_flash
-        hardware_sync
-        hardware_clocks
-        hardware_gpio
-    )
-
-    # Generous heap — the engine itself doesn't malloc much but
-    # multicore_lockout uses a chunk and we want headroom for
-    # future paged-chunk features.
-    target_compile_definitions(thumbycraft PRIVATE
-        PICO_HEAP_SIZE=0x10000      # 64 KB
-        PICO_STACK_SIZE=0x1000      # 4 KB per core (default 2 KB doubled)
-        PICO_CORE1_STACK_SIZE=0x1000
-        CRAFT_TEXTURES_BAKED=1
-    )
-    add_dependencies(thumbycraft generate_craft_textures)
-
-    # USB CDC stdio is unreliable on Thumby Color — leave it off.
-    pico_enable_stdio_usb(thumbycraft 0)
-    pico_enable_stdio_uart(thumbycraft 0)
-
-    pico_add_extra_outputs(thumbycraft)
-else()
-    # ThumbyOne slot consumption: expose our sources and include dirs
-    # as an OBJECT library named thumbycraft_slot which the parent
-    # links into its top-level executable.
-    add_library(thumbycraft_slot OBJECT ${CRAFT_DEVICE_SOURCES})
-    target_include_directories(thumbycraft_slot PUBLIC
-        ${SRC}
-        ${DEVICE}
-    )
-    target_compile_definitions(thumbycraft_slot PUBLIC
-        THUMBYONE_SLOT_MODE=1
-        CRAFT_TEXTURES_BAKED=1
-    )
-    target_compile_options(thumbycraft_slot PRIVATE
-        -O3 -ffast-math
-        -Wno-unused-parameter -Wno-unused-function -Wno-unused-but-set-variable
-    )
-    add_dependencies(thumbycraft_slot generate_craft_textures)
 endif()
+
+add_executable(thumbycraft ${CRAFT_DEVICE_SOURCES})
+
+target_include_directories(thumbycraft PRIVATE
+    ${SRC}
+    ${DEVICE}
+)
+if (THUMBYONE_SLOT_MODE)
+    target_include_directories(thumbycraft PRIVATE
+        ${THUMBYONE_FATFS_INCLUDE}
+        ${THUMBYONE_COMMON_INCLUDE}
+        ${THUMBYONE_COMMON_LED_INCLUDE}
+        ${THUMBYONE_COMMON_BACKLIGHT_INCLUDE}
+        ${THUMBYONE_COMMON_SETTINGS_INCLUDE}
+    )
+endif()
+
+target_compile_options(thumbycraft PRIVATE
+    -O3 -g
+    -Wall -Wextra
+    -Wno-unused-parameter -Wno-unused-function -Wno-unused-but-set-variable
+    -ffast-math
+    -mcpu=cortex-m33 -mthumb -mfloat-abi=softfp -mfpu=fpv5-sp-d16
+)
+
+target_link_libraries(thumbycraft
+    pico_stdlib
+    pico_multicore
+    pico_rand
+    hardware_spi
+    hardware_dma
+    hardware_pwm
+    hardware_irq
+    hardware_flash
+    hardware_sync
+    hardware_clocks
+    hardware_gpio
+)
+if (THUMBYONE_SLOT_MODE)
+    target_link_libraries(thumbycraft hardware_pio hardware_adc)
+endif()
+
+if (THUMBYONE_SLOT_MODE)
+    # Slot mode: FatFs caches + ~10 KB shared helpers eat into the
+    # SRAM budget that standalone gives to the heap. Cut heap to 8 KB —
+    # the engine itself barely uses heap; this leaves enough for
+    # multicore_lockout's allocation while keeping us under the
+    # 520 KB SRAM ceiling.
+    set(CRAFT_HEAP_SIZE 0x2000)
+else()
+    set(CRAFT_HEAP_SIZE 0x10000)
+endif()
+
+target_compile_definitions(thumbycraft PRIVATE
+    PICO_HEAP_SIZE=${CRAFT_HEAP_SIZE}
+    PICO_STACK_SIZE=0x1000
+    PICO_CORE1_STACK_SIZE=0x1000
+    CRAFT_TEXTURES_BAKED=1
+    $<$<BOOL:${THUMBYONE_SLOT_MODE}>:THUMBYONE_SLOT_MODE=1>
+)
+add_dependencies(thumbycraft generate_craft_textures)
+
+pico_enable_stdio_usb(thumbycraft 0)
+pico_enable_stdio_uart(thumbycraft 0)
+
+# Slot mode: switch the UF2 family from the per-board default to
+# "absolute" so the lobby's chain_image path can load us regardless
+# of where the rebase put us in flash. Standalone keeps the default.
+if (THUMBYONE_SLOT_MODE)
+    pico_set_uf2_family(thumbycraft "absolute")
+endif()
+
+pico_add_extra_outputs(thumbycraft)
+
+# Rename the UF2 to firmware_thumbycraft.uf2 so the parent ThumbyOne
+# combiner (which expects this filename in craft_slot/) picks it up.
+set_target_properties(thumbycraft PROPERTIES OUTPUT_NAME "firmware_thumbycraft")
