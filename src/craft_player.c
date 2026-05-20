@@ -315,11 +315,16 @@ void craft_player_tick(CraftPlayer *p, const CraftInput *in, float dt) {
 
     /* ----- Walk-button double-tap-hold state (schemes 1+2 only) -
      *
-     * Walk-btn = LB in scheme 1, RB in scheme 2. Releasing it opens
-     * a 300 ms window; if a fresh press lands inside that window,
-     * the resulting hold walks in reverse instead of forward.
-     * Resets on release. Schemes 3 and 4 use D-pad DOWN for reverse
-     * so the dtap state stays parked. */
+     * Walk-btn = LB in scheme 1, RB in scheme 2. The two PRESSES of
+     * the double-tap must both land within a 300 ms window from the
+     * FIRST press — i.e. press-1 → release → press-2, all inside
+     * 300 ms. The gap is timed from press-1 onward (not from the
+     * release), so a long hold-then-quick-release-and-repress does
+     * NOT count: the long hold consumes the window before the
+     * second press lands. Once armed and a second press inside the
+     * window arrives, holding it walks in reverse; releasing resets.
+     * Schemes 3 and 4 use D-pad DOWN for reverse so the dtap state
+     * stays parked. */
     bool walk_btn;
     bool walk_btn_just_pressed;
     bool walk_btn_consumed;
@@ -336,20 +341,29 @@ void craft_player_tick(CraftPlayer *p, const CraftInput *in, float dt) {
     }
     bool walk_btn_just_released =
         !walk_btn && ((scheme == CRAFT_SCHEME_CLASSIC_FLIP) ? p->_rb_prev : p->_lb_prev);
+    (void)walk_btn_just_released;   /* unused — see note above */
 
     if (scheme == CRAFT_SCHEME_CLASSIC || scheme == CRAFT_SCHEME_CLASSIC_FLIP) {
-        if (walk_btn_just_released) {
-            p->_walk_dtap_t     = 0.0f;
-            p->_walk_dtap_armed = true;
-            p->_walk_reverse    = false;
-        } else if (p->_walk_dtap_armed) {
+        if (walk_btn_just_pressed && !walk_btn_consumed) {
+            if (p->_walk_dtap_armed && p->_walk_dtap_t <= 0.30f) {
+                /* Second press inside the window: engage reverse. */
+                p->_walk_reverse    = true;
+                p->_walk_dtap_armed = false;
+            } else {
+                /* First press of a fresh gesture: start the timer. */
+                p->_walk_dtap_t     = 0.0f;
+                p->_walk_dtap_armed = true;
+                p->_walk_reverse    = false;
+            }
+        }
+        if (p->_walk_dtap_armed) {
             p->_walk_dtap_t += dt;
             if (p->_walk_dtap_t > 0.30f) p->_walk_dtap_armed = false;
         }
-        if (walk_btn_just_pressed && p->_walk_dtap_armed && !walk_btn_consumed) {
-            p->_walk_reverse    = true;
-            p->_walk_dtap_armed = false;
-        }
+        /* Releasing the walk button always drops reverse — the next
+         * single press is forward unless it lands inside a fresh
+         * 300 ms window (i.e. it's the 2nd press of a new dtap). */
+        if (!walk_btn) p->_walk_reverse = false;
     } else {
         /* Park the dtap state so a scheme switch can't start with a
          * latched "in reverse" flag. */
