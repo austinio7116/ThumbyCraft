@@ -1178,12 +1178,20 @@ Vec3 craft_gen_spawn(void) {
                 }
                 if (gy < 0) continue;
                 /* Headroom check — both cells the player will occupy
-                 * must be non-solid. craft_block_solid lets torches
-                 * and water count as passable; trees, walls, chests
-                 * etc. all block. */
+                 * must be non-solid AND non-water. craft_block_solid
+                 * lets water count as passable, which would otherwise
+                 * spawn the player on a sand-bottomed underwater
+                 * column or right on a shoreline tile with water at
+                 * head height. */
                 BlockId head1 = craft_world_get(x, gy + 1, z);
                 BlockId head2 = craft_world_get(x, gy + 2, z);
                 if (craft_block_solid(head1) || craft_block_solid(head2)) continue;
+                if (head1 == BLK_WATER || head2 == BLK_WATER) continue;
+                /* Belt-and-braces: require the ground tile itself to
+                 * sit at or above the water surface — even a "dry"
+                 * SAND column at gy=WATER_LEVEL has its top face
+                 * flush with the waterline. */
+                if (gy < CRAFT_WATER_LEVEL + 1) continue;
                 return v3((float)x + 0.5f,
                           (float)gy + 1.0f + 1.6f,
                           (float)z + 0.5f);

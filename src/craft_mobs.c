@@ -23,6 +23,7 @@
 #include "craft_player.h"
 #include "craft_particles.h"
 #include "craft_drops.h"
+#include "craft_gen.h"   /* CRAFT_WATER_LEVEL */
 
 #include <string.h>
 
@@ -417,6 +418,12 @@ void craft_mobs_spawn_around(Vec3 centre, uint32_t seed) {
         int z  = (int)centre.z + dz;
         int y  = find_ground(x, z);
         if (y < 0) continue;
+        /* Skip underwater / shoreline-water tiles. Passive mobs drown
+         * if they spawn in a water cell, and even spawning on a
+         * shoreline sand tile with water above puts their head in
+         * water on tick 1. Require dry land + dry head-space. */
+        if (y < CRAFT_WATER_LEVEL + 1) continue;
+        if (craft_world_get(x, y + 1, z) == BLK_WATER) continue;
         CraftMob *m = &craft_mobs[placed];
         m->alive    = true;
         m->type     = (MobType)(xs() % MOB_SLIME);
