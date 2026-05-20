@@ -1110,4 +1110,18 @@ place_done: ;
             }
         }
     }
+
+    /* Hotbar normalisation: any survival-mode slot whose block has
+     * been used up to zero inventory becomes empty (BLK_AIR). The HUD
+     * skips drawing swatches for empty slots, and craft_render_held_item
+     * no-ops on BLK_AIR, so the slot visually clears and the player
+     * stops "holding" the depleted item until they pick more up. */
+    if (p->mode == CRAFT_MODE_SURVIVAL) {
+        for (int i = 0; i < CRAFT_HOTBAR_SLOTS; i++) {
+            BlockId b = p->hotbar[i];
+            if (b != BLK_AIR && p->inventory[b] <= 0) {
+                p->hotbar[i] = BLK_AIR;
+            }
+        }
+    }
 }
