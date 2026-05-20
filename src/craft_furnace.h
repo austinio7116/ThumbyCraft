@@ -80,4 +80,14 @@ bool    craft_furnace_is_smeltable(BlockId b);
 BlockId craft_furnace_smelt_output(BlockId b);
 float   craft_furnace_fuel_time(BlockId b);    /* 0 if not a fuel */
 
+/* Fixed-size byte serialisation for the save blob.
+ *   per furnace = 1 (used) + 12 (xyz, int32 LE) + 6 (slots) + 8 (timers)
+ *   total       = CRAFT_MAX_FURNACES × 27 bytes
+ * Floats are written as 32-bit IEEE 754 LE bit patterns. */
+#define CRAFT_FURNACES_BLOB_PER_ENTRY 27
+#define CRAFT_FURNACES_BLOB_BYTES     (CRAFT_MAX_FURNACES * CRAFT_FURNACES_BLOB_PER_ENTRY)
+
+void craft_furnaces_serialise(uint8_t out[CRAFT_FURNACES_BLOB_BYTES]);
+void craft_furnaces_deserialise(const uint8_t in[CRAFT_FURNACES_BLOB_BYTES]);
+
 #endif

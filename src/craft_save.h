@@ -40,8 +40,12 @@
 /* v4 — per-world chunk-store layout with explicit chunks_nonce field
  *      in the record. The nonce is independent of the slot's
  *      sequence number so in-place saves keep the same nonce (no
- *      "load shows stripped world" bug). */
-#define CRAFT_SAVE_VERSION 4u
+ *      "load shows stripped world" bug).
+ * v5 — chest + furnace SRAM tables are now serialised into the save
+ *      blob (was lost on load → hut chests refilled with
+ *      deterministic loot every reload). v4 saves no longer load —
+ *      the only carriers are recent dev worlds. */
+#define CRAFT_SAVE_VERSION 5u
 #define CRAFT_SAVE_MAX_BYTES (4096 - 32)   /* one flash sector minus header */
 
 /* Public field offset for the chunks_nonce inside the serialised

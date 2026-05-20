@@ -3,6 +3,7 @@
  */
 #include "craft_furnace.h"
 #include <string.h>
+#include <stdint.h>
 
 CraftFurnace craft_furnaces[CRAFT_MAX_FURNACES];
 
@@ -116,5 +117,79 @@ void craft_furnace_tick(float dt) {
              * "almost done" persisting through an empty period. */
             f->smelt_t = 0.0f;
         }
+    }
+}
+
+/* --- Save blob serialisation ------------------------------------- *
+ *
+ * Per entry (27 B):
+ *   off  0: u8  used flag
+ *   off  1: i32 wx (LE)
+ *   off  5: i32 wy (LE)
+ *   off  9: i32 wz (LE)
+ *   off 13: u8 input_blk, u8 input_n, u8 fuel_blk, u8 fuel_n,
+ *           u8 output_blk, u8 output_n
+ *   off 19: f32 smelt_t (LE bit pattern, IEEE 754)
+ *   off 23: f32 fuel_remaining_t (LE bit pattern)
+ */
+static void put_u32_le(uint8_t *p, uint32_t v) {
+    p[0] = (uint8_t)v;
+    p[1] = (uint8_t)(v >> 8);
+    p[2] = (uint8_t)(v >> 16);
+    p[3] = (uint8_t)(v >> 24);
+}
+static uint32_t get_u32_le(const uint8_t *p) {
+    return (uint32_t)p[0]
+         | ((uint32_t)p[1] << 8)
+         | ((uint32_t)p[2] << 16)
+         | ((uint32_t)p[3] << 24);
+}
+static void put_f32_le(uint8_t *p, float f) {
+    union { float f; uint32_t u; } cvt;
+    cvt.f = f;
+    put_u32_le(p, cvt.u);
+}
+static float get_f32_le(const uint8_t *p) {
+    union { float f; uint32_t u; } cvt;
+    cvt.u = get_u32_le(p);
+    return cvt.f;
+}
+
+void craft_furnaces_serialise(uint8_t out[CRAFT_FURNACES_BLOB_BYTES]) {
+    for (int i = 0; i < CRAFT_MAX_FURNACES; i++) {
+        const CraftFurnace *f = &craft_furnaces[i];
+        uint8_t *p = out + i * CRAFT_FURNACES_BLOB_PER_ENTRY;
+        p[0] = f->used ? 1u : 0u;
+        put_u32_le(p + 1, (uint32_t)f->wx);
+        put_u32_le(p + 5, (uint32_t)f->wy);
+        put_u32_le(p + 9, (uint32_t)f->wz);
+        p[13] = f->input_blk;
+        p[14] = f->input_n;
+        p[15] = f->fuel_blk;
+        p[16] = f->fuel_n;
+        p[17] = f->output_blk;
+        p[18] = f->output_n;
+        put_f32_le(p + 19, f->smelt_t);
+        put_f32_le(p + 23, f->fuel_remaining_t);
+    }
+}
+
+void craft_furnaces_deserialise(const uint8_t in[CRAFT_FURNACES_BLOB_BYTES]) {
+    for (int i = 0; i < CRAFT_MAX_FURNACES; i++) {
+        CraftFurnace *f = &craft_furnaces[i];
+        const uint8_t *p = in + i * CRAFT_FURNACES_BLOB_PER_ENTRY;
+        memset(f, 0, sizeof *f);
+        f->used = (p[0] != 0);
+        f->wx = (int32_t)get_u32_le(p + 1);
+        f->wy = (int32_t)get_u32_le(p + 5);
+        f->wz = (int32_t)get_u32_le(p + 9);
+        f->input_blk  = p[13];
+        f->input_n    = p[14];
+        f->fuel_blk   = p[15];
+        f->fuel_n     = p[16];
+        f->output_blk = p[17];
+        f->output_n   = p[18];
+        f->smelt_t          = get_f32_le(p + 19);
+        f->fuel_remaining_t = get_f32_le(p + 23);
     }
 }

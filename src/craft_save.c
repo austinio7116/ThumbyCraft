@@ -15,6 +15,8 @@
 #include "craft_world.h"
 #include "craft_gen.h"
 #include "craft_chunk_store.h"
+#include "craft_chests.h"
+#include "craft_furnace.h"
 
 #include <string.h>
 
@@ -78,7 +80,10 @@ static float getf(const uint8_t *p) {
 #define HDR_OFF_HOTBAR        20
 #define HDR_OFF_CAM           (HDR_OFF_HOTBAR + CRAFT_HOTBAR_SLOTS)
 #define HDR_OFF_INVENTORY     (HDR_OFF_CAM + 5 * 4)
-#define SAVE_RECORD_BYTES     (HDR_OFF_INVENTORY + BLK_COUNT * 4 + 4)
+#define HDR_OFF_CHESTS        (HDR_OFF_INVENTORY + BLK_COUNT * 4)
+#define HDR_OFF_FURNACES      (HDR_OFF_CHESTS + CRAFT_CHESTS_BLOB_BYTES)
+#define HDR_OFF_CRC           (HDR_OFF_FURNACES + CRAFT_FURNACES_BLOB_BYTES)
+#define SAVE_RECORD_BYTES     (HDR_OFF_CRC + 4)
 
 size_t craft_save_serialise(uint32_t seed, uint32_t chunks_nonce,
                             uint8_t autosave_level,
@@ -116,8 +121,11 @@ size_t craft_save_serialise(uint32_t seed, uint32_t chunks_nonce,
     for (int i = 0; i < BLK_COUNT; i++) {
         put32(out + HDR_OFF_INVENTORY + i * 4, (uint32_t)p->inventory[i]);
     }
-    uint32_t c = crc32(out, SAVE_RECORD_BYTES - 4);
-    put32(out + SAVE_RECORD_BYTES - 4, c);
+    /* Active chest + furnace tables (was lost on load before v5). */
+    craft_chests_serialise(  out + HDR_OFF_CHESTS);
+    craft_furnaces_serialise(out + HDR_OFF_FURNACES);
+    uint32_t c = crc32(out, HDR_OFF_CRC);
+    put32(out + HDR_OFF_CRC, c);
     return SAVE_RECORD_BYTES;
 }
 
@@ -126,8 +134,8 @@ bool craft_save_deserialise(const uint8_t *in, size_t n,
     if (n < SAVE_RECORD_BYTES)                return false;
     if (get32(in + HDR_OFF_MAGIC)   != CRAFT_SAVE_MAGIC)   return false;
     if (get32(in + HDR_OFF_VERSION) != CRAFT_SAVE_VERSION) return false;
-    uint32_t stored_crc = get32(in + SAVE_RECORD_BYTES - 4);
-    if (crc32(in, SAVE_RECORD_BYTES - 4) != stored_crc)    return false;
+    uint32_t stored_crc = get32(in + HDR_OFF_CRC);
+    if (crc32(in, HDR_OFF_CRC) != stored_crc)              return false;
 
     uint32_t seed = get32(in + HDR_OFF_SEED);
 
@@ -165,6 +173,12 @@ bool craft_save_deserialise(const uint8_t *in, size_t n,
     for (int i = 0; i < BLK_COUNT; i++) {
         p->inventory[i] = (int)get32(in + HDR_OFF_INVENTORY + i * 4);
     }
+
+    /* Restore the chest + furnace tables (new in v5). Each fully
+     * overwrites the SRAM table — any stale entries from the
+     * previous world get cleared. */
+    craft_chests_deserialise(  in + HDR_OFF_CHESTS);
+    craft_furnaces_deserialise(in + HDR_OFF_FURNACES);
 
     /* World comes back via the chunk store — load_around regenerates
      * the procedural terrain around the player's restored position

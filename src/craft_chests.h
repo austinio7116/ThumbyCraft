@@ -49,4 +49,14 @@ CraftChest *craft_chest_at(int wx, int wy, int wz);
 /* Wipe a chest's record (called when the block is broken). */
 void craft_chest_remove(int wx, int wy, int wz);
 
+/* Fixed-size byte serialisation for the save blob.
+ *   per chest = 1 (used) + 12 (wx,wy,wz, int32 LE) + 32 (16 slots × 2)
+ *   total     = CRAFT_MAX_CHESTS × 45 = 180 bytes
+ * Both calls write/read exactly CRAFT_CHESTS_BLOB_BYTES bytes. */
+#define CRAFT_CHESTS_BLOB_PER_ENTRY 45
+#define CRAFT_CHESTS_BLOB_BYTES     (CRAFT_MAX_CHESTS * CRAFT_CHESTS_BLOB_PER_ENTRY)
+
+void craft_chests_serialise(uint8_t out[CRAFT_CHESTS_BLOB_BYTES]);
+void craft_chests_deserialise(const uint8_t in[CRAFT_CHESTS_BLOB_BYTES]);
+
 #endif
