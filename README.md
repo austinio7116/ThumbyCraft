@@ -623,13 +623,48 @@ Key optimisations:
 - **`-O3 -ffast-math -mfpu=fpv5-sp-d16`** — single-precision FPU,
   aggressive optimisation
 
-### Dual-core split
+### Dual-core split — tile work-stealing
 
-`device/craft_device_main.c` launches core 1 in a render loop. Each
-frame, core 0 runs game logic + the bottom half of the frame, signals
-core 1 via a shared volatile flag to render the top half, then waits
-for completion before swapping framebuffers. Two cores → ~2× raycast
-throughput on the screen.
+`device/craft_device_main.c` launches core 1 in a render loop and
+both cores draw the frame as a **tile work-stealing** pool, not a
+fixed top/bottom split.
+
+The 128-row screen is sliced into **16 tiles of 8 rows each**. A
+single `volatile uint32_t` tile counter sits in shared memory; each
+core grabs the next tile via `__atomic_fetch_add` and renders it,
+looping until the counter exhausts. Whichever core finishes its
+current tile first claims the next one. Self-balancing under any
+view direction — sky-heavy strips finish faster than texture- or
+mob-heavy strips, so the slow core's neighbour quietly steals more
+tiles instead of sitting idle waiting on a half-frame barrier.
+
+A static 50/50 split bled ~6 ms per frame whenever one half was
+visually busier than the other (looking straight down at terrain
+vs. straight up at sky). The work-stealing pool drops the worst-case
+load mismatch to one tile (~6 % of a frame).
+
+Each frame:
+
+1. **Phase 1** — input + physics + auto-save tick (core 0 only).
+2. **Phase 2a** — compute the per-frame camera basis on core 0
+   (sole writer of the shared basis cache, can't race core 1).
+3. **Phase 2b** — reset `s_next_tile` to 0, set the `c1_run` flag.
+   Both cores enter `run_tiles()` and atomic-CAS their way through
+   the 16 tiles. Core 0 returns when the counter exceeds 15; it
+   then spins on `c1_done` until core 1 signals it's also out.
+4. **Phase 3** — HUD overlay (core 0 only, after both cores quiesce
+   — the hotbar straddles the tile seams).
+5. **Phase 4** — DMA blit the framebuffer to the LCD; while the
+   pixel DMA is in flight, the next frame's Phase 1 already runs.
+
+Tile size of 8 rows is the sweet spot: per-tile cost is ≈ 1 024
+pixels × a few μs ≈ 3–5 ms — multiple orders of magnitude larger
+than the ~50 ns atomic-add overhead, so dispatch cost is invisible.
+
+Core 1 also registers as a `multicore_lockout_victim_init()` ACK
+target during startup, so the chunk store's flash writes can halt
+it cleanly for the erase/program window without the render loop
+fighting for XIP.
 
 ## World system
 
@@ -689,29 +724,110 @@ any single coordinate, used by the save diff.
 - **Torch overlay**: lightmap level (1-3) floors the brightness so
   torches glow even in deep caves
 
-### Flash chunk store (`device/craft_chunk_store_flash.c`)
+### Chunk store — per-world regions, nonce-filtered
 
-256 KB reserved at flash offset `TOP − 16 KB − 256 KB`. Divided into
-64 sector slots × 4 KB each, hash-addressed by `(chunk_x, chunk_z)`
-with 4-slot linear probe on collision. Each sector:
+The world's edits are persisted as a key/value store keyed by
+`(chunk_x, chunk_z)` → list of `ChunkMod{lx, y, lz, blk}` records.
+Each save slot owns its own physical region; the regions never
+overlap. Two backend implementations share one API:
+
+| Build | File | Backend |
+|---|---|---|
+| Standalone device | `device/craft_chunk_store_flash.c` | direct flash sectors |
+| ThumbyOne slot    | `device/craft_chunk_store_fatfs.c` | files on the shared FAT |
+| Host (SDL2)       | `host/craft_chunk_store_stub.c`    | no-op stub |
+
+Both backends use the same nonce trick: the store is **bound** to
+`(region, nonce)` at a time; reads/writes only touch sectors or
+files stamped with the matching nonce.
+
+**Standalone (raw flash).** Each region is 1 MB = 256 sectors of
+4 KB, hash-addressed by `(cx, cz)` with up to 8-slot linear probe
+on collision. Five regions total (4 save slots + 1 scratch) = 5 MB
+reserved on the standalone build:
 
 ```
-magic 'TCMK'  · 4 B
-world_seed    · 4 B  (invalidates records from prior seeds)
-chunk_x, _z   · 4 B + 4 B
-mod_count     · 2 B + 2 B pad
-mods          · 4 B each (lx, y, lz, blk)  — up to 340
-crc32         · 4 B
+0x100000..0x1FFFFF   slot 0 region   (1 MB, 256 sectors)
+0x200000..0x2FFFFF   slot 1 region
+0x300000..0x3FFFFF   slot 2 region
+0x400000..0x4FFFFF   slot 3 region
+0x500000..0x5FFFFF   scratch region  (unsaved new worlds)
+```
+
+Sector format:
+
+```
+magic     'TCM4'   · 4 B   (bumped from v1 'TCMK')
+nonce              · 4 B   — region-binding nonce
+chunk_x, chunk_z   · 4 B + 4 B
+mod_count          · 2 B + 2 B pad
+mods               · 4 B each (lx, y, lz, blk)  — up to 340
+crc32              · 4 B
 padding to sector boundary (0xFF)
 ```
 
-On window shift, chunks leaving the window get their mods scanned out
-of the SRAM mod-hash and persisted to flash. Chunks entering have
-their mods loaded back into the hash so the gen pass picks them up.
+A sector counts as "free for probe" if its magic is invalid **or
+its nonce doesn't match the bound nonce** — stale sectors look
+identical to empty ones, so they get overwritten by the next save
+that hashes to that slot.
 
-Flash writes use `multicore_lockout_start_blocking` to halt core 1
-before erase/program — core 1 calls `multicore_lockout_victim_init()`
-at startup to register its IRQ handler.
+**Why the nonce.** Without it, every new-world action would need
+to physically erase the region (~3 s of flash erase for 1 MB).
+Instead the scratch region carries an in-RAM `uint32_t` nonce
+that's re-randomised on every new-world; slots carry their save's
+freshly-bumped seq number as their nonce. Old sectors stay
+physically present but become invisible, and the next save into
+the same hash slot just erase+programs over them. New-world is
+~1 ms instead of ~3 s.
+
+**Slot mode (FatFs).** Storage moves to one file per chunk under
+the shared FAT volume:
+
+```
+/thumbycraft/scratch/<cx>_<cz>.cnk
+/thumbycraft/slot0/<cx>_<cz>.cnk  ...  /thumbycraft/slot3/<cx>_<cz>.cnk
+```
+
+The filesystem is the lookup table — no hash + probe. The original
+plan was one file per region with hash-indexed sectors, but FatFs
+has no sparse-file support: `f_lseek` past EOF + `f_write` forces
+it to allocate every cluster up to the write position, so a single
+chunk written at hash slot 200 would balloon to 800 KB of allocated
+clusters. One file per chunk gives genuinely-lazy allocation —
+each chunk costs one 4 KB cluster regardless of its `(cx, cz)`
+magnitude. Multiple worlds coexist; backing up `/thumbycraft/` over
+USB MSC just copies the files.
+
+The same magic + nonce + mod-list bytes live in each `.cnk` file,
+so the nonce-filter trick still works — `bind(region, nonce)` sets
+the active nonce, and reads of stale files (e.g. left over from a
+previous scratch session) get silently dropped.
+
+A **32-byte (256-bit) bloom-style bitmap** is rebuilt on every
+`bind()` by scanning the region's directory. `load(cx, cz)` checks
+the bitmap before calling `f_open`, skipping the ~2 ms `FR_NO_FILE`
+round-trip on the >90 % of chunks that have never been edited.
+False positives just cost one redundant `f_open` and the directory
+scan dominates the total bind time anyway.
+
+**Save flow.** On window shift, chunks leaving the window get
+their mods scanned out of the SRAM mod-hash and persisted; chunks
+entering have their mods loaded back into the hash so the gen pass
+picks them up. Standalone runs a background drain timer
+(`PERSIST_PERIOD = 2 s`) so the cost of evicting chunks spreads
+into single-sector hitches rather than bundling on every shift.
+Slot mode disables the background drain — each FatFs write costs
+~30-50 ms with all IRQs masked, which would click the audio PWM —
+and instead flushes the full dirty queue synchronously on every
+manual or auto save. The 32-entry dirty queue still force-flushes
+its oldest entry on overflow, so an unsaved walk-forever session
+can't lose data, just stutter briefly when the overflow fires.
+
+**Flash safety.** Erase + program calls
+`multicore_lockout_start_blocking()` so core 1's render loop is
+parked during the ~10 ms XIP-disable window. Core 1 calls
+`multicore_lockout_victim_init()` at startup to register the SIO
+FIFO IRQ handler that ACKs the lockout.
 
 ## Mobs (`src/craft_mobs.c`)
 
@@ -844,31 +960,70 @@ test — always overlays. Tilt + dip animation on swing (driven by
 
 ## Persistence
 
-Two flash layers:
+Saves are split into two layers: chunk diffs (every player edit)
+and slot metadata (player state + thumbnail). Both layers are
+per-world — each of the 4 save slots gets its own physical region
+that the others can't touch.
 
-1. **Chunk store** (256 KB, automatic) — every player edit
-2. **Save flash** (16 KB, manual, 4 slots) — player state +
-   32×32 thumbnail per slot. Layout:
-   - 4 fixed slots × 4 KB sectors at the top of flash
-   - Each slot: magic (4 B) + seq (4 B) + record len (4 B) + the
-     record body + CRC32 (4 B) page-aligned at the start of the
-     sector; 32×32 RGB565 thumbnail at offset 2048 (exactly 2 KB).
-     Max record body is `THUMB_OFFSET − 16` = 2032 bytes — plenty
-     for the current ~300-byte payload (header + hotbar + camera +
-     inventory[BLK_COUNT]).
-   - Slot picker UI shows live thumbnails for filled slots
+| Layer | Standalone | ThumbyOne slot |
+|---|---|---|
+| Chunk diffs | 5 × 1 MB flash regions @ `0x100000..0x5FFFFF` | per-region directory under `/thumbycraft/<region>/` |
+| Slot metadata + thumb | 4 × 4 KB flash sectors @ `0x600000..0x603FFF` | `/thumbycraft/slot0.meta` … `slot3.meta` |
 
-The title screen and pause menu's save/load both use the same slot
-picker.
+The chunk-diff side is detailed in [Chunk store](#chunk-store--per-world-regions-nonce-filtered).
+The metadata side is a fixed-size 4 KB sector per slot, layout
+identical in both backends:
 
-A new-world action re-keys the chunk store + clears the in-SRAM
-state (mods, chests, furnaces, water, drops, particles) so nothing
-leaks from the previous world.
+```
+0..3      magic 'TCS3'
+4..7      seq         (monotonic counter — picker uses for "newest")
+8..11     record len  (bytes in the player-state record body)
+12..      record body (header + hotbar + camera + inventory + nonces)
+pad to 4-byte boundary
++4        crc32 over [magic..pad]
+2048..    32×32 RGB565 thumbnail (exactly 2 KB)
+```
 
-Furnace and chest state are in SRAM only — not persisted across
+Max record body is `THUMB_OFFSET − 16` = 2032 bytes — plenty for
+the current ~300-byte payload. Slot picker UI reads the thumbnail
++ seq + a few header bytes (which world seed, autosave level,
+chunks-nonce) so the picker can show live thumbnails and the
+"newest" badge without loading the full record.
+
+### Auto save
+
+The pause menu has an **Auto save** toggle with four modes:
+
+| Mode | Trigger | Default |
+|---|---|---|
+| **Off** | manual save only | |
+| **60s** | every 60 s of gameplay | |
+| **Idle** | 5 s of no input + no XZ motion | |
+| **Event** | menu-open / menu-close edges + day/night flips | ✓ |
+
+The mode is stored in the save record's header (`HDR_OFF_PAD` byte)
+so it survives reboots without a format bump. Every auto-save also
+runs through the same 5 s debounce window so two triggers can't
+double-fire.
+
+Event mode is the default because the natural pause points
+(opening a chest, closing the recipe book, the sun crossing the
+horizon) are exactly the moments a player won't notice the ~30 ms
+write hitch.
+
+### Per-world isolation
+
+A new-world action re-keys the scratch region (random 32-bit
+nonce) + clears the in-SRAM state (mods, chests, furnaces, water,
+drops, particles), so nothing leaks from the previous world. Each
+save slot's region is gated by its own seq-number nonce, so loading
+slot 2 can't surface a chunk from slot 1 even if their physical
+sectors collide on the same hash bucket.
+
+Furnace and chest state is **in SRAM only** — not persisted across
 power-cycles in the current version. Their world blocks (the
-`BLK_FURNACE` / `BLK_CHEST` cells) DO persist via the chunk store, so
-the structures stay but inventories empty out on reboot.
+`BLK_FURNACE` / `BLK_CHEST` cells) DO persist via the chunk store,
+so the structures stay but inventories empty out on reboot.
 
 ## Build pipeline
 
@@ -885,7 +1040,8 @@ src/                         portable engine (host + device share these)
 ├── craft_types.h            shared types (Vec3, rgb565, CRAFT_FB_W, etc.)
 ├── craft_blocks.{c,h}       block table + texture atlas (baked at build time)
 ├── craft_world.{c,h}        sliding-window block storage + mod hash + light + flash bridge
-├── craft_chunk_store.h      flash chunk-store API
+├── craft_chunk_store.h      per-world chunk-store API (backend in device/host)
+├── slot_layout.h            shared flash offsets for chunk regions + metadata
 ├── craft_gen.{c,h}          terrain + caves + rivers + trees + huts
 ├── craft_render.{c,h}       DDA raycaster, mob projection helpers, sky/fog
 ├── craft_player.{c,h}       camera, controls, AABB physics, hotbar
@@ -912,13 +1068,15 @@ host/                        SDL2 platform layer
 ├── craft_chunk_store_stub.c  (no-op flash on host)
 └── CMakeLists.txt
 
-device/                      RP2350 platform layer
-├── craft_device_main.c       boot, dual-core dispatch
-├── craft_lcd_gc9107.{c,h}    SPI + DMA LCD driver
-├── craft_buttons.{c,h}       GPIO + edge detect
-├── craft_audio_pwm.{c,h}     PWM + IRQ audio ring
-├── craft_save_flash.{c,h}    16 KB, 4-slot saves with thumbnails
-├── craft_chunk_store_flash.c 256 KB chunk store
+device/                       RP2350 platform layer
+├── craft_device_main.c        boot, dual-core tile-stealing dispatch
+├── craft_lcd_gc9107.{c,h}     SPI + DMA LCD driver
+├── craft_buttons.{c,h}        GPIO + edge detect
+├── craft_audio_pwm.{c,h}      PWM + IRQ audio ring
+├── craft_save_flash.{c,h}     4-slot saves + thumbnails (standalone)
+├── craft_save_fatfs.c         same API, FatFs files (ThumbyOne slot)
+├── craft_chunk_store_flash.c  5 × 1 MB per-world flash regions
+├── craft_chunk_store_fatfs.c  one file per chunk on shared FAT (slot)
 └── CMakeLists.txt
 
 tools/                       build-time host tools + assets
@@ -966,12 +1124,14 @@ for the (small) ThumbyOne-side edits.
 
 | Hot path | Cost | Mitigation |
 |---|---|---|
-| Per-pixel DDA | up to 64 steps × 16 384 pixels/frame | incremental idx; SRAM-resident; -O3 |
+| Per-pixel DDA | up to 64 steps × 16 384 pixels/frame | incremental idx; SRAM-resident; -O3; **tile work-stealing across both cores** |
 | Mob render | 17 parts × screen-bbox pixels | parts sorted by volume, slab early-out |
 | Window shift | 1024-column regen on a 16-cell slide | ~7 ms, fits in a frame |
-| Chunk-store flash write | ~10 ms per sector + ~10 ms erase | only on chunk eviction (every ~16 cells of walking) |
+| Chunk-store write (raw flash, standalone) | ~10 ms erase + ~10 ms program per sector | background drain @ 2 s spreads chunk evictions |
+| Chunk-store write (FatFs, slot mode)      | ~30–50 ms with IRQs masked per chunk file  | save-only persistence (no background drain) — would click PWM otherwise |
 | Light flood | BFS to radius 6 | runs on torch place/break only |
 | Audio render | 4 voices × N samples per IRQ | int16 + table sine, soft clamp |
+| Auto-save fire | full chunk-store + slot metadata flush | 5 s debounce; Event mode lines writes up with natural pause points |
 
 Current frame budget at ~30 fps: ~33 ms / frame, with the raycaster
 dominating at ~20 ms across both cores.
