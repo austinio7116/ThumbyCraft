@@ -9,6 +9,7 @@
  */
 #include "craft_main.h"
 #include "slot_layout.h"
+#include <stdio.h>
 #include "craft_world.h"
 #include "craft_gen.h"
 #include "craft_render.h"
@@ -117,6 +118,77 @@ void craft_main_set_active_region(int region) {
 }
 int  craft_main_active_region(void) { return s_active_region; }
 
+/* Auto-save mode — cycled 1..4 from the menu. Stored in the (was-
+ * always-zero) pad byte of the save record so the choice persists
+ * across loads.
+ *   1 = Off        manual save only. Dirty-queue overflow still
+ *                  flushes individual chunks when the 32-entry
+ *                  queue fills, but player metadata stays at the
+ *                  last explicit save.
+ *   2 = Periodic   full save every 60 s. One audible hitch per
+ *                  minute; power-cut loses at most ~60 s.
+ *   3 = Idle       full save after 5 s of no input + no walking.
+ *                  Hides the hitch behind a moment you weren't
+ *                  doing anything anyway.
+ *   4 = Events     full save on menu open, chest close, day/night
+ *                  flip — natural pause points. (DEFAULT.)
+ *
+ * Auto-save only ticks while we're playing a real save slot
+ * (active_region == s_save_slot). Scratch worlds (unsaved new
+ * world) don't auto-save because there's no target slot until the
+ * user picks one via the explicit Save menu. */
+#define AUTOSAVE_OFF        1
+#define AUTOSAVE_PERIODIC   2
+#define AUTOSAVE_IDLE       3
+#define AUTOSAVE_EVENTS     4
+
+#define AUTOSAVE_PERIODIC_SEC   60.0f
+#define AUTOSAVE_IDLE_SEC        5.0f
+#define AUTOSAVE_DEBOUNCE_SEC    5.0f   /* min gap between auto-saves */
+
+static int   s_autosave_level    = AUTOSAVE_EVENTS;  /* default */
+static float s_autosave_timer    = AUTOSAVE_PERIODIC_SEC;
+static float s_idle_timer        = 0.0f;
+static bool  s_idle_already_fired= false;
+static float s_since_last_save   = 999.0f;   /* big initial so first fire isn't blocked */
+static bool  s_event_pending     = false;
+static float s_last_pos_x        = 0.0f;
+static float s_last_pos_z        = 0.0f;
+static float s_last_sun_y        = 1.0f;
+
+static const char *autosave_label(int level) {
+    switch (level) {
+        case AUTOSAVE_PERIODIC: return "60s";
+        case AUTOSAVE_IDLE:     return "Idle";
+        case AUTOSAVE_EVENTS:   return "Event";
+        default:                return "Off";
+    }
+}
+
+void craft_main_set_autosave_level(int level) {
+    if (level < AUTOSAVE_OFF)    level = AUTOSAVE_OFF;
+    if (level > AUTOSAVE_EVENTS) level = AUTOSAVE_EVENTS;
+    s_autosave_level     = level;
+    s_autosave_timer     = AUTOSAVE_PERIODIC_SEC;
+    s_idle_timer         = 0.0f;
+    s_idle_already_fired = false;
+    s_event_pending      = false;
+}
+int  craft_main_autosave_level(void)  { return s_autosave_level; }
+const char *craft_main_autosave_label(void) {
+    return autosave_label(s_autosave_level);
+}
+
+/* Event hooks — call sites in the game logic invoke these to flag
+ * a natural pause point. The actual save fires through autosave_tick
+ * so all four modes share one debounce window and toast message. */
+void craft_main_notify_autosave_event(void) { s_event_pending = true; }
+
+/* Per-tick autosave check is defined further down (after s_save_req
+ * comes into scope). Forward declaration here so the rest of this
+ * section can reference it without a re-ordering. */
+static void autosave_tick(float dt, const CraftInput *in);
+
 /* Fresh random nonce for SCRATCH. Called at boot and on every
  * new-world (in-game or title). Old scratch sectors stay physically
  * on flash but become invisible — find_slot treats them as empty. */
@@ -152,16 +224,19 @@ static float s_held_swing_t = 0.0f;
  * bundle into a multi-chunk stutter on window shift.
  *
  * In slot mode the chunk store is on FatFs, where each per-chunk
- * write costs ~30-50 ms (FAT directory + cluster + file). That hitch
- * is too obvious to schedule in the background while the player is
- * walking — so we slow the tick way down. The dirty queue still
- * drains on save (force_persist_window), and the cap of 32 dirty
- * chunks force-flushes the oldest on overflow, so progress can't
- * be lost. */
+ * write costs ~30-50 ms with all IRQs masked. The audio PWM
+ * peripheral keeps outputting whatever level was last set during
+ * that window — when IRQs come back the next sample's value jumps,
+ * which reads as a click in the music. Solution: don't schedule
+ * background writes at all. Save-only persistence, same as the
+ * other ThumbyOne slots. The dirty queue's 32-entry overflow
+ * still force-flushes the oldest if you go without saving forever,
+ * so progress can't be lost — and force_persist_window on save
+ * still drains everything synchronously. */
 #ifdef THUMBYONE_SLOT_MODE
-#define PERSIST_PERIOD 30.0f
+#define PERSIST_PERIOD  (1.0e9f)   /* effectively disabled */
 #else
-#define PERSIST_PERIOD 2.0f
+#define PERSIST_PERIOD  2.0f
 #endif
 static float s_persist_timer = PERSIST_PERIOD;
 
@@ -311,11 +386,93 @@ size_t craft_main_save(uint8_t *out, size_t cap) {
         target_nonce = region_nonce(target_slot);
     }
 
-    return craft_save_serialise(s_seed, target_nonce, &s_player, out, cap);
+    return craft_save_serialise(s_seed, target_nonce,
+                                (uint8_t)s_autosave_level,
+                                &s_player, out, cap);
 }
 
 bool craft_main_take_save_request(void) {
     bool r = s_save_req; s_save_req = false; return r;
+}
+
+static void capture_thumb_from_fb(void);   /* defined below */
+
+static void fire_autosave(void) {
+    capture_thumb_from_fb();
+    s_save_req = true;
+    s_since_last_save = 0.0f;
+}
+
+static void autosave_tick(float dt, const CraftInput *in) {
+    s_since_last_save += dt;
+
+    /* Track activity for the Idle mode — any button press OR a
+     * change in player XZ position counts as "the player did
+     * something". Y can change from gravity even when standing
+     * still, so XZ-only is the right gate. */
+    bool any_input = in && (in->up || in->down || in->left || in->right ||
+                            in->a  || in->b  || in->lb   || in->rb   ||
+                            in->menu);
+    bool moving = (s_player.cam.pos.x != s_last_pos_x) ||
+                  (s_player.cam.pos.z != s_last_pos_z);
+    s_last_pos_x = s_player.cam.pos.x;
+    s_last_pos_z = s_player.cam.pos.z;
+    if (any_input || moving) {
+        s_idle_timer = 0.0f;
+        s_idle_already_fired = false;
+    } else {
+        s_idle_timer += dt;
+    }
+
+    /* Detect day/night-phase flips for the Events mode. sun_y > 0
+     * is daytime, < 0 is night; crossing zero is a sunrise or sunset. */
+    float sun_y = craft_render_sun_y();
+    if ((sun_y >= 0.0f) != (s_last_sun_y >= 0.0f)) {
+        s_event_pending = true;
+    }
+    s_last_sun_y = sun_y;
+
+    /* Detect menu-open / menu-close transitions. Either edge counts
+     * as an event — opening the menu is a natural pause moment;
+     * closing it (returning from chest / inventory / craft / etc.)
+     * is the "leave a chest UI" case the user called out. */
+    static bool was_menu_open = false;
+    bool is_menu_open = craft_menu_is_open();
+    if (is_menu_open != was_menu_open) {
+        s_event_pending = true;
+        was_menu_open = is_menu_open;
+    }
+
+    if (s_autosave_level == AUTOSAVE_OFF)         return;
+    if (s_active_region != s_save_slot)            return;
+    if ((unsigned)s_save_slot >= TBC_SLOT_COUNT)   return;
+    if (s_since_last_save < AUTOSAVE_DEBOUNCE_SEC) return;
+
+    switch (s_autosave_level) {
+        case AUTOSAVE_PERIODIC: {
+            s_autosave_timer -= dt;
+            if (s_autosave_timer <= 0.0f) {
+                s_autosave_timer = AUTOSAVE_PERIODIC_SEC;
+                fire_autosave();
+            }
+            break;
+        }
+        case AUTOSAVE_IDLE: {
+            if (s_idle_timer >= AUTOSAVE_IDLE_SEC && !s_idle_already_fired) {
+                s_idle_already_fired = true;
+                fire_autosave();
+            }
+            break;
+        }
+        case AUTOSAVE_EVENTS: {
+            if (s_event_pending) {
+                s_event_pending = false;
+                fire_autosave();
+            }
+            break;
+        }
+        default: break;
+    }
 }
 bool craft_main_take_load_request(void) {
     bool r = s_load_req; s_load_req = false; return r;
@@ -425,9 +582,18 @@ static void handle_menu_result(CraftMenuResult r) {
             /* Page switch handled inside the menu itself — nothing
              * for the host to do here. */
             break;
-        case CRAFT_MENU_RESULT_SETTINGS:
-            craft_menu_toast("Settings: soon");
+        case CRAFT_MENU_RESULT_AUTOSAVE: {
+            /* A-press cycles the level 1 → 2 → 3 → 4 → 1. The menu
+             * stays open and the row redraws with the new label. */
+            int next = s_autosave_level + 1;
+            if (next > 4) next = 1;
+            craft_main_set_autosave_level(next);
+            char buf[24];
+            snprintf(buf, sizeof buf, "Auto save: %s",
+                     craft_main_autosave_label());
+            craft_menu_toast(buf);
             break;
+        }
     }
 }
 
@@ -464,6 +630,7 @@ void craft_main_step(const CraftInput *in, float dt, int fps) {
         craft_world_persist_tick();
         s_persist_timer = PERSIST_PERIOD;
     }
+    autosave_tick(dt, in);
     if (s_player.broke_block) {
         Vec3 centre = v3((float)s_player.last_action_x + 0.5f,
                          (float)s_player.last_action_y + 0.5f,
@@ -557,6 +724,7 @@ void craft_main_tick(const CraftInput *in, float dt) {
         craft_world_persist_tick();
         s_persist_timer = PERSIST_PERIOD;
     }
+    autosave_tick(dt, in);
     if (s_player.broke_block) {
         Vec3 centre = v3((float)s_player.last_action_x + 0.5f,
                          (float)s_player.last_action_y + 0.5f,

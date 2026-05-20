@@ -40,7 +40,7 @@ static const MenuItem ITEMS[] = {
     { "Music vol",     CRAFT_MENU_RESULT_MUSIC_VOL,  false },
     { "SFX vol",       CRAFT_MENU_RESULT_SFX_VOL,    false },
     { "New world",     CRAFT_MENU_RESULT_NEW_WORLD,  true  },
-    { "Settings",      CRAFT_MENU_RESULT_SETTINGS,   true  },
+    { "Auto save",     CRAFT_MENU_RESULT_AUTOSAVE,   false },
 };
 #define ITEM_COUNT ((int)(sizeof(ITEMS) / sizeof(ITEMS[0])))
 
@@ -1307,6 +1307,13 @@ static void draw_main_page(uint16_t *fb, const CraftPlayer *p) {
                             (p->mode == CRAFT_MODE_SURVIVAL)
                                 ? rgb565(255, 140, 100)
                                 : rgb565(140, 200, 255));
+        } else if (ITEMS[i].result == CRAFT_MENU_RESULT_AUTOSAVE) {
+            const char *st = craft_main_autosave_label();
+            int sw = craft_font_width(st);
+            bool on = (craft_main_autosave_level() > 1);
+            craft_font_draw(fb, st, x0 + panel_w - sw - 6, item_y,
+                            on ? rgb565(120, 220, 255)
+                               : rgb565(120, 120, 130));
         } else if (ITEMS[i].result == CRAFT_MENU_RESULT_MUSIC_VOL ||
                    ITEMS[i].result == CRAFT_MENU_RESULT_SFX_VOL) {
             float v = (ITEMS[i].result == CRAFT_MENU_RESULT_MUSIC_VOL)

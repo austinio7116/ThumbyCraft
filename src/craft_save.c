@@ -11,6 +11,7 @@
  * holding a second 256 KB copy of the world in SRAM.
  */
 #include "craft_save.h"
+#include "craft_main.h"
 #include "craft_world.h"
 #include "craft_gen.h"
 #include "craft_chunk_store.h"
@@ -80,6 +81,7 @@ static float getf(const uint8_t *p) {
 #define SAVE_RECORD_BYTES     (HDR_OFF_INVENTORY + BLK_COUNT * 4 + 4)
 
 size_t craft_save_serialise(uint32_t seed, uint32_t chunks_nonce,
+                            uint8_t autosave_level,
                             const CraftPlayer *p,
                             uint8_t *out, size_t out_cap) {
     if (out_cap < SAVE_RECORD_BYTES) return 0;
@@ -91,7 +93,7 @@ size_t craft_save_serialise(uint32_t seed, uint32_t chunks_nonce,
     out[HDR_OFF_MODE]      = (uint8_t)p->mode;
     out[HDR_OFF_HP]        = (uint8_t)p->hp;
     out[HDR_OFF_HOTBARIDX] = (uint8_t)p->hotbar_idx;
-    out[HDR_OFF_PAD]       = 0;
+    out[HDR_OFF_PAD]       = autosave_level;
     for (int i = 0; i < CRAFT_HOTBAR_SLOTS; i++) {
         out[HDR_OFF_HOTBAR + i] = (uint8_t)p->hotbar[i];
     }
@@ -127,6 +129,13 @@ bool craft_save_deserialise(const uint8_t *in, size_t n,
     p->hp         = in[HDR_OFF_HP];
     p->hotbar_idx = in[HDR_OFF_HOTBARIDX];
     if (p->hotbar_idx >= CRAFT_HOTBAR_SLOTS) p->hotbar_idx = 0;
+    /* Restore the persisted autosave level (1..4). 0 means a save
+     * from before this field existed — default to 1 (off). */
+    {
+        uint8_t lv = in[HDR_OFF_PAD];
+        if (lv < 1 || lv > 4) lv = 1;
+        craft_main_set_autosave_level(lv);
+    }
     for (int i = 0; i < CRAFT_HOTBAR_SLOTS; i++) {
         p->hotbar[i] = (BlockId)in[HDR_OFF_HOTBAR + i];
     }

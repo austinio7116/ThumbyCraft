@@ -50,8 +50,11 @@
  * embedded world_load_around. */
 #define CRAFT_SAVE_OFF_CHUNKS_NONCE 12
 
-/* Returns bytes written into `out` (≤ out_cap), or 0 on error. */
+/* Returns bytes written into `out` (≤ out_cap), or 0 on error.
+ * autosave_level is 1..4 — stored in the (previously zero-filled)
+ * pad byte so it survives across loads without growing the record. */
 size_t craft_save_serialise(uint32_t seed, uint32_t chunks_nonce,
+                            uint8_t autosave_level,
                             const CraftPlayer *p,
                             uint8_t *out, size_t out_cap);
 

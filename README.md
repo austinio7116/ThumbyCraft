@@ -393,19 +393,48 @@ shadow that fades correctly with the day cycle.
 
 ## Building & persistence
 
-Every block you place or break is **persistently saved to flash**,
-automatically:
+Every block you place or break is held in an SRAM mod hash keyed by
+world coords. Persistence to flash happens on **save** — either
+manual via **MENU → Save world**, or automatic per the **Auto save**
+menu setting (default: on events).
 
-- The 64³ window slides with you; chunks that scroll off-window get
-  their player edits written to a 256 KB chunk store on flash
-- Walk back later and your build is exactly where you left it
-- Survives power-cycles (no need to manually save)
+**4-slot picker** for both Save and Load. Each slot shows a 32×32
+thumbnail of the last in-game frame before you opened the pause
+menu (captured at save time). Pick a slot to commit / load; empty
+slots show "Empty"; B cancels.
 
-Explicit save / load: **MENU → Save world** or **Load world** opens
-a **4-slot picker**. Each slot shows a 32×32 thumbnail of the last
-in-game frame before you opened the pause menu (captured + stored
-in flash on every save). Pick a slot to commit / load. Empty slots
-show "Empty"; B cancels.
+### Auto save
+
+**MENU → Auto save** cycles through four modes (A to advance):
+
+- **Off** — manual save only. The SRAM mod hash holds up to 2048
+  edits and the dirty queue holds 32 distinct chunks; if you
+  somehow fill the queue without saving, the oldest chunk
+  force-flushes synchronously so progress never gets dropped.
+  Power-cut between saves still loses everything since the last
+  Save action though.
+- **60s** — full save every 60 seconds.
+- **Idle** — full save after 5 seconds of no input *and* no
+  walking. Hides the save hitch behind a natural pause.
+- **Event** (default) — full save when you open the pause menu,
+  close it again (catches chest / inventory / craft / etc.), and
+  when the sun crosses the horizon. Saves at natural pause points
+  rather than introducing new ones.
+
+Auto save only ticks while you're on a saved slot. A brand-new
+world (after **New world** but before any **Save**) lives in a
+scratch region and won't auto-save until you explicitly commit it
+to slot 1-4.
+
+### Per-world storage (standalone vs ThumbyOne slot)
+
+- **Standalone** firmware: chunks live in flash sectors keyed by
+  hash, one 1 MB region per save slot.
+- **ThumbyOne slot mode**: chunks are files under
+  `/thumbycraft/<region>/<cx>_<cz>.cnk` on the shared FAT. One file
+  per edited chunk; an unedited world consumes essentially zero
+  disk. You can back the whole `/thumbycraft/` tree off via USB
+  MSC to copy worlds between devices or to your PC.
 
 ### Title screen
 

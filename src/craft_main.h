@@ -69,6 +69,12 @@ int  craft_main_active_region(void);
  * the seq read from the slot's metadata sector). */
 void craft_main_set_slot_nonce(int slot, uint32_t nonce);
 
+/* Auto-save level 1..4 (1=off, 2=5min, 3=2min, 4=30s). Set is
+ * called by the menu's A-press handler to cycle the value. */
+void        craft_main_set_autosave_level(int level);
+int         craft_main_autosave_level(void);
+const char *craft_main_autosave_label(void);
+
 
 /* Accessor for the player (HUD draw + save). */
 const CraftPlayer *craft_main_player(void);

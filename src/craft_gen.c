@@ -147,33 +147,41 @@ static int height_at(int x, int z, uint32_t seed) {
      *   RIVER_HALF ≤ |n − 0.5| < BANK_HALF (0.115) — bank slope.
      *     Natural terrain is pulled DOWN toward water level
      *     progressively as we approach the channel edge, eliminating
-     *     the previous sheer cliff between river and bank.
+     *     the cliff between river and bank.
      *
-     * Both zones gate on mountain_factor < 0.2 (mountains shrug off
-     * rivers) AND natural height ≤ WL+6 (we only slope down terrain
-     * that's already in the river's neighbourhood — true hilly
-     * terrain crossing the river noise simply has no river there). */
+     * Gated on mountain_factor only (mountains shrug off rivers).
+     * The previous WL+6 height gate caused sheer cliffs wherever
+     * the river-noise band ran through non-flatland — now the bank
+     * slope always applies, smoothly pulling any neighbouring
+     * elevation down to the channel edge. */
     {
         float n = fbm((float)x * 0.003f, (float)z * 0.003f,
                       seed ^ 0x7E417A11u);
         float dist = fabsf(n - 0.5f);
         const float river_half = 0.055f;
         const float bank_half  = 0.115f;
-        if (dist < bank_half && m < 0.2f && height <= CRAFT_WATER_LEVEL + 6) {
+        if (dist < bank_half && m < 0.2f) {
             if (dist < river_half) {
-                /* Carved channel. */
+                /* Carved channel. Bed depth tapers 1→3 cells.
+                 * No min-h clamp — previously the carve was floored
+                 * at (natural − 4), which on flatland with natural
+                 * h = 32 clamped the river bed back UP to 28 = WL,
+                 * leaving sand at WL with no water above it. Letting
+                 * the bed reach WL−1..WL−3 lets the air-fill loop
+                 * actually drop WATER into y > h. */
                 float rs = 1.0f - dist / river_half;
                 int depth = 1 + (int)(rs * 2.5f);
                 if (depth > 3) depth = 3;
                 int river_h = CRAFT_WATER_LEVEL - depth;
-                int min_h = height - 4;
-                if (river_h < min_h) river_h = min_h;
                 if (river_h < height) height = river_h;
             } else {
                 /* Bank slope — lerp height toward WATER_LEVEL as we
                  * approach the channel edge. bank_t = 0 at the outer
-                 * edge of the bank, 1 at the river edge. */
+                 * edge of the bank, 1 at the river edge. Scale the
+                 * lerp by (1 - mountain_factor) so partial-mountain
+                 * areas slope partially instead of cliffing. */
                 float bank_t = (bank_half - dist) / (bank_half - river_half);
+                bank_t *= (1.0f - m);
                 int target = CRAFT_WATER_LEVEL;
                 if (height > target) {
                     int new_h = height - (int)((height - target) * bank_t + 0.5f);
@@ -205,11 +213,16 @@ static int height_at(int x, int z, uint32_t seed) {
  * before invoking. Mountains naturally get more cave volume because
  * their h is taller, expanding the underground envelope. */
 static bool is_cave(int x, int y, int z, uint32_t seed) {
-    /* Cheese chambers — rounded pocket density. */
+    /* Cheese chambers — rounded pocket density.
+     *
+     * Threshold 0.66 (was 0.62) brings cave fill back to roughly
+     * 8-10% of below-surface cells; 0.62 was carving close to 20%
+     * which made the underground dominate and exposed cave mouths
+     * across every river bank's cliff face. */
     float n1 = val_noise3(x * 0.10f, y * 0.16f, z * 0.10f, seed ^ 0xCAFE5u);
     float n2 = val_noise3(x * 0.21f, y * 0.30f, z * 0.21f, seed ^ 0xCAFE6u);
     float v  = n1 * 0.65f + n2 * 0.35f;
-    if (v > 0.62f) return true;
+    if (v > 0.66f) return true;
     /* Spaghetti tunnels — long thin worms. Y-scale matches X/Z so
      * tunnels twist in all three directions, not just horizontally. */
     float na = val_noise3(x * 0.085f, y * 0.085f, z * 0.085f, seed ^ 0xCAFE7u);
@@ -560,9 +573,11 @@ BlockId craft_gen_block_at(int x, int y, int z, uint32_t seed) {
     /* Underground / surface columns. Caves carve out the deep stone
      * layer only — never touches the topmost dirt or surface block,
      * so the silhouette of the world from above is unaffected. The
-     * y>=2 floor keeps a stone "bedrock" layer below caves. */
+     * y>=2 floor keeps a stone "bedrock" layer below caves, and the
+     * y<h-8 ceiling keeps the top 5 cells of stone solid so caves
+     * stay genuinely subterranean (matches craft_gen_column). */
     if (y <  h - 3) {
-        if (y >= 2 && is_cave(x, y, z, seed)) return BLK_AIR;
+        if (y >= 2 && y < h - 8 && is_cave(x, y, z, seed)) return BLK_AIR;
         return BLK_STONE;
     }
     if (y <  h)     return BLK_DIRT;
@@ -617,11 +632,19 @@ void craft_gen_column(int wx, int wz, uint32_t seed,
     if (h <= wl + 1)                    surface = BLK_SAND;
     else if (m > 0.5f && h > wl + 18)   surface = BLK_STONE;
     else                                surface = BLK_GRASS;
+    /* Cave depth floor — caves only carve below (h - 8) so the top
+     * 5 cells under any surface stay solid. Without this, hill
+     * columns next to rivers expose 3-4 cells of cave mouths in
+     * the cliff band (h-3..h-1 are dirt; cave carving runs up to
+     * h-4, sometimes adjacent to surface). With the river-bank
+     * smoothing the cliff is mostly gone, but keeping caves
+     * genuinely subterranean is the right default anyway. */
+    int cave_top = h - 8;
     for (int y = 0; y < h - 3; y++) {
         /* Cave carve before ore placement — caves remove a cell
          * entirely so ore doesn't get assigned to it. y<2 stays
          * solid as a "bedrock" floor. */
-        if (y >= 2 && is_cave(wx, y, wz, seed)) {
+        if (y >= 2 && y < cave_top && is_cave(wx, y, wz, seed)) {
             out[y] = BLK_AIR;
             continue;
         }
