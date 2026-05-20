@@ -7,7 +7,15 @@ of SRAM. Everything you see is rendered by per-pixel CPU raycasting in
 real time, with full survival mechanics, mobs, music, and persistent
 worlds.
 
-![screenshot — drop one in `docs/` when you have it](docs/screenshot.png)
+<p align="center">
+  <img src="docs/screenshots/craft-title.jpg" width="480" alt="ThumbyCraft title screen on the Thumby Color">
+</p>
+
+<p align="center">
+  <img src="docs/screenshots/craft-gameplay.jpg" width="240" alt="Surface gameplay — torch on ground, hearts HUD">
+  <img src="docs/screenshots/craft-cave.jpg" width="240" alt="Cave exploration under torch light">
+  <img src="docs/screenshots/craft-hilltop.jpg" width="240" alt="Hilltop view with bow held — distant grassland">
+</p>
 
 ```
 ~30 fps  ·  64³ block window over an infinite world  ·  5 hostile + 3 passive mob types
@@ -132,6 +140,12 @@ per hit, hands = 1).
 
 ### Crafting
 
+<p align="center">
+  <img src="docs/screenshots/craft-craft-pickaxe.jpg" width="240" alt="Crafting a wooden pickaxe in the 3x3 grid">
+  <img src="docs/screenshots/craft-craft-planks.jpg" width="240" alt="3x3 grid with planks ready to craft">
+  <img src="docs/screenshots/craft-recipes.jpg" width="240" alt="Recipe book showing the diamond sword recipe">
+</p>
+
 Open **MENU → Craft**. You get a 3×3 shaped grid. Each grid cell
 holds a **stack** with a count. Navigate with D-pad, **A** to place
 the active hotbar item into the selected cell (single press = +1 to
@@ -202,6 +216,10 @@ Smelt outputs:
 - **Cobblestone → Smooth stone**
 
 ### Chest (storage)
+
+<p align="center">
+  <img src="docs/screenshots/craft-chest.jpg" width="380" alt="Chest UI — 4x4 grid storing wood, planks, tools, and ore">
+</p>
 
 Place a chest, B to open. Get a 4×4 = **16-slot inventory** bound to
 that specific chest. Press **A** on an empty slot to deposit your
@@ -293,6 +311,10 @@ ground. Walk within 1.5 m to auto-collect into inventory. Drops
 expire after 90 s if uncollected.
 
 ## Redstone circuitry
+
+<p align="center">
+  <img src="docs/screenshots/craft-redstone.jpg" width="480" alt="Redstone circuit on a hillside — wire trace lit, piston nearby">
+</p>
 
 A small but functional Minecraft-style redstone implementation.
 The propagation tick runs at **5 Hz** with an early-exit when no
@@ -404,6 +426,10 @@ menu (captured at save time). Pick a slot to commit / load; empty
 slots show "Empty"; B cancels.
 
 ### Auto save
+
+<p align="center">
+  <img src="docs/screenshots/craft-menu-autosave.jpg" width="380" alt="Pause menu scrolled to Auto save: Event row">
+</p>
 
 **MENU → Auto save** cycles through four modes (A to advance):
 
