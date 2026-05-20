@@ -204,6 +204,13 @@ typedef struct {
     BlockId blk;
     bool   passed_water;
     bool   passed_glass;
+    /* Surface u/v captured at the FIRST water-from-not-water entry so
+     * render_strip can sample the animated water texture there. Only
+     * meaningful when passed_water is true; if the ray started inside
+     * water we skip the capture (render_strip's underwater branch
+     * overwrites the colour anyway). */
+    int    water_face;
+    float  water_u, water_v;
 } TraceHit;
 
 INLINE_HOT TraceHit trace_ray(Vec3 origin, Vec3 dir, bool stop_at_water) {
@@ -315,6 +322,29 @@ INLINE_HOT TraceHit trace_ray(Vec3 origin, Vec3 dir, bool stop_at_water) {
         if (is_sprite_cell && !stop_at_water) continue;
         if (blk == BLK_WATER) {
             if (!stop_at_water) {
+                if (!h.passed_water) {
+                    /* First water cell along the ray — record the
+                     * surface UV so the render path can sample the
+                     * animated water texture there. */
+                    float hx = origin.x + dir.x * t;
+                    float hy = origin.y + dir.y * t;
+                    float hz = origin.z + dir.z * t;
+                    switch (face) {
+                        case FACE_PX: case FACE_NX:
+                            h.water_u = hz - floorf(hz);
+                            h.water_v = 1.0f - (hy - floorf(hy));
+                            break;
+                        case FACE_PY: case FACE_NY:
+                            h.water_u = hx - floorf(hx);
+                            h.water_v = hz - floorf(hz);
+                            break;
+                        case FACE_PZ: case FACE_NZ:
+                            h.water_u = hx - floorf(hx);
+                            h.water_v = 1.0f - (hy - floorf(hy));
+                            break;
+                    }
+                    h.water_face = face;
+                }
                 h.passed_water = true;
                 continue;
             }
@@ -705,8 +735,23 @@ void craft_render_strip(const CraftCamera *cam, uint16_t *fb,
                 c = shade(c, face_shade_v);
 
                 if (h.passed_water) {
-                    int r1 = (c >> 11) & 0x1F, g1 = (c >> 5) & 0x3F, b1 = c & 0x1F;
-                    int r2 = 5, g2 = 11, b2 = 20;
+                    /* Sample the (animated) water texture at the
+                     * captured surface UV — the frame index inside
+                     * craft_block_texture changes every 4 Hz, which is
+                     * what makes the surface visibly move. Blend 67%
+                     * water-surface + 33% underlying floor so it still
+                     * reads as see-through. */
+                    const uint16_t *wtex = craft_block_texture(
+                        BLK_WATER, (Face)h.water_face);
+                    int wtu = (int)(h.water_u * CRAFT_TEX_SIZE);
+                    int wtv = (int)(h.water_v * CRAFT_TEX_SIZE);
+                    if (wtu < 0) wtu = 0;
+                    else if (wtu >= CRAFT_TEX_SIZE) wtu = CRAFT_TEX_SIZE - 1;
+                    if (wtv < 0) wtv = 0;
+                    else if (wtv >= CRAFT_TEX_SIZE) wtv = CRAFT_TEX_SIZE - 1;
+                    uint16_t wc = wtex[wtv * CRAFT_TEX_SIZE + wtu];
+                    int r1 = (c  >> 11) & 0x1F, g1 = (c  >> 5) & 0x3F, b1 = c  & 0x1F;
+                    int r2 = (wc >> 11) & 0x1F, g2 = (wc >> 5) & 0x3F, b2 = wc & 0x1F;
                     r1 = (r1 + r2 * 2) / 3;
                     g1 = (g1 + g2 * 2) / 3;
                     b1 = (b1 + b2 * 2) / 3;
