@@ -42,11 +42,20 @@ void craft_audio_set_ambient(float gain);
 void craft_audio_music_enable(bool on);
 bool craft_audio_music_is_enabled(void);
 /* Music + SFX bus volumes. Range 0.0 (silent) to 1.0 (unity).
- * Default 1.0 for both. Anything above unity clips on the hard-clamp. */
+ * Default 1.0 for both. Anything above unity clips on the hard-clamp.
+ * SFX gain is no longer exposed via the pause-menu UI (master volume
+ * covers it) but the setter remains for any code that wants to trim
+ * the SFX bus independently. */
 void  craft_audio_music_set_volume(float vol);
 float craft_audio_music_get_volume(void);
 void  craft_audio_sfx_set_volume(float vol);
 float craft_audio_sfx_get_volume(void);
+/* Master output gain — multiplied into the final mix before clipping.
+ * Bridge to the cross-slot shared volume store on device builds; on
+ * the host the setter is still useful for matching device output
+ * level. Range 0.0..1.0. Default 1.0. */
+void  craft_audio_set_master_volume(float vol);
+float craft_audio_get_master_volume(void);
 /* Player altitude (0..1, where 0 = bottom of world, 1 = top). Drives
  * the per-loop pitch shift: deep = bright/high pitches, sky = deep/low.
  * The shift is re-rolled each music loop with ±a few semitones of

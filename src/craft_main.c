@@ -29,6 +29,12 @@
 #include "craft_water.h"
 #include "craft_redstone.h"
 
+#ifdef THUMBYONE_SLOT_MODE
+/* Cross-slot shared volume / brightness store (one flash sector,
+ * XIP-mapped; lobby + every slot read/write the same byte). */
+#include "thumbyone_settings.h"
+#endif
+
 #include <string.h>
 
 #define CRAFT_DAY_LENGTH 300.0f      /* 5 min total cycle. Sun curve
@@ -192,12 +198,31 @@ void craft_main_set_scheme(int scheme) {
 int craft_main_scheme(void) { return s_scheme; }
 const char *craft_main_scheme_label(int scheme) {
     switch (scheme) {
-        case CRAFT_SCHEME_CLASSIC:      return "Classic";
-        case CRAFT_SCHEME_CLASSIC_FLIP: return "Classic flip";
-        case CRAFT_SCHEME_DPAD_STRAFE:  return "Walk + strafe";
-        case CRAFT_SCHEME_DPAD_TURN:    return "Walk + turn";
-        default:                        return "?";
+        case CRAFT_SCHEME_CLASSIC:        return "Classic";
+        case CRAFT_SCHEME_CLASSIC_FLIP:   return "Classic flip";
+        case CRAFT_SCHEME_DPAD_STRAFE:    return "Walk + strafe";
+        case CRAFT_SCHEME_DPAD_TURN:      return "Walk + turn";
+        case CRAFT_SCHEME_CONSOLE_TURN:   return "Console + turn";
+        case CRAFT_SCHEME_CONSOLE_STRAFE: return "Console + strafe";
+        default:                          return "?";
     }
+}
+
+/* Master volume — slot mode persists through the shared mirror so
+ * every slot + the lobby see the same value; host build just keeps
+ * the live audio gain in memory. */
+void craft_main_set_master_volume(float v) {
+    if (v < 0.0f) v = 0.0f;
+    if (v > 1.0f) v = 1.0f;
+    craft_audio_set_master_volume(v);
+#ifdef THUMBYONE_SLOT_MODE
+    uint8_t units = (uint8_t)(v * (float)THUMBYONE_VOLUME_MAX + 0.5f);
+    if (units > THUMBYONE_VOLUME_MAX) units = THUMBYONE_VOLUME_MAX;
+    thumbyone_settings_save_volume(units);
+#endif
+}
+float craft_main_get_master_volume(void) {
+    return craft_audio_get_master_volume();
 }
 
 /* Event hooks — call sites in the game logic invoke these to flag
@@ -234,6 +259,7 @@ void craft_main_set_slot_nonce(int slot, uint32_t nonce) {
 static bool s_save_req;
 static bool s_load_req;
 static bool s_new_world_req;
+static bool s_quit_to_lobby_req;
 
 /* Held-item swing animation — 1.0 right after the player swings,
  * decays linearly back to 0 at ~5/sec. Ticked in craft_main_step /
@@ -301,6 +327,16 @@ void craft_main_init(uint16_t *fb, uint32_t seed) {
     craft_audio_set_ambient(0.0f);
     craft_audio_music_enable(true);
     craft_audio_music_set_volume(0.5f);
+#ifdef THUMBYONE_SLOT_MODE
+    /* Bridge master volume to the cross-slot shared mirror. Same
+     * byte the lobby and other slots read/write — a change in the
+     * lobby's volume slider lands here on next launch. */
+    {
+        uint8_t v = thumbyone_settings_load_volume();
+        if (v > THUMBYONE_VOLUME_MAX) v = THUMBYONE_VOLUME_MAX;
+        craft_audio_set_master_volume((float)v / (float)THUMBYONE_VOLUME_MAX);
+    }
+#endif
     /* Window-loaded around the world origin; spawn point picks a
      * grass tile inside the initial window. */
     craft_world_load_around(0, 0, seed);
@@ -501,6 +537,9 @@ bool craft_main_take_load_request(void) {
 bool craft_main_take_new_world_request(void) {
     bool r = s_new_world_req; s_new_world_req = false; return r;
 }
+bool craft_main_take_quit_to_lobby_request(void) {
+    bool r = s_quit_to_lobby_req; s_quit_to_lobby_req = false; return r;
+}
 
 float craft_main_world_time(void) { return s_world_time; }
 
@@ -547,6 +586,9 @@ static void handle_menu_result(CraftMenuResult r) {
             craft_menu_toast(on ? "Interlace ON" : "Interlace OFF");
             break;
         }
+        case CRAFT_MENU_RESULT_QUIT_TO_LOBBY:
+            s_quit_to_lobby_req = true;
+            break;
         case CRAFT_MENU_RESULT_MUSIC: {
             bool on = !craft_audio_music_is_enabled();
             craft_audio_music_enable(on);

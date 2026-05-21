@@ -420,6 +420,17 @@ void craft_audio_sfx_set_volume(float v) {
 }
 float craft_audio_sfx_get_volume(void) { return s_sfx_gain; }
 
+/* Master output gain — scales the post-mix signal before hard-clip.
+ * Default 1.0; the device main bridges this to the shared volume
+ * mirror on boot and on any pause-menu Volume change. */
+static float s_master_gain = 1.0f;
+void craft_audio_set_master_volume(float v) {
+    if (v < 0) v = 0;
+    if (v > 1.0f) v = 1.0f;
+    s_master_gain = v;
+}
+float craft_audio_get_master_volume(void) { return s_master_gain; }
+
 /* Semitone transpose for the CDL music track. Randomised at every loop
  * wrap, biased by player altitude — deep underground = bright/crystal
  * (high semitones), high mountains = deep/calm (low semitones).
@@ -689,6 +700,7 @@ int craft_audio_render(int16_t *out, int n) {
         ambient_lp += (noise - ambient_lp) * 0.03f;
 
         float mix = music_dry + wet * REVERB_WET + sfx_mix + ambient_lp * ambient_gain;
+        mix *= s_master_gain;
         /* Bass shelf removed. The soft-clipper's intermodulation
          * products (difference frequencies of the parallel thirds —
          * |349-415|=66 Hz, |698-830|=132 Hz etc.) land squarely in

@@ -272,21 +272,31 @@ void craft_player_tick(CraftPlayer *p, const CraftInput *in, float dt) {
      * forward — see walk_dtap_update() below. */
     int scheme = craft_main_scheme();
 
+    /* Console schemes: action buttons live on A/B/LB/RB and the
+     * look-modifier moves from LB to B-hold. Movement still flows
+     * through the D-pad like schemes 3/4. */
+    bool console_turn   = (scheme == CRAFT_SCHEME_CONSOLE_TURN);
+    bool console_strafe = (scheme == CRAFT_SCHEME_CONSOLE_STRAFE);
+    bool console        = console_turn || console_strafe;
+
     /* Which D-pad axes drive yaw vs pitch this frame. */
     bool dpad_pitches, dpad_turns_lr, dpad_strafes_lr;
     if (scheme == CRAFT_SCHEME_CLASSIC || scheme == CRAFT_SCHEME_CLASSIC_FLIP) {
         dpad_pitches    = true;
         dpad_turns_lr   = true;
         dpad_strafes_lr = false;
-    } else if (scheme == CRAFT_SCHEME_DPAD_STRAFE) {
-        /* Look modifier: LB-held flips D-pad from move into look. */
-        bool look_mod   = in->lb && !p->_lb_consumed_by_chord;
-        dpad_pitches    = look_mod;          /* UD only pitches when LB held */
-        dpad_turns_lr   = look_mod;          /* LR turns only when LB held */
+    } else if (scheme == CRAFT_SCHEME_DPAD_STRAFE || console_strafe) {
+        /* Look modifier: LB-held (or B-held in console) flips D-pad
+         * from move into look. */
+        bool look_mod   = console ? in->b
+                                  : (in->lb && !p->_lb_consumed_by_chord);
+        dpad_pitches    = look_mod;          /* UD only pitches when modifier held */
+        dpad_turns_lr   = look_mod;          /* LR turns only when modifier held */
         dpad_strafes_lr = !look_mod;         /* default LR is strafe */
-    } else { /* DPAD_TURN */
-        bool look_mod   = in->lb && !p->_lb_consumed_by_chord;
-        dpad_pitches    = look_mod;          /* UD only pitches when LB held */
+    } else { /* DPAD_TURN or CONSOLE_TURN */
+        bool look_mod   = console ? in->b
+                                  : (in->lb && !p->_lb_consumed_by_chord);
+        dpad_pitches    = look_mod;          /* UD only pitches when modifier held */
         dpad_turns_lr   = true;              /* LR always turns */
         dpad_strafes_lr = false;
     }
@@ -391,14 +401,14 @@ void craft_player_tick(CraftPlayer *p, const CraftInput *in, float dt) {
             }
         }
     } else {
-        /* Schemes 3/4: D-pad UP/DOWN walk fwd/back when NOT in look
-         * modifier mode. LB-hold (the modifier) parks D-pad UD into
-         * pitch, so it can't walk simultaneously. */
-        bool look_mod = in->lb && !p->_lb_consumed_by_chord;
+        /* Schemes 3/4/5/6: D-pad UP/DOWN walk fwd/back when NOT in
+         * look modifier mode. Look-mod is LB for 3/4, B for 5/6. */
+        bool look_mod = console ? in->b
+                                : (in->lb && !p->_lb_consumed_by_chord);
         if (!look_mod) {
             if (in->up)   wish = fwd;
             if (in->down) wish = v3(-fwd.x, -fwd.y, -fwd.z);
-            if (scheme == CRAFT_SCHEME_DPAD_STRAFE) {
+            if (scheme == CRAFT_SCHEME_DPAD_STRAFE || console_strafe) {
                 if (in->left) {
                     wish.x -= right_h.x;
                     wish.z -= right_h.z;
@@ -408,7 +418,7 @@ void craft_player_tick(CraftPlayer *p, const CraftInput *in, float dt) {
                     wish.z += right_h.z;
                 }
             }
-            /* DPAD_TURN: LR is already turning via yaw above. */
+            /* DPAD_TURN / CONSOLE_TURN: LR is already turning via yaw above. */
         }
     }
     walk_active = (wish.x != 0.0f) || (wish.z != 0.0f);
@@ -420,9 +430,12 @@ void craft_player_tick(CraftPlayer *p, const CraftInput *in, float dt) {
          *                     reached by walking + looking up; no
          *                     extra straight-up override.
          */
-        bool rb_ascend = in->rb;
-        if (scheme == CRAFT_SCHEME_CLASSIC_FLIP) rb_ascend = false;
-        if (rb_ascend) wish.y += 1.0f;
+        /* Ascend straight up: RB in schemes 1/3/4, A in console.
+         * Scheme 2 (CLASSIC_FLIP) has no spare button — fly-ascend
+         * comes from look-up + walk in that scheme. */
+        bool ascend_held = console ? in->a : in->rb;
+        if (scheme == CRAFT_SCHEME_CLASSIC_FLIP) ascend_held = false;
+        if (ascend_held) wish.y += 1.0f;
         float wl = sqrtf(wish.x*wish.x + wish.y*wish.y + wish.z*wish.z);
         if (wl > 0.001f) {
             float s = FLY_SPEED / wl;
@@ -508,12 +521,15 @@ void craft_player_tick(CraftPlayer *p, const CraftInput *in, float dt) {
         /* Jump:
          *   schemes 1, 3, 4 — RB tap
          *   scheme 2        — LB tap (LB is the jump button there)
+         *   schemes 5, 6    — A tap (console layout)
          *
          * Suppressed while MENU is held so MENU+LB/RB hotbar chords
-         * don't accidentally launch the player. */
+         * (or MENU+A fly-toggle) don't accidentally launch the player. */
         bool jump_pressed;
         if (scheme == CRAFT_SCHEME_CLASSIC_FLIP) {
             jump_pressed = in->lb_pressed && !p->_lb_consumed_by_chord;
+        } else if (console) {
+            jump_pressed = in->a_pressed;
         } else {
             jump_pressed = in->rb_pressed;
         }
@@ -616,13 +632,25 @@ void craft_player_tick(CraftPlayer *p, const CraftInput *in, float dt) {
 
     /* ----- Place / break / attack (only when MENU not held) ---- */
     if (!in->menu) {
-        /* Bow handling — A held with a bow + arrows enters "drawing"
-         * state, snaps yaw to the nearest hostile mob inside a
-         * ±60° cone within 16 blocks, and fires on release. Suppresses
-         * the regular break/attack on A while the player is aiming. */
+        /* Console schemes swap the action-button assignments: attack/
+         * break + bow-draw move from A to RB, and place moves from B
+         * to LB. Compute the effective signals up-front so the rest
+         * of this section can stay scheme-agnostic. */
+        bool attack_held    = console ? in->rb : in->a;
+        bool attack_pressed = console
+            ? (in->rb_pressed && !p->_rb_consumed_by_chord)
+            : in->a_pressed;
+        bool place_pressed  = console
+            ? (in->lb_pressed && !p->_lb_consumed_by_chord)
+            : in->b_pressed;
+        /* Bow handling — attack-button held with a bow + arrows enters
+         * "drawing" state, snaps yaw to the nearest hostile mob inside
+         * a ±60° cone within 16 blocks, and fires on release.
+         * Suppresses the regular break/attack while the player is
+         * aiming. */
         bool bow_held = p->hotbar[p->hotbar_idx] == BLK_BOW &&
                         p->inventory[BLK_ARROW] > 0;
-        if (bow_held && in->a) {
+        if (bow_held && attack_held) {
             p->bow_drawing = true;
             /* Charge the draw — ~0.4 s to reach full draw. The model
              * uses this to swing the bow up + back; release uses the
@@ -670,10 +698,13 @@ void craft_player_tick(CraftPlayer *p, const CraftInput *in, float dt) {
                 p->cam.yaw += dy;
             }
         }
-        /* Release detection — fire on the frame A transitions from
-         * held to released, provided we were drawing. */
-        bool a_just_released = p->bow_prev_a && !in->a;
-        p->bow_prev_a = in->a;
+        /* Release detection — fire on the frame the attack-button
+         * transitions from held to released, provided we were
+         * drawing. `bow_prev_a` retains its old name but now tracks
+         * whichever button is bound to "attack" for the current
+         * scheme. */
+        bool a_just_released = p->bow_prev_a && !attack_held;
+        p->bow_prev_a = attack_held;
         if (p->bow_drawing && a_just_released) {
             p->bow_drawing = false;
             if (bow_held) {
@@ -710,7 +741,7 @@ void craft_player_tick(CraftPlayer *p, const CraftInput *in, float dt) {
             /* Still drawing — don't run melee/break code. */
             goto skip_attack;
         }
-        if (in->a_pressed) {
+        if (attack_pressed) {
             /* Try mob hit first — if within attack range, damage it
              * instead of breaking the block behind. */
             int mob_i = craft_mobs_pick(&p->cam, CRAFT_PLAYER_ATTACK_RANGE);
@@ -838,7 +869,7 @@ break_handled: ;
             }
         }
 skip_attack: ;
-        if (in->b_pressed) {
+        if (place_pressed) {
             CraftRayHit h = craft_render_pick(&p->cam);
             /* Doors/trapdoors/ladders are non-opaque in the raycaster
              * (so the sprite post-pass owns their pixels) which means

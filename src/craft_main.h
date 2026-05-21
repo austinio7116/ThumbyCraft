@@ -79,16 +79,28 @@ const char *craft_main_autosave_label(void);
  * from the pause menu's Controls page; persisted in the save record
  * (high nibble of HDR_OFF_PAD). Schemes are 1..4 — see
  * craft_player.c for the per-scheme input mapping. */
-#define CRAFT_SCHEME_CLASSIC      1   /* LB walk, RB jump, D-pad look */
-#define CRAFT_SCHEME_CLASSIC_FLIP 2   /* LB jump, RB walk, D-pad look */
-#define CRAFT_SCHEME_DPAD_STRAFE  3   /* D-pad fwd/back/strafe, LB look mod, RB jump */
-#define CRAFT_SCHEME_DPAD_TURN    4   /* D-pad fwd/back/turn, LB look mod, RB jump */
-#define CRAFT_SCHEME_MIN          1
-#define CRAFT_SCHEME_MAX          4
+#define CRAFT_SCHEME_CLASSIC        1   /* LB walk, RB jump, D-pad look */
+#define CRAFT_SCHEME_CLASSIC_FLIP   2   /* LB jump, RB walk, D-pad look */
+#define CRAFT_SCHEME_DPAD_STRAFE    3   /* D-pad fwd/back/strafe, LB look mod, RB jump */
+#define CRAFT_SCHEME_DPAD_TURN      4   /* D-pad fwd/back/turn, LB look mod, RB jump */
+/* Console-style mappings: action buttons live on A/B/LB/RB, D-pad
+ * is movement, and B-hold puts the D-pad into look mode (same
+ * pattern as DPAD_STRAFE/TURN's LB-hold). */
+#define CRAFT_SCHEME_CONSOLE_TURN   5   /* D-pad fwd/back/turn, B-hold look mod, A jump, LB place, RB break */
+#define CRAFT_SCHEME_CONSOLE_STRAFE 6   /* D-pad fwd/back/strafe, B-hold look mod, A jump, LB place, RB break */
+#define CRAFT_SCHEME_MIN            1
+#define CRAFT_SCHEME_MAX            6
 
 void        craft_main_set_scheme(int scheme);
 int         craft_main_scheme(void);
 const char *craft_main_scheme_label(int scheme);    /* short label per scheme */
+
+/* Master output volume — bridged to the cross-slot shared settings
+ * mirror on device. The setter persists to the shared store under
+ * THUMBYONE_SLOT_MODE so a lobby change shows up next launch and a
+ * change here shows up in the lobby + other slots. Range 0.0..1.0. */
+void        craft_main_set_master_volume(float vol);
+float       craft_main_get_master_volume(void);
 
 
 /* Accessor for the player (HUD draw + save). */
@@ -113,6 +125,11 @@ bool craft_main_take_load_request(void);
 /* Returns true once if the user asked for a new world (random seed).
  * Auto-clears. The engine itself runs the regen. */
 bool craft_main_take_new_world_request(void);
+
+/* Returns true once if the user asked to quit back to the ThumbyOne
+ * lobby. Slot-mode only; the standalone host build never sets the
+ * flag because the "Quit to lobby" menu item is compiled out there. */
+bool craft_main_take_quit_to_lobby_request(void);
 
 /* Current world time in seconds (wraps at DAY_LENGTH). For HUD use. */
 float craft_main_world_time(void);

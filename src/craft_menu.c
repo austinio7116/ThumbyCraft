@@ -39,11 +39,16 @@ static const MenuItem ITEMS[] = {
     { "Invert Y",      CRAFT_MENU_RESULT_INVERT_Y,   false },
     { "Music",         CRAFT_MENU_RESULT_MUSIC,      false },
     { "Music vol",     CRAFT_MENU_RESULT_MUSIC_VOL,  false },
-    { "SFX vol",       CRAFT_MENU_RESULT_SFX_VOL,    false },
+    { "Volume",        CRAFT_MENU_RESULT_VOLUME,     false },
     { "New world",     CRAFT_MENU_RESULT_NEW_WORLD,  true  },
     { "Auto save",     CRAFT_MENU_RESULT_AUTOSAVE,   false },
     { "Far LOD",       CRAFT_MENU_RESULT_FAR_LOD,    false },
     { "Interlace",     CRAFT_MENU_RESULT_INTERLACE,  false },
+#ifdef THUMBYONE_SLOT_MODE
+    /* Reboot into ThumbyOne lobby. Only present in slot builds —
+     * standalone ThumbyCraft has no lobby to return to. */
+    { "Quit to lobby", CRAFT_MENU_RESULT_QUIT_TO_LOBBY, true  },
+#endif
 };
 #define ITEM_COUNT ((int)(sizeof(ITEMS) / sizeof(ITEMS[0])))
 
@@ -230,7 +235,7 @@ static CraftMenuResult tick_main_page(const CraftInput *in, const CraftPlayer *p
      * have to thread direction info to the caller. */
     const MenuItem *cur = &ITEMS[s_sel];
     bool is_slider = (cur->result == CRAFT_MENU_RESULT_MUSIC_VOL) ||
-                     (cur->result == CRAFT_MENU_RESULT_SFX_VOL);
+                     (cur->result == CRAFT_MENU_RESULT_VOLUME);
     bool nav_now    = in->up || in->down;
     bool adjust_now = is_slider && (in->left || in->right);
     bool dpad_now   = nav_now || adjust_now;
@@ -256,11 +261,11 @@ static CraftMenuResult tick_main_page(const CraftInput *in, const CraftPlayer *p
             if (v < 0.0f) v = 0.0f;
             if (v > 1.0f) v = 1.0f;
             craft_audio_music_set_volume(v);
-        } else { /* SFX_VOL */
-            float v = craft_audio_sfx_get_volume() + 0.10f * slider_step;
+        } else { /* VOLUME — master, shared with lobby/other slots */
+            float v = craft_main_get_master_volume() + 0.05f * slider_step;
             if (v < 0.0f) v = 0.0f;
             if (v > 1.0f) v = 1.0f;
-            craft_audio_sfx_set_volume(v);
+            craft_main_set_master_volume(v);
         }
     }
     s_dpad_was_pressed = dpad_now;
@@ -865,6 +870,24 @@ static const SchemeCard SCHEME_CARDS[] = {
             "RB tap: jump",
         },
     },
+    {
+        CRAFT_SCHEME_CONSOLE_TURN, "Console + turn",
+        {
+            "D-pad: walk + turn",
+            "B hold: look mode",
+            "A jump  LB place",
+            "RB break/attack",
+        },
+    },
+    {
+        CRAFT_SCHEME_CONSOLE_STRAFE, "Console + strafe",
+        {
+            "D-pad: walk + strafe",
+            "B hold: look mode",
+            "A jump  LB place",
+            "RB break/attack",
+        },
+    },
 };
 #define SCHEME_CARD_COUNT ((int)(sizeof(SCHEME_CARDS)/sizeof(SCHEME_CARDS[0])))
 
@@ -1358,10 +1381,10 @@ static void draw_main_page(uint16_t *fb, const CraftPlayer *p) {
                             on ? rgb565(120, 220, 255)
                                : rgb565(120, 120, 130));
         } else if (ITEMS[i].result == CRAFT_MENU_RESULT_MUSIC_VOL ||
-                   ITEMS[i].result == CRAFT_MENU_RESULT_SFX_VOL) {
+                   ITEMS[i].result == CRAFT_MENU_RESULT_VOLUME) {
             float v = (ITEMS[i].result == CRAFT_MENU_RESULT_MUSIC_VOL)
                           ? craft_audio_music_get_volume()
-                          : craft_audio_sfx_get_volume();
+                          : craft_main_get_master_volume();
             int pct = (int)(v * 100.0f + 0.5f);
             char buf[8];
             int n = 0;

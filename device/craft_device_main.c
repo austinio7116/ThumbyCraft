@@ -29,10 +29,14 @@
 #include "slot_layout.h"
 #include "craft_chunk_store.h"
 #include "craft_main.h"
+#include "craft_render.h"
 
 #ifdef THUMBYONE_SLOT_MODE
 #include "ff.h"
 #include "thumbyone_fs.h"
+#ifdef THUMBYONE_SLOT_MODE
+#include "thumbyone_handoff.h"
+#endif
 static FATFS   g_fs;
 static uint8_t g_fs_work[FF_MAX_SS] __attribute__((aligned(4)));
 #endif
@@ -159,6 +163,14 @@ static void drain_requests(void) {
         }
     }
     (void)craft_main_take_new_world_request();   /* engine handles it */
+#ifdef THUMBYONE_SLOT_MODE
+    if (craft_main_take_quit_to_lobby_request()) {
+        /* Wait for any in-flight LCD DMA before tearing down, then
+         * hand off to the lobby. Does not return. */
+        craft_lcd_wait_idle();
+        thumbyone_handoff_request_lobby();
+    }
+#endif
 }
 
 /* Platform-random hook used by craft_main's next_seed(). On RP2350
@@ -328,14 +340,32 @@ int main(void) {
         craft_main_draw_hud(fps_value);
 
 #ifdef THUMBYONE_SLOT_MODE
-        /* Front LED: mirror the player's depth — surface=cyan,
-         * underground=red. Cheap and atmospheric. */
-        const CraftPlayer *pp = craft_main_player();
-        int depth = (int)(28.0f - pp->cam.pos.y);
-        if (depth < 0) depth = 0; if (depth > 24) depth = 24;
-        int r = depth * 10, g = 80 - depth * 3, b = 200 - depth * 8;
-        if (g < 0) g = 0; if (b < 0) b = 0;
-        thumbyone_led_set_rgb((uint8_t)r, (uint8_t)g, (uint8_t)b);
+        /* Front LED: green at noon, blue at midnight, lerp through
+         * teal at horizon. Red pinned at 0. The green channel
+         * appears dark on this slot during the day even though the
+         * same thumbyone_led_set_rgb path lights green in DOOM —
+         * root cause still unknown (per-frame reclaim_pwm refresh
+         * didn't fix it). Until that's resolved the LED reads from
+         * blue at night to dark around noon, which is preferable
+         * to a wrong red glow during the day.
+         *
+         * Quantised to 32 steps so we only push PWM writes on
+         * meaningful gradient changes, not every frame. */
+        {
+            float sun_y = craft_render_sun_y();
+            if (sun_y >  1.0f) sun_y =  1.0f;
+            if (sun_y < -1.0f) sun_y = -1.0f;
+            int q = (int)((sun_y + 1.0f) * 16.0f);   /* 0..32 */
+            if (q < 0)  q = 0;
+            if (q > 32) q = 32;
+            static int s_last_q = -1;
+            if (q != s_last_q) {
+                s_last_q = q;
+                int g = (q * 255) / 32;          /* 0 (night) → 255 (day) */
+                int b = ((32 - q) * 255) / 32;   /* 255 (night) → 0 (day) */
+                thumbyone_led_set_rgb(0, (uint8_t)g, (uint8_t)b);
+            }
+        }
 #endif
 
         craft_lcd_present(g_fb);
