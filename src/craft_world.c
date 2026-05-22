@@ -156,6 +156,30 @@ static void persist_chunk(int cx, int cz) {
     craft_chunk_store_save(cx, cz, buf, n);
 }
 
+/* Translate any legacy-format cell byte stored before save v8 into
+ * the current encoding. The cell byte IS the BlockId now — no
+ * upper-bit packing — so the only translation we can safely apply
+ * without misinterpreting a new-format byte is for old WATER cells
+ * that had a non-zero level in bits 6-7.
+ *
+ *   0x87 → WATER_L2   (was id=7, level=2)
+ *   0xC7 → WATER_L3   (was id=7, level=3)
+ *
+ * Old WATER level 0 was stored as 0x07 — same byte as new
+ * BLK_WATER_L0, passes through unchanged. Old WATER level 1 was
+ * stored as 0x47, which IS the new BLK_OBSERVER_ON byte — that
+ * ambiguity resolves in favour of the new BlockId because new
+ * saves are far more common than legacy v7 water-edge cells.
+ *
+ * Any other byte passes through unchanged. This includes the new
+ * water levels (64..70), the new redstone _ON variants (71..75),
+ * and any future BlockIds. */
+static uint8_t migrate_legacy_byte(uint8_t b) {
+    if (b == 0x87) return (uint8_t)BLK_WATER_L2;
+    if (b == 0xC7) return (uint8_t)BLK_WATER_L3;
+    return b;
+}
+
 static void restore_chunk(int cx, int cz) {
     /* If the chunk is still in the dirty queue, its newest mods are
      * already in the SRAM mod hash — flash has an older copy that
@@ -169,7 +193,8 @@ static void restore_chunk(int cx, int cz) {
     for (int i = 0; i < n; i++) {
         int wx = cx * CHUNK_STORE_CHUNK_SIZE + buf[i].lx;
         int wz = cz * CHUNK_STORE_CHUNK_SIZE + buf[i].lz;
-        mod_set(wx, buf[i].y, wz, (BlockId)buf[i].blk);
+        uint8_t b = migrate_legacy_byte(buf[i].blk);
+        mod_set(wx, buf[i].y, wz, (BlockId)b);
     }
 }
 
@@ -316,7 +341,7 @@ static inline void light_set_max(int idx, uint8_t level) {
  * the floor casts a "full cube" shadow that darkens cells behind
  * it as if the cell were solid. */
 static inline bool light_transparent(BlockId b) {
-    if (b == BLK_AIR   || b == BLK_WATER ||
+    if (b == BLK_AIR   || craft_is_water_id((uint8_t)b) ||
         b == BLK_GLASS || b == BLK_TORCH) return true;
     if (b == BLK_LADDER        || b == BLK_PRESSURE_PAD) return true;
     if (b == BLK_REDSTONE_WIRE || b == BLK_REDSTONE_WIRE_ON) return true;
@@ -374,7 +399,7 @@ static void light_flood_from(int sx, int sy, int sz) {
             if ((unsigned)ny >= CRAFT_WORLD_Y) continue;
             if ((unsigned)nz >= CRAFT_WORLD_Z) continue;
             int n_idx = local_idx(nx, ny, nz);
-            BlockId b = (BlockId)(craft_world_blocks[n_idx] & 0x3F);
+            BlockId b = (BlockId)craft_world_blocks[n_idx];
             if (!light_transparent(b)) continue;
             if (light_get(n_idx) >= next_level) continue;  /* already as bright or brighter */
             light_set_max(n_idx, (uint8_t)next_level);
@@ -410,7 +435,7 @@ static inline bool blocks_sky(BlockId b) {
 static void compute_skyheight_column(int lx, int lz) {
     int sh = 0;
     for (int wy = CRAFT_WORLD_Y - 1; wy >= 0; wy--) {
-        BlockId b = (BlockId)(craft_world_blocks[local_idx(lx, wy, lz)] & 0x3F);
+        BlockId b = (BlockId)craft_world_blocks[local_idx(lx, wy, lz)];
         if (blocks_sky(b)) { sh = wy; break; }
     }
     craft_world_skyheight[lz * CRAFT_WORLD_X + lx] = (uint8_t)sh;
@@ -447,7 +472,7 @@ BlockId craft_world_get(int wx, int wy, int wz) {
      * are repurposed as the water-level field used by the water
      * flow simulation. The mask hides those bits from every
      * consumer of the public block-id API. */
-    return (BlockId)(craft_world_blocks[local_idx(lx, wy, lz)] & 0x3F);
+    return (BlockId)craft_world_blocks[local_idx(lx, wy, lz)];
 }
 
 uint8_t craft_world_get_byte(int wx, int wy, int wz) {
@@ -470,11 +495,33 @@ void craft_world_set_byte(int wx, int wy, int wz, uint8_t b) {
      * deliberately skip the player-edit chunk-store path. */
 }
 
+void craft_world_persist_byte(int wx, int wy, int wz, uint8_t b) {
+    /* No SRAM write — caller is expected to either already have the
+     * right value in SRAM (the "settled at MAX" pool case) or to be
+     * pairing this with a set/set_byte (the evaporation case). */
+    int prev = mod_get(wx, wy, wz);
+    if (prev == (int)b) return;        /* idempotent — skip the dirty-mark */
+    mod_set(wx, wy, wz, (BlockId)b);   /* full byte, upper bits preserved */
+}
+
 void craft_world_set(int wx, int wy, int wz, BlockId blk) {
     if ((unsigned)wy >= CRAFT_WORLD_Y) return;
     BlockId prev = craft_world_get(wx, wy, wz);
     craft_redstone_note_change(prev, blk);
-    mod_set(wx, wy, wz, blk);
+    /* Skip the mod-store write when the new value is any water level.
+     * The water tick handles persistence: settled pools (contained
+     * MAX-level cells) get written to mod store explicitly via
+     * craft_world_persist_byte, and orphaned flowing water evaporates
+     * back to AIR which DOES go through mod_set so any stale entry
+     * is purged. The intermediate transient flow stays in SRAM only.
+     *
+     * Without this gate, a player-placed water source — or natural
+     * water that flowed through a player's dug channel — would land
+     * in the chunk store as a "permanent player-edit" source and
+     * restart spreading on every reload. */
+    if (!craft_is_water_id((uint8_t)blk)) {
+        mod_set(wx, wy, wz, blk);
+    }
     int lx = wx - craft_world_origin_x;
     int lz = wz - craft_world_origin_z;
     if ((unsigned)lx < CRAFT_WORLD_X && (unsigned)lz < CRAFT_WORLD_Z) {

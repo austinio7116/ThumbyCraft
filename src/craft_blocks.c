@@ -39,11 +39,21 @@ static int slot_for(BlockId blk, Face face) {
 }
 
 const uint16_t *craft_block_texture(BlockId blk, Face face) {
-    int s = slot_for(blk, face);
+    /* Map state-variant IDs to the atlas slot of their base. All
+     * water levels share BLK_WATER_L0's animated 2-frame slot;
+     * redstone _ON variants currently share their _OFF texture
+     * (per-state visuals are a follow-up — the IDs are already in
+     * place, just the per-variant baking still TBD). */
+    BlockId tex_blk = blk;
+    if (craft_is_water_id((uint8_t)blk))    tex_blk = BLK_WATER_L0;
+    else if (blk == BLK_OBSERVER_ON)        tex_blk = BLK_OBSERVER;
+    else if (blk == BLK_NOTE_BLOCK_ON)      tex_blk = BLK_NOTE_BLOCK;
+    else if (blk == BLK_LAMP_ON)            tex_blk = BLK_LAMP;
+    else if (blk == BLK_NOT_GATE_ON)        tex_blk = BLK_NOT_GATE;
+    else if (blk == BLK_DELAY_ON)           tex_blk = BLK_DELAY;
+    int s = slot_for(tex_blk, face);
 #ifdef CRAFT_TEXTURES_BAKED
-    /* Animated water — return the current frame from the in-RAM
-     * frame pair. Bottom face (FACE_NY) keeps the baked copy. */
-    if (blk == BLK_WATER) {
+    if (tex_blk == BLK_WATER_L0) {
         int fr = craft_water_frame_idx & 1;
         if (face == FACE_PY) return &craft_water_frames[fr][0 * CRAFT_TEX_PIXELS];
         if (face != FACE_NY) return &craft_water_frames[fr][1 * CRAFT_TEX_PIXELS];
@@ -63,7 +73,7 @@ const char *craft_block_name(BlockId blk) {
         case BLK_SAND:          return "sand";
         case BLK_WOOD:          return "wood";
         case BLK_LEAVES:        return "leaves";
-        case BLK_WATER:         return "water";
+        case BLK_WATER_L0:      return "water";
         case BLK_COBBLE:        return "cobble";
         case BLK_PLANK:         return "plank";
         case BLK_GLASS:         return "glass";
@@ -115,6 +125,23 @@ const char *craft_block_name(BlockId blk) {
         case BLK_PISTON_ARM:    return "piston arm";
         case BLK_TNT:           return "TNT";
         case BLK_TNT_FUSED:     return "TNT!";
+        case BLK_OBSERVER:
+        case BLK_OBSERVER_ON:   return "observer";
+        case BLK_NOTE_BLOCK:
+        case BLK_NOTE_BLOCK_ON: return "note block";
+        case BLK_LAMP:
+        case BLK_LAMP_ON:       return "lamp";
+        case BLK_NOT_GATE:
+        case BLK_NOT_GATE_ON:   return "NOT gate";
+        case BLK_DELAY:
+        case BLK_DELAY_ON:      return "delay";
+        case BLK_WATER_L1:
+        case BLK_WATER_L2:
+        case BLK_WATER_L3:
+        case BLK_WATER_L4:
+        case BLK_WATER_L5:
+        case BLK_WATER_L6:
+        case BLK_WATER_L7:      return "water";
         default:                return "?";
     }
 }
@@ -1109,6 +1136,122 @@ void craft_blocks_build_textures(void) {
         memcpy(&craft_textures[(blk * 3 + 0) * CRAFT_TEX_PIXELS],
                side, sizeof(uint16_t) * CRAFT_TEX_PIXELS);
         memcpy(&craft_textures[(blk * 3 + 2) * CRAFT_TEX_PIXELS],
+               side, sizeof(uint16_t) * CRAFT_TEX_PIXELS);
+    }
+
+    /* OBSERVER — dark grey block, single bright "lens" eye on the
+     * side and a tiny back vent. Direction marker is the lens. */
+    {
+        uint16_t *side = &craft_textures[(BLK_OBSERVER * 3 + 1) * CRAFT_TEX_PIXELS];
+        speckle(side, 0x0B5, 75, 75, 80, 30);
+        /* Centred 4×4 cyan lens with brighter centre. */
+        uint16_t lens   = rgb565(140, 220, 220);
+        uint16_t pupil  = rgb565(40, 180, 220);
+        for (int y = 6; y < 10; y++) {
+            for (int x = 6; x < 10; x++) {
+                side[y * CRAFT_TEX_SIZE + x] = lens;
+            }
+        }
+        side[7 * CRAFT_TEX_SIZE + 7] = pupil;
+        side[7 * CRAFT_TEX_SIZE + 8] = pupil;
+        side[8 * CRAFT_TEX_SIZE + 7] = pupil;
+        side[8 * CRAFT_TEX_SIZE + 8] = pupil;
+        memcpy(&craft_textures[(BLK_OBSERVER * 3 + 0) * CRAFT_TEX_PIXELS],
+               side, sizeof(uint16_t) * CRAFT_TEX_PIXELS);
+        memcpy(&craft_textures[(BLK_OBSERVER * 3 + 2) * CRAFT_TEX_PIXELS],
+               side, sizeof(uint16_t) * CRAFT_TEX_PIXELS);
+    }
+
+    /* NOTE BLOCK — plank-coloured cube with a black eighth-note glyph
+     * for unmistakable identification. */
+    {
+        uint16_t *side = &craft_textures[(BLK_NOTE_BLOCK * 3 + 1) * CRAFT_TEX_PIXELS];
+        plank_pattern(side, 0xF00D);
+        uint16_t glyph = rgb565(20, 20, 25);
+        /* Stem */
+        for (int y = 4; y < 12; y++) side[y * CRAFT_TEX_SIZE + 9] = glyph;
+        /* Filled note head */
+        for (int y = 11; y < 14; y++) {
+            for (int x = 6; x < 10; x++) {
+                side[y * CRAFT_TEX_SIZE + x] = glyph;
+            }
+        }
+        /* Flag */
+        side[4 * CRAFT_TEX_SIZE + 9]  = glyph;
+        side[4 * CRAFT_TEX_SIZE + 10] = glyph;
+        side[5 * CRAFT_TEX_SIZE + 11] = glyph;
+        side[6 * CRAFT_TEX_SIZE + 11] = glyph;
+        memcpy(&craft_textures[(BLK_NOTE_BLOCK * 3 + 0) * CRAFT_TEX_PIXELS],
+               side, sizeof(uint16_t) * CRAFT_TEX_PIXELS);
+        memcpy(&craft_textures[(BLK_NOTE_BLOCK * 3 + 2) * CRAFT_TEX_PIXELS],
+               side, sizeof(uint16_t) * CRAFT_TEX_PIXELS);
+    }
+
+    /* LAMP — warm-glass cube, soft cross pattern. The lit variant is
+     * produced live by the renderer's brightness path so we only
+     * bake the off colour here. */
+    {
+        uint16_t *side = &craft_textures[(BLK_LAMP * 3 + 1) * CRAFT_TEX_PIXELS];
+        speckle(side, 0x1A3D, 130, 100, 60, 25);
+        uint16_t accent = rgb565(180, 140, 80);
+        for (int x = 1; x < 15; x++) {
+            side[3 * CRAFT_TEX_SIZE + x]  = accent;
+            side[12 * CRAFT_TEX_SIZE + x] = accent;
+        }
+        for (int y = 1; y < 15; y++) {
+            side[y * CRAFT_TEX_SIZE + 3]  = accent;
+            side[y * CRAFT_TEX_SIZE + 12] = accent;
+        }
+        memcpy(&craft_textures[(BLK_LAMP * 3 + 0) * CRAFT_TEX_PIXELS],
+               side, sizeof(uint16_t) * CRAFT_TEX_PIXELS);
+        memcpy(&craft_textures[(BLK_LAMP * 3 + 2) * CRAFT_TEX_PIXELS],
+               side, sizeof(uint16_t) * CRAFT_TEX_PIXELS);
+    }
+
+    /* NOT GATE — stone-coloured with a centred white "¬" glyph and a
+     * direction arrow ridge. Output state is rendered as-is for now;
+     * sweeping a state-aware texture variant in is a follow-up. */
+    {
+        uint16_t *side = &craft_textures[(BLK_NOT_GATE * 3 + 1) * CRAFT_TEX_PIXELS];
+        speckle(side, 0x1701, 120, 120, 130, 30);
+        uint16_t glyph = rgb565(240, 240, 240);
+        /* Horizontal bar */
+        for (int x = 4; x < 12; x++) side[7 * CRAFT_TEX_SIZE + x] = glyph;
+        /* Right-side drop tick (the "¬" hook). */
+        side[8  * CRAFT_TEX_SIZE + 11] = glyph;
+        side[9  * CRAFT_TEX_SIZE + 11] = glyph;
+        /* Direction arrow on the bottom edge. */
+        uint16_t arrow = rgb565(80, 200, 80);
+        side[13 * CRAFT_TEX_SIZE + 6]  = arrow;
+        side[13 * CRAFT_TEX_SIZE + 9]  = arrow;
+        side[14 * CRAFT_TEX_SIZE + 7]  = arrow;
+        side[14 * CRAFT_TEX_SIZE + 8]  = arrow;
+        memcpy(&craft_textures[(BLK_NOT_GATE * 3 + 0) * CRAFT_TEX_PIXELS],
+               side, sizeof(uint16_t) * CRAFT_TEX_PIXELS);
+        memcpy(&craft_textures[(BLK_NOT_GATE * 3 + 2) * CRAFT_TEX_PIXELS],
+               side, sizeof(uint16_t) * CRAFT_TEX_PIXELS);
+    }
+
+    /* DELAY — stone slab with a row of pip indicators showing the
+     * current 1..4 tick setting. We bake the "1" variant; live re-
+     * skin per cell uses the orient-hash byte to count pips. */
+    {
+        uint16_t *side = &craft_textures[(BLK_DELAY * 3 + 1) * CRAFT_TEX_PIXELS];
+        speckle(side, 0xDE1A, 140, 140, 145, 25);
+        uint16_t pip = rgb565(220, 80, 60);
+        /* Single lit pip at the centre (setting = 1). */
+        for (int dy = -1; dy <= 1; dy++)
+            for (int dx = -1; dx <= 1; dx++)
+                side[(8 + dy) * CRAFT_TEX_SIZE + (8 + dx)] = pip;
+        /* Direction arrow on the bottom edge. */
+        uint16_t arrow = rgb565(80, 200, 80);
+        side[13 * CRAFT_TEX_SIZE + 6]  = arrow;
+        side[13 * CRAFT_TEX_SIZE + 9]  = arrow;
+        side[14 * CRAFT_TEX_SIZE + 7]  = arrow;
+        side[14 * CRAFT_TEX_SIZE + 8]  = arrow;
+        memcpy(&craft_textures[(BLK_DELAY * 3 + 0) * CRAFT_TEX_PIXELS],
+               side, sizeof(uint16_t) * CRAFT_TEX_PIXELS);
+        memcpy(&craft_textures[(BLK_DELAY * 3 + 2) * CRAFT_TEX_PIXELS],
                side, sizeof(uint16_t) * CRAFT_TEX_PIXELS);
     }
 }

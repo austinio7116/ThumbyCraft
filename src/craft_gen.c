@@ -1186,7 +1186,8 @@ Vec3 craft_gen_spawn(void) {
                 BlockId head1 = craft_world_get(x, gy + 1, z);
                 BlockId head2 = craft_world_get(x, gy + 2, z);
                 if (craft_block_solid(head1) || craft_block_solid(head2)) continue;
-                if (head1 == BLK_WATER || head2 == BLK_WATER) continue;
+                if (craft_is_water_id((uint8_t)head1) ||
+                    craft_is_water_id((uint8_t)head2)) continue;
                 /* Belt-and-braces: require the ground tile itself to
                  * sit at or above the water surface — even a "dry"
                  * SAND column at gy=WATER_LEVEL has its top face

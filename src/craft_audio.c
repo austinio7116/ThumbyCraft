@@ -257,7 +257,10 @@ void craft_audio_break(BlockId blk) {
             trigger_sfx(1200.0f, W_NOISE, 0.60f,  50.0f);
             trigger_sfx( 900.0f, W_SQR,   0.50f, 200.0f);
             break;
-        case BLK_WATER:
+        case BLK_WATER_L0:
+        case BLK_WATER_L1: case BLK_WATER_L2: case BLK_WATER_L3:
+        case BLK_WATER_L4: case BLK_WATER_L5: case BLK_WATER_L6:
+        case BLK_WATER_L7:
             trigger_sfx(180.0f, W_NOISE, 0.30f, 200.0f);
             trigger_sfx( 80.0f, W_TRI,   0.25f, 220.0f);
             break;
@@ -300,6 +303,21 @@ void craft_audio_pickaxe_ting(void) {
 }
 void craft_audio_step(void) { trigger_sfx(140.0f, W_NOISE, 0.20f, 90.0f); }
 void craft_audio_jump(void) { trigger_sfx(380.0f, W_TRI, 0.35f, 140.0f); }
+
+/* Note-block tone — pitch_idx is a semitone offset on a 24-note range
+ * (F#3..F#5). Triangle wave for a clean musical feel, short decay. */
+void craft_audio_note(int pitch_idx) {
+    if (pitch_idx < 0)  pitch_idx = 0;
+    if (pitch_idx > 23) pitch_idx = 23;
+    /* F#3 = 185 Hz; each semitone multiplies by 2^(1/12) ≈ 1.05946. */
+    static const float kSemitone[24] = {
+        185.00f, 196.00f, 207.65f, 220.00f, 233.08f, 246.94f,
+        261.63f, 277.18f, 293.66f, 311.13f, 329.63f, 349.23f,
+        369.99f, 392.00f, 415.30f, 440.00f, 466.16f, 493.88f,
+        523.25f, 554.37f, 587.33f, 622.25f, 659.26f, 698.46f,
+    };
+    trigger_sfx(kSemitone[pitch_idx], W_TRI, 0.35f, 350.0f);
+}
 
 /* TNT fuse ignition — short rising hiss + brief tone. */
 void craft_audio_fuse(void) {

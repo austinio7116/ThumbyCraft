@@ -129,6 +129,15 @@ void    craft_world_set(int wx, int wy, int wz, BlockId blk);
 uint8_t craft_world_get_byte(int wx, int wy, int wz);
 void    craft_world_set_byte(int wx, int wy, int wz, uint8_t b);
 
+/* Persist a raw byte (BlockId + upper-bit state) into the chunk
+ * store WITHOUT touching SRAM. Used by the water tick when a flow
+ * cell reaches a terminal state — evaporation or a settled pool
+ * surface — so the result survives a window reload instead of
+ * being recomputed from the player's original placement edit. The
+ * full byte (including the 2 high bits) is what gets stored, so
+ * water level info round-trips correctly. */
+void    craft_world_persist_byte(int wx, int wy, int wz, uint8_t b);
+
 /* Mod-aware block lookup — used by the window shift path. Returns
  * the override block if (wx, wy, wz) is in the mod table, otherwise
  * the procedural value from craft_gen_block_at(seed). */

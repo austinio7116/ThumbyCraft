@@ -805,6 +805,21 @@ void craft_player_tick(CraftPlayer *p, const CraftInput *in, float dt) {
                     craft_furnace_remove(h.bx, h.by, h.bz);
                 }
                 if (was == BLK_CHEST) {
+                    /* Transfer chest contents to the player's
+                     * inventory before freeing the state record —
+                     * losing the loot on a stray break feels worse
+                     * than vanilla on a tiny screen where chest
+                     * UIs are fiddly to open precisely. */
+                    CraftChest *c = craft_chest_find(h.bx, h.by, h.bz);
+                    if (c) {
+                        for (int i = 0; i < CRAFT_CHEST_SLOTS; i++) {
+                            BlockId b = (BlockId)c->slots[i].blk;
+                            int n = (int)c->slots[i].n;
+                            if (b != BLK_AIR && n > 0) {
+                                p->inventory[b] += n;
+                            }
+                        }
+                    }
                     craft_chest_remove(h.bx, h.by, h.bz);
                 }
                 p->broke_block = true;
@@ -989,7 +1004,7 @@ skip_attack: ;
                     else if (craft_block_solid(craft_world_get(px, py, pz - 1))) wall_face = FACE_PZ;
                     BlockId here = craft_world_get(px, py, pz);
                     if (affordable_l && wall_face >= 0 &&
-                        (here == BLK_AIR || here == BLK_WATER)) {
+                        (here == BLK_AIR || craft_is_water_id((uint8_t)here))) {
                         craft_world_set(px, py, pz, BLK_LADDER);
                         craft_torches_record_orient(px, py, pz, wall_face);
                         craft_torches_rebuild();
@@ -1009,7 +1024,7 @@ skip_attack: ;
                 bool affordable = (p->mode == CRAFT_MODE_CREATIVE) ||
                                   (blk != BLK_AIR && p->inventory[blk] > 0);
                 BlockId cur = craft_world_get(h.fx, h.fy, h.fz);
-                if (affordable && (cur == BLK_AIR || cur == BLK_WATER)) {
+                if (affordable && (cur == BLK_AIR || craft_is_water_id((uint8_t)cur))) {
                     BlockId stash = cur;
                     /* Place-time conversion: BLK_REDSTONE is an
                      * inventory item; in the world it manifests as
@@ -1055,10 +1070,20 @@ skip_attack: ;
                             place_blk == BLK_DOOR_OFF ||
                             place_blk == BLK_TRAPDOOR_OFF ||
                             place_blk == BLK_PISTON_OFF ||
-                            place_blk == BLK_LEVER_OFF) {
+                            place_blk == BLK_LEVER_OFF ||
+                            place_blk == BLK_NOT_GATE ||
+                            place_blk == BLK_DELAY ||
+                            place_blk == BLK_OBSERVER) {
                             int orient_face = h.face;
                             if (place_blk == BLK_DOOR_OFF ||
-                                place_blk == BLK_TRAPDOOR_OFF) {
+                                place_blk == BLK_TRAPDOOR_OFF ||
+                                place_blk == BLK_NOT_GATE ||
+                                place_blk == BLK_DELAY ||
+                                place_blk == BLK_OBSERVER) {
+                                /* Snap player yaw to a cardinal so the
+                                 * gate / observer "faces" away from the
+                                 * player when placed. Same trick as
+                                 * doors. */
                                 float yaw = p->cam.yaw;
                                 /* Normalise to (-π, π]. */
                                 while (yaw >  3.14159265f) yaw -= 6.2831853f;
@@ -1086,7 +1111,7 @@ skip_attack: ;
                          * top half if the cell above is free. */
                         if (place_blk == BLK_DOOR_OFF) {
                             BlockId above = craft_world_get(h.fx, h.fy + 1, h.fz);
-                            if (above == BLK_AIR || above == BLK_WATER) {
+                            if (above == BLK_AIR || craft_is_water_id((uint8_t)above)) {
                                 craft_world_set(h.fx, h.fy + 1, h.fz, BLK_DOOR_OFF);
                             }
                         }

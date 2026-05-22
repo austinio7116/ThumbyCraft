@@ -11,9 +11,11 @@
  * Each slot holds (block_id, count) packed into 2 bytes. Maximum
  * stack per slot is 64 — same convention as the furnace input/output.
  *
- * Lost-state policy: when a chest is broken, its state record is
- * freed and contents vanish. Same as vanilla "chest punched without
- * emptying first".
+ * Break policy: when a chest is broken, the player's attack
+ * handler walks the slots and transfers contents to the player
+ * inventory before calling craft_chest_remove — losing the loot
+ * on a stray punch felt worse than vanilla on this device where
+ * the chest UI is small and easy to mis-aim.
  */
 #ifndef CRAFT_CHESTS_H
 #define CRAFT_CHESTS_H

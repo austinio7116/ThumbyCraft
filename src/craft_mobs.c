@@ -423,7 +423,7 @@ void craft_mobs_spawn_around(Vec3 centre, uint32_t seed) {
          * shoreline sand tile with water above puts their head in
          * water on tick 1. Require dry land + dry head-space. */
         if (y < CRAFT_WATER_LEVEL + 1) continue;
-        if (craft_world_get(x, y + 1, z) == BLK_WATER) continue;
+        if (craft_is_water_id((uint8_t)craft_world_get(x, y + 1, z))) continue;
         CraftMob *m = &craft_mobs[placed];
         m->alive    = true;
         m->type     = (MobType)(xs() % MOB_SLIME);
@@ -838,7 +838,7 @@ static void creeper_ai(CraftMob *m, CraftPlayer *p, float dt) {
                         int wx = cx + dxi, wy = cy + dy, wz = cz + dz;
                         if (wy <= 0) continue;   /* spare bedrock */
                         BlockId b = craft_world_get(wx, wy, wz);
-                        if (b == BLK_AIR || b == BLK_WATER) continue;
+                        if (b == BLK_AIR || craft_is_water_id((uint8_t)b)) continue;
                         craft_world_set(wx, wy, wz, BLK_AIR);
                     }
                 }

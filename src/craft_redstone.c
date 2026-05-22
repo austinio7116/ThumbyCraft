@@ -59,8 +59,14 @@ void craft_redstone_init(void) {
 void craft_redstone_rescan(void) {
     int n = 0;
     for (int i = 0; i < CRAFT_WORLD_VOXELS; i++) {
-        BlockId b = (BlockId)(craft_world_blocks[i] & 0x3F);
-        if (b == BLK_LEVER_ON || b == BLK_REDSTONE_WIRE_ON) n++;
+        BlockId b = (BlockId)craft_world_blocks[i];
+        if (b == BLK_LEVER_ON || b == BLK_REDSTONE_WIRE_ON ||
+            b == BLK_REDSTONE_BLOCK ||
+            b == BLK_NOT_GATE || b == BLK_NOT_GATE_ON ||
+            b == BLK_DELAY    || b == BLK_DELAY_ON    ||
+            b == BLK_LAMP     || b == BLK_LAMP_ON     ||
+            b == BLK_NOTE_BLOCK || b == BLK_NOTE_BLOCK_ON ||
+            b == BLK_OBSERVER || b == BLK_OBSERVER_ON) n++;
     }
     s_active = n;
 }
@@ -69,11 +75,23 @@ void craft_redstone_note_change(BlockId prev, BlockId blk) {
     int delta = 0;
     /* Sources count toward s_active so the tick can early-exit when
      * the window has no powered cells. Solid redstone blocks act as
-     * permanent ON sources (vanilla rule). */
+     * permanent ON sources (vanilla rule). The new gates and sinks
+     * (NOT/DELAY/OBSERVER/LAMP/NOTE_BLOCK) also count — gates emit
+     * synthetic power, sinks need their bit refreshed each tick. */
     if (prev == BLK_LEVER_ON || prev == BLK_REDSTONE_WIRE_ON ||
-        prev == BLK_REDSTONE_BLOCK) delta--;
+        prev == BLK_REDSTONE_BLOCK ||
+        prev == BLK_NOT_GATE || prev == BLK_NOT_GATE_ON ||
+        prev == BLK_DELAY    || prev == BLK_DELAY_ON    ||
+        prev == BLK_LAMP     || prev == BLK_LAMP_ON     ||
+        prev == BLK_NOTE_BLOCK || prev == BLK_NOTE_BLOCK_ON ||
+        prev == BLK_OBSERVER || prev == BLK_OBSERVER_ON) delta--;
     if (blk  == BLK_LEVER_ON || blk  == BLK_REDSTONE_WIRE_ON ||
-        blk  == BLK_REDSTONE_BLOCK) delta++;
+        blk  == BLK_REDSTONE_BLOCK ||
+        blk  == BLK_NOT_GATE || blk  == BLK_NOT_GATE_ON ||
+        blk  == BLK_DELAY    || blk  == BLK_DELAY_ON    ||
+        blk  == BLK_LAMP     || blk  == BLK_LAMP_ON     ||
+        blk  == BLK_NOTE_BLOCK || blk  == BLK_NOTE_BLOCK_ON ||
+        blk  == BLK_OBSERVER || blk  == BLK_OBSERVER_ON) delta++;
     s_active += delta;
     if (s_active < 0) s_active = 0;   /* clamp against drift */
 }
@@ -204,6 +222,47 @@ void craft_redstone_tick(float dt) {
     int frontier_n = 0;
     bool state_changed = false;
 
+    /* Phase 0.5 — gate seeding. NOT_GATE / DELAY blocks contribute
+     * synthetic "source" emissions into the BFS frontier based on
+     * the gate's current cell-ID state. NOT_GATE_ON / DELAY_ON emit;
+     * their OFF variants don't. The state transition (input→next
+     * tick's output) happens in the post-BFS pass below — that gives
+     * gates the one-tick lag that's wired into vanilla redstone. */
+    for (int wy = 0; wy < CRAFT_WORLD_Y; wy++) {
+        for (int lz = 0; lz < CRAFT_WORLD_Z; lz++) {
+            for (int lx = 0; lx < CRAFT_WORLD_X; lx++) {
+                int idx = (wy * CRAFT_WORLD_Z + lz) * CRAFT_WORLD_X + lx;
+                BlockId b = (BlockId)craft_world_blocks[idx];
+                if (b != BLK_NOT_GATE_ON && b != BLK_DELAY_ON) continue;
+
+                int face = craft_torches_lookup_orient(lx + ox, wy, lz + oz);
+                int odx = 0, ody = 0, odz = 0;
+                switch (face) {
+                    case FACE_PX: odx =  1; break;
+                    case FACE_NX: odx = -1; break;
+                    case FACE_PY: ody =  1; break;
+                    case FACE_NY: ody = -1; break;
+                    case FACE_PZ: odz =  1; break;
+                    default:      odz = -1; break;
+                }
+                int olx = lx + odx, owy = wy + ody, olz = lz + odz;
+                if ((unsigned)olx >= CRAFT_WORLD_X ||
+                    (unsigned)olz >= CRAFT_WORLD_Z ||
+                    (unsigned)owy >= CRAFT_WORLD_Y) continue;
+                int oidx = (owy * CRAFT_WORLD_Z + olz) * CRAFT_WORLD_X + olx;
+                BlockId ob = (BlockId)craft_world_blocks[oidx];
+                if (ob == BLK_REDSTONE_WIRE || ob == BLK_REDSTONE_WIRE_ON) {
+                    uint32_t k = key_of(olx, owy, olz);
+                    if (visited_add(k) && frontier_n < BFS_MAX) {
+                        s_frontier[frontier_n++] = (RsCell){
+                            (uint8_t)olx, (uint8_t)owy, (uint8_t)olz
+                        };
+                    }
+                }
+            }
+        }
+    }
+
     for (int wy = 0; wy < CRAFT_WORLD_Y; wy++) {
         for (int lz = 0; lz < CRAFT_WORLD_Z; lz++) {
             for (int lx = 0; lx < CRAFT_WORLD_X; lx++) {
@@ -212,7 +271,7 @@ void craft_redstone_tick(float dt) {
                  * ~14 ms of CPU per tick at 280 MHz, which would land
                  * as a periodic frame-stutter at 5 Hz. */
                 int idx = (wy * CRAFT_WORLD_Z + lz) * CRAFT_WORLD_X + lx;
-                BlockId b = (BlockId)(craft_world_blocks[idx] & 0x3F);
+                BlockId b = (BlockId)craft_world_blocks[idx];
                 /* Both LEVER_ON cells and solid REDSTONE_BLOCKs act
                  * as power sources — seed adjacent wires from each. */
                 if (b == BLK_LEVER_ON || b == BLK_REDSTONE_BLOCK) {
@@ -333,7 +392,7 @@ void craft_redstone_tick(float dt) {
         for (int lz = 0; lz < CRAFT_WORLD_Z; lz++) {
             for (int lx = 0; lx < CRAFT_WORLD_X; lx++) {
                 int idx = (wy * CRAFT_WORLD_Z + lz) * CRAFT_WORLD_X + lx;
-                BlockId b = (BlockId)(craft_world_blocks[idx] & 0x3F);
+                BlockId b = (BlockId)craft_world_blocks[idx];
                 bool is_driven =
                     b == BLK_TRAPDOOR_OFF || b == BLK_TRAPDOOR_ON ||
                     b == BLK_DOOR_OFF     || b == BLK_DOOR_ON     ||
@@ -358,7 +417,7 @@ void craft_redstone_tick(float dt) {
                     if ((unsigned)nlz >= CRAFT_WORLD_Z) continue;
                     if ((unsigned)nwy >= CRAFT_WORLD_Y) continue;
                     int nidx = (nwy * CRAFT_WORLD_Z + nlz) * CRAFT_WORLD_X + nlx;
-                    BlockId nb = (BlockId)(craft_world_blocks[nidx] & 0x3F);
+                    BlockId nb = (BlockId)craft_world_blocks[nidx];
                     if (nb == BLK_LEVER_OFF || nb == BLK_LEVER_ON ||
                         nb == BLK_REDSTONE_WIRE || nb == BLK_REDSTONE_WIRE_ON ||
                         nb == BLK_PRESSURE_PAD || nb == BLK_REDSTONE_BLOCK) {
@@ -482,6 +541,109 @@ void craft_redstone_tick(float dt) {
                             }
                         }
                         craft_world_set(wx, wy, wz, BLK_PISTON_OFF);
+                    }
+                }
+            }
+        }
+    }
+
+    /* Phase 4 — passive sinks (LAMP, NOTE_BLOCK). After BFS has
+     * resolved wire_on states, walk the window once more and update
+     * the cell's upper-bit "lit / was-powered" flag. Rising-edge on
+     * a NOTE_BLOCK fires a tone. */
+    {
+        static const int dx6[6] = { 1,-1, 0, 0, 0, 0 };
+        static const int dy6[6] = { 0, 0, 1,-1, 0, 0 };
+        static const int dz6[6] = { 0, 0, 0, 0, 1,-1 };
+        for (int wy = 0; wy < CRAFT_WORLD_Y; wy++) {
+            for (int lz = 0; lz < CRAFT_WORLD_Z; lz++) {
+                for (int lx = 0; lx < CRAFT_WORLD_X; lx++) {
+                    int idx = (wy * CRAFT_WORLD_Z + lz) * CRAFT_WORLD_X + lx;
+                    BlockId b = (BlockId)craft_world_blocks[idx];
+                    bool is_lamp = (b == BLK_LAMP || b == BLK_LAMP_ON);
+                    bool is_note = (b == BLK_NOTE_BLOCK || b == BLK_NOTE_BLOCK_ON);
+                    bool is_not  = (b == BLK_NOT_GATE  || b == BLK_NOT_GATE_ON);
+                    bool is_dly  = (b == BLK_DELAY     || b == BLK_DELAY_ON);
+                    if (!is_lamp && !is_note && !is_not && !is_dly) continue;
+
+                    /* Compute the cell's "input is powered" condition.
+                     * Gates (NOT/DELAY) only care about their input
+                     * face; sinks (LAMP/NOTE_BLOCK) accept power from
+                     * any 6-neighbour. */
+                    bool input_powered = false;
+                    if (is_not || is_dly) {
+                        int face = craft_torches_lookup_orient(lx + ox, wy, lz + oz);
+                        int odx = 0, ody = 0, odz = 0;
+                        switch (face) {
+                            case FACE_PX: odx =  1; break;
+                            case FACE_NX: odx = -1; break;
+                            case FACE_PY: ody =  1; break;
+                            case FACE_NY: ody = -1; break;
+                            case FACE_PZ: odz =  1; break;
+                            default:      odz = -1; break;
+                        }
+                        int ilx = lx - odx, iwy = wy - ody, ilz = lz - odz;
+                        if ((unsigned)ilx < CRAFT_WORLD_X &&
+                            (unsigned)ilz < CRAFT_WORLD_Z &&
+                            (unsigned)iwy < CRAFT_WORLD_Y) {
+                            int iidx = (iwy * CRAFT_WORLD_Z + ilz) * CRAFT_WORLD_X + ilx;
+                            BlockId ib = (BlockId)craft_world_blocks[iidx];
+                            if (ib == BLK_LEVER_ON || ib == BLK_REDSTONE_WIRE_ON ||
+                                ib == BLK_REDSTONE_BLOCK ||
+                                ib == BLK_NOT_GATE_ON || ib == BLK_DELAY_ON) {
+                                input_powered = true;
+                            }
+                        }
+                    } else {
+                        for (int d = 0; d < 6 && !input_powered; d++) {
+                            int nlx = lx + dx6[d];
+                            int nwy = wy + dy6[d];
+                            int nlz = lz + dz6[d];
+                            if ((unsigned)nlx >= CRAFT_WORLD_X) continue;
+                            if ((unsigned)nlz >= CRAFT_WORLD_Z) continue;
+                            if ((unsigned)nwy >= CRAFT_WORLD_Y) continue;
+                            int nidx = (nwy * CRAFT_WORLD_Z + nlz) * CRAFT_WORLD_X + nlx;
+                            BlockId nb = (BlockId)craft_world_blocks[nidx];
+                            if (nb == BLK_LEVER_ON || nb == BLK_REDSTONE_WIRE_ON ||
+                                nb == BLK_REDSTONE_BLOCK ||
+                                nb == BLK_NOT_GATE_ON || nb == BLK_DELAY_ON) {
+                                input_powered = true;
+                            }
+                        }
+                        if (!input_powered && s_pad_held) {
+                            int dwx = (lx + ox) - s_pad_wx;
+                            int dwy = wy - s_pad_wy;
+                            int dwz = (lz + oz) - s_pad_wz;
+                            if (dwx*dwx + dwy*dwy + dwz*dwz == 1) input_powered = true;
+                        }
+                    }
+
+                    /* Compute next-tick state and the cell ID we want
+                     * to land on. Each block type maps "input
+                     * powered" → next-tick output:
+                     *   NOT_GATE:    inverter → emit when input off
+                     *   DELAY:       buffer   → emit when input on
+                     *   LAMP:        sink     → lit when input on
+                     *   NOTE_BLOCK:  sink + rising-edge tone */
+                    BlockId next;
+                    if (is_not)       next = input_powered ? BLK_NOT_GATE     : BLK_NOT_GATE_ON;
+                    else if (is_dly)  next = input_powered ? BLK_DELAY_ON     : BLK_DELAY;
+                    else if (is_lamp) next = input_powered ? BLK_LAMP_ON      : BLK_LAMP;
+                    else              next = input_powered ? BLK_NOTE_BLOCK_ON : BLK_NOTE_BLOCK;
+
+                    if (is_note && next == BLK_NOTE_BLOCK_ON && b == BLK_NOTE_BLOCK) {
+                        /* Rising edge — play a tone. Pitch tuning per
+                         * block (B-cycle) is a follow-up; mid-range
+                         * default for now. */
+                        craft_audio_note(12);
+                    }
+                    if (next != b) {
+                        /* Persisting the state transition via
+                         * craft_world_set funnels through mod_set, so
+                         * the gate/sink state survives saves + window
+                         * reloads instead of resetting every restore. */
+                        craft_world_set(lx + ox, wy, lz + oz, next);
+                        state_changed = true;
                     }
                 }
             }

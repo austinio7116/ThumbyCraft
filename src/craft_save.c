@@ -146,22 +146,46 @@ bool craft_save_deserialise(const uint8_t *in, size_t n,
     if (n < SAVE_RECORD_MIN_BYTES)                         return false;
     if (get32(in + HDR_OFF_MAGIC) != CRAFT_SAVE_MAGIC)     return false;
     uint32_t version = get32(in + HDR_OFF_VERSION);
-    /* Dual-read: v5 has no orient blob, v6 appends a length-prefixed
-     * one. Compute the CRC offset based on the version we found. */
-    size_t crc_off;
-    size_t orient_bytes = 0;
+    /* Dual-read across v5..v7:
+     *   v5 — inventory_len = 59, no orient blob.
+     *   v6 — inventory_len = 59, orient blob present.
+     *   v7 — inventory_len = BLK_COUNT (64), orient blob present.
+     *
+     * Inventory length determines every downstream offset, so we have
+     * to compute them at runtime per version rather than at compile
+     * time with HDR_OFF_CHESTS etc. */
+    bool has_orient;
+    int  inv_len;
     if (version == CRAFT_SAVE_VERSION_V5) {
-        crc_off = HDR_OFF_CRC_V5;
+        inv_len = CRAFT_SAVE_INVENTORY_LEN_V6;   /* v5 used the same count */
+        has_orient = false;
+    } else if (version == CRAFT_SAVE_VERSION_V6) {
+        inv_len = CRAFT_SAVE_INVENTORY_LEN_V6;
+        has_orient = true;
+    } else if (version == CRAFT_SAVE_VERSION_V7) {
+        inv_len = CRAFT_SAVE_INVENTORY_LEN_V7;
+        has_orient = true;
     } else if (version == CRAFT_SAVE_VERSION) {
-        if (n < HDR_OFF_ORIENTS + 2 + 4) return false;
-        uint16_t orient_count = (uint16_t)in[HDR_OFF_ORIENTS] |
-                                ((uint16_t)in[HDR_OFF_ORIENTS + 1] << 8);
-        if (orient_count > 256) return false;
-        orient_bytes = 2 + (size_t)orient_count * CRAFT_ORIENTS_BLOB_PER_ENTRY;
-        crc_off = HDR_OFF_ORIENTS + orient_bytes;
-        if (n < crc_off + 4) return false;
+        inv_len = BLK_COUNT;
+        has_orient = true;
     } else {
         return false;
+    }
+    size_t off_chests   = HDR_OFF_INVENTORY + (size_t)inv_len * 4u;
+    size_t off_furnaces = off_chests + CRAFT_CHESTS_BLOB_BYTES;
+    size_t off_orients  = off_furnaces + CRAFT_FURNACES_BLOB_BYTES;
+    size_t crc_off;
+    size_t orient_bytes = 0;
+    if (!has_orient) {
+        crc_off = off_orients;
+    } else {
+        if (n < off_orients + 2 + 4) return false;
+        uint16_t orient_count = (uint16_t)in[off_orients] |
+                                ((uint16_t)in[off_orients + 1] << 8);
+        if (orient_count > 256) return false;
+        orient_bytes = 2 + (size_t)orient_count * CRAFT_ORIENTS_BLOB_PER_ENTRY;
+        crc_off = off_orients + orient_bytes;
+        if (n < crc_off + 4) return false;
     }
     uint32_t stored_crc = get32(in + crc_off);
     if (crc32(in, crc_off) != stored_crc)                  return false;
@@ -199,20 +223,24 @@ bool craft_save_deserialise(const uint8_t *in, size_t n,
     p->cam.pos.z = getf(in + HDR_OFF_CAM +  8);
     p->cam.yaw   = getf(in + HDR_OFF_CAM + 12);
     p->cam.pitch = getf(in + HDR_OFF_CAM + 16);
-    for (int i = 0; i < BLK_COUNT; i++) {
+    for (int i = 0; i < inv_len; i++) {
         p->inventory[i] = (int)get32(in + HDR_OFF_INVENTORY + i * 4);
+    }
+    /* Zero any BlockIds that didn't exist in the older save format. */
+    for (int i = inv_len; i < BLK_COUNT; i++) {
+        p->inventory[i] = 0;
     }
 
     /* Restore the chest + furnace tables (new in v5). Each fully
      * overwrites the SRAM table — any stale entries from the
      * previous world get cleared. */
-    craft_chests_deserialise(  in + HDR_OFF_CHESTS);
-    craft_furnaces_deserialise(in + HDR_OFF_FURNACES);
+    craft_chests_deserialise(  in + off_chests);
+    craft_furnaces_deserialise(in + off_furnaces);
     /* Orient table (new in v6). v5 saves get an empty table → blocks
      * come back with the default FACE_PY mount (existing v5 behaviour
      * — we don't have the data to do better). */
-    if (version == CRAFT_SAVE_VERSION) {
-        (void)craft_torches_orient_deserialise(in + HDR_OFF_ORIENTS,
+    if (has_orient) {
+        (void)craft_torches_orient_deserialise(in + off_orients,
                                                orient_bytes);
     } else {
         /* v5: wipe so a stale orient table from a previous load

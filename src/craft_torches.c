@@ -167,7 +167,7 @@ void craft_torches_rebuild(void) {
         for (int lx = 0; lx < CRAFT_WORLD_X; lx++) {
             for (int wy = 0; wy < CRAFT_WORLD_Y; wy++) {
                 int idx = (wy * CRAFT_WORLD_Z + lz) * CRAFT_WORLD_X + lx;
-                BlockId b = (BlockId)(craft_world_blocks[idx] & 0x3F);
+                BlockId b = (BlockId)craft_world_blocks[idx];
                 uint8_t kind;
                 if      (b == BLK_TORCH)             kind = TORCH_KIND_TORCH;
                 else if (b == BLK_REDSTONE_WIRE)     kind = TORCH_KIND_WIRE;
@@ -216,7 +216,7 @@ void craft_torches_rebuild(void) {
                         if ((unsigned)nlx >= CRAFT_WORLD_X) continue;
                         if ((unsigned)nlz >= CRAFT_WORLD_Z) continue;
                         int nidx = (wy * CRAFT_WORLD_Z + nlz) * CRAFT_WORLD_X + nlx;
-                        BlockId nb = (BlockId)(craft_world_blocks[nidx] & 0x3F);
+                        BlockId nb = (BlockId)craft_world_blocks[nidx];
                         if (nb == BLK_REDSTONE_WIRE || nb == BLK_REDSTONE_WIRE_ON ||
                             nb == BLK_LEVER_OFF || nb == BLK_LEVER_ON ||
                             nb == BLK_DOOR_OFF || nb == BLK_DOOR_ON ||

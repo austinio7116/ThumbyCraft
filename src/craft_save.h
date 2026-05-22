@@ -48,9 +48,30 @@
  * v6 — torch/lever/piston/door/trapdoor/ladder orient hash table is
  *      now serialised too (was lost on load → every mechanical block
  *      came back with the default FACE_PY mount). v5 saves still load
- *      via dual-read; they just come back without orient data. */
-#define CRAFT_SAVE_VERSION 6u
+ *      via dual-read; they just come back without orient data.
+ * v7 — five new redstone BlockIds (OBSERVER, NOTE_BLOCK, LAMP,
+ *      NOT_GATE, DELAY) bumped BLK_COUNT from 59 to 64, which grows
+ *      the inventory section by 5*4 = 20 bytes and shifts every
+ *      downstream offset. v6 saves still load via dual-read using
+ *      the old inventory size; the inventory counts for the new
+ *      block IDs default to zero on a v6 load.
+ * v8 — block-id field widened from 6 bits to the full byte. Water
+ *      moved from upper-bit-packed level into 8 dedicated IDs
+ *      (WATER_L0..L7) and the new redstone blocks gained _ON
+ *      variants instead of overloading bit 6. BLK_COUNT jumped to
+ *      76; inventory section grows by another (76-64)*4 = 48 bytes.
+ *      v6/v7 loads dual-read with the old inventory size; chunk
+ *      bytes that were old-format water (id=7 with upper bits set)
+ *      get translated to the new WATER_L* ID on chunk restore. */
+#define CRAFT_SAVE_VERSION 8u
 #define CRAFT_SAVE_VERSION_V5 5u   /* legacy, read-only */
+#define CRAFT_SAVE_VERSION_V6 6u   /* legacy, dual-read on load only */
+#define CRAFT_SAVE_VERSION_V7 7u   /* legacy, dual-read on load only */
+/* Inventory-array length used by each save version. The current
+ * BLK_COUNT is the v8 value; older versions were written with
+ * fewer block IDs. */
+#define CRAFT_SAVE_INVENTORY_LEN_V6 59
+#define CRAFT_SAVE_INVENTORY_LEN_V7 64
 #define CRAFT_SAVE_MAX_BYTES (4096 - 32)   /* one flash sector minus header */
 
 /* Public field offset for the chunks_nonce inside the serialised

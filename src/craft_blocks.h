@@ -88,8 +88,62 @@ typedef enum {
     BLK_PISTON_ARM      = 56,
     BLK_TNT             = 57,
     BLK_TNT_FUSED       = 58,
+    /* Redstone-related (fills the 6-bit cell ID space — 64 is the
+     * cap; widening the cell would double the world buffer). All
+     * five are single-ID with state derived live via the redstone
+     * tick or per-cell upper-bit storage. */
+    BLK_OBSERVER        = 59,   /* emits 1-tick pulse on neighbour change */
+    BLK_NOTE_BLOCK      = 60,   /* tone burst on rising edge */
+    BLK_LAMP            = 61,   /* lit when any neighbour is redstone-powered */
+    BLK_NOT_GATE        = 62,   /* output ON when input face unpowered */
+    BLK_DELAY           = 63,   /* 1-tick delay; B-cycle adjusts setting */
+    /* --- 8-bit BlockId space (added in v8 format) ------------------ *
+     * The cell byte is now a full 8-bit BlockId; the upper-bit pack
+     * used by v1..v7 for water level + redstone state is retired.
+     * That frees us from the 64-ID cap and gives ~250 IDs total.
+     *
+     * Water now spans IDs 7 + 64..70 (8 levels matching vanilla),
+     * with WATER_L0 the source and L7 the "about to evaporate"
+     * tendril. Helpers below treat any cell in this range as water.
+     * Redstone state blocks get explicit _ON variants — clean state
+     * round-trip through the chunk store with no upper-bit games. */
+    BLK_WATER_L1        = 64,
+    BLK_WATER_L2        = 65,
+    BLK_WATER_L3        = 66,
+    BLK_WATER_L4        = 67,
+    BLK_WATER_L5        = 68,
+    BLK_WATER_L6        = 69,
+    BLK_WATER_L7        = 70,
+    BLK_OBSERVER_ON     = 71,   /* pulse-active variant of OBSERVER */
+    BLK_NOTE_BLOCK_ON   = 72,   /* was-powered variant */
+    BLK_LAMP_ON         = 73,   /* lit variant */
+    BLK_NOT_GATE_ON     = 74,   /* output-on variant */
+    BLK_DELAY_ON        = 75,   /* this-tick output-on variant */
     BLK_COUNT
 } BlockId;
+
+/* Alias: the original BLK_WATER is now the source level (L0). */
+#define BLK_WATER_L0 BLK_WATER
+
+/* True if a raw cell byte is any water level. Cheap range check —
+ * relies on WATER_L0 == 7 and WATER_L1..L7 packed at 64..70. */
+static inline bool craft_is_water_id(uint8_t b) {
+    return b == BLK_WATER_L0 || (b >= BLK_WATER_L1 && b <= BLK_WATER_L7);
+}
+
+/* Water level 0..7 for a water cell; 0 for non-water. Source = 0. */
+static inline uint8_t craft_water_level(uint8_t b) {
+    if (b == BLK_WATER_L0) return 0;
+    if (b >= BLK_WATER_L1 && b <= BLK_WATER_L7) return (uint8_t)(1 + (b - BLK_WATER_L1));
+    return 0;
+}
+
+/* BlockId for a given water level. level=0 → WATER_L0, 1..7 → L1..L7. */
+static inline BlockId craft_water_for_level(int level) {
+    if (level <= 0) return BLK_WATER_L0;
+    if (level >= 7) return BLK_WATER_L7;
+    return (BlockId)(BLK_WATER_L1 + (level - 1));
+}
 
 /* Backwards-compat alias for older code that referenced PICKAXE
  * without a tier qualifier. */
@@ -152,7 +206,7 @@ static inline bool craft_block_opaque(BlockId blk) {
     /* Levers render as a 3D mounted switch via the sprite system,
      * not as a full-cell cube. */
     if (blk == BLK_LEVER_OFF || blk == BLK_LEVER_ON) return false;
-    return blk != BLK_AIR && blk != BLK_WATER && blk != BLK_GLASS;
+    return blk != BLK_AIR && !craft_is_water_id((uint8_t)blk) && blk != BLK_GLASS;
 }
 
 /* Whether this block stops player movement (collidable). Items never
@@ -161,7 +215,7 @@ static inline bool craft_block_opaque(BlockId blk) {
  * blocks (furnace, future chest) live above BLK_STICK in the enum so
  * they need an explicit allow-list. */
 static inline bool craft_block_solid(BlockId blk) {
-    if (blk == BLK_AIR || blk == BLK_WATER || blk == BLK_TORCH) return false;
+    if (blk == BLK_AIR || craft_is_water_id((uint8_t)blk) || blk == BLK_TORCH) return false;
     if (blk == BLK_REDSTONE_WIRE || blk == BLK_REDSTONE_WIRE_ON) return false;
     if (blk == BLK_FURNACE) return true;
     if (blk == BLK_CHEST) return true;
@@ -172,6 +226,11 @@ static inline bool craft_block_solid(BlockId blk) {
     if (blk == BLK_DOOR_OFF || blk == BLK_TRAPDOOR_OFF) return true;
     if (blk == BLK_PISTON_OFF || blk == BLK_PISTON_ON || blk == BLK_PISTON_ARM) return true;
     if (blk == BLK_TNT || blk == BLK_TNT_FUSED) return true;
+    /* All five new redstone blocks are solid cubes (no sprite-cell
+     * pass-through). Their state visualisation rides through the
+     * normal cube renderer with state-aware texture selection. */
+    if (blk == BLK_OBSERVER || blk == BLK_NOTE_BLOCK || blk == BLK_LAMP ||
+        blk == BLK_NOT_GATE || blk == BLK_DELAY) return true;
     if (blk >= BLK_SILVER_ORE && blk <= BLK_REDSTONE_ORE)   return true;
     if (blk >= BLK_SILVER_BLOCK && blk <= BLK_REDSTONE_BLOCK) return true;
     if (blk >= BLK_STICK) return false;   /* inventory items */
@@ -192,6 +251,8 @@ static inline bool craft_block_placeable(BlockId blk) {
     if (blk == BLK_TRAPDOOR_OFF || blk == BLK_DOOR_OFF) return true;
     if (blk == BLK_PISTON_OFF) return true;
     if (blk == BLK_TNT) return true;
+    if (blk == BLK_OBSERVER || blk == BLK_NOTE_BLOCK || blk == BLK_LAMP ||
+        blk == BLK_NOT_GATE || blk == BLK_DELAY) return true;
     if (blk >= BLK_SILVER_ORE && blk <= BLK_REDSTONE_ORE)   return true;
     if (blk >= BLK_SILVER_BLOCK && blk <= BLK_REDSTONE_BLOCK) return true;
     if (blk >= BLK_STICK) return false;

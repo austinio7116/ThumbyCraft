@@ -23,6 +23,7 @@ void craft_audio_step(void);
 void craft_audio_step_on(BlockId blk);   /* material-aware footstep */
 void craft_audio_jump(void);
 void craft_audio_pickaxe_ting(void);     /* "needs pickaxe" feedback */
+void craft_audio_note(int pitch_idx);    /* note-block tone; 0..23 = 2-octave range */
 void craft_audio_fuse(void);             /* TNT/creeper fuse ignition */
 void craft_audio_explode(void);          /* TNT/creeper detonation */
 

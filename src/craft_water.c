@@ -21,10 +21,12 @@
 #define WATER_TICK_PERIOD 0.20f       /* 5 Hz sim rate */
 #define WATER_EVENT_MAX   256
 
-#define WATER_LEVEL_MAX   3           /* 0 source, 1..3 flowing, >3 dries up.
-                                       * 2 bits because the block-id field
-                                       * grew to 6 bits to accommodate the
-                                       * full ore series. */
+#define WATER_LEVEL_MAX   7           /* 0 source, 1..7 flowing, >7 dries up.
+                                       * Vanilla-matching reach now that the
+                                       * cell ID field is the full 8 bits and
+                                       * water levels live in dedicated
+                                       * BlockIds rather than packed upper
+                                       * bits. */
 
 /* Local-window coords keep each event to 4 bytes — saves ~2 KB BSS
  * vs storing world int32s. Events are applied immediately after the
@@ -46,11 +48,16 @@ void craft_water_init(void) {
     s_n_events = 0;
 }
 
-static inline uint8_t block_id_of(uint8_t b)    { return b & 0x3F; }
-static inline uint8_t water_level_of(uint8_t b) { return (b >> 6) & 0x03; }
+/* With 8-bit BlockIds the cell byte IS the id — no more masking
+ * or packed level bits. block_id_of is preserved as identity for
+ * code clarity. water_level_of / water_byte just bounce through the
+ * inline helpers in craft_blocks.h. */
+static inline uint8_t block_id_of(uint8_t b)    { return b; }
+static inline uint8_t water_level_of(uint8_t b) { return craft_water_level(b); }
 static inline uint8_t water_byte(uint8_t level) {
-    return (uint8_t)BLK_WATER | (uint8_t)((level & 0x03) << 6);
+    return (uint8_t)craft_water_for_level((int)level);
 }
+static inline bool    is_water(uint8_t b)       { return craft_is_water_id(b); }
 
 static void queue_event(int lx, int wy, int lz, uint8_t byte) {
     if (s_n_events >= WATER_EVENT_MAX) return;
@@ -83,7 +90,7 @@ void craft_water_tick(float dt) {
             for (int lx = 0; lx < CRAFT_WORLD_X; lx++) {
                 int idx = (wy * CRAFT_WORLD_Z + lz) * CRAFT_WORLD_X + lx;
                 uint8_t b = craft_world_blocks[idx];
-                if (block_id_of(b) != BLK_WATER) continue;
+                if (!is_water(b)) continue;
 
                 uint8_t lvl     = water_level_of(b);
                 bool    source  = is_source_pos(wy) && lvl == 0;
@@ -91,7 +98,7 @@ void craft_water_tick(float dt) {
                 /* --- Fall down --- */
                 int below_idx = idx - CRAFT_WORLD_Z * CRAFT_WORLD_X;
                 uint8_t below = craft_world_blocks[below_idx];
-                if (block_id_of(below) == BLK_AIR) {
+                if (below == BLK_AIR) {
                     /* Falling water becomes effectively a fresh source
                      * for the cell below — level 0 so it can spread
                      * sideways from there too. Don't ALSO spread
@@ -118,10 +125,10 @@ void craft_water_tick(float dt) {
                         if ((unsigned)nlz >= CRAFT_WORLD_Z) continue;
                         int nidx = (wy * CRAFT_WORLD_Z + nlz) * CRAFT_WORLD_X + nlx;
                         uint8_t nb = craft_world_blocks[nidx];
-                        if (block_id_of(nb) == BLK_AIR) {
+                        if (nb == BLK_AIR) {
                             queue_event(nlx, wy, nlz,
                                         water_byte(spread_level));
-                        } else if (block_id_of(nb) == BLK_WATER &&
+                        } else if (is_water(nb) &&
                                    water_level_of(nb) > spread_level) {
                             /* Existing flowing water on this neighbour
                              * is "farther from source" than us — promote
@@ -145,7 +152,7 @@ void craft_water_tick(float dt) {
                     int up_idx = idx + CRAFT_WORLD_Z * CRAFT_WORLD_X;
                     if (wy + 1 < CRAFT_WORLD_Y) {
                         uint8_t ub = craft_world_blocks[up_idx];
-                        if (block_id_of(ub) == BLK_WATER) {
+                        if (is_water(ub)) {
                             /* Falling water from above always feeds us. */
                             fed = true;
                         }
@@ -161,7 +168,7 @@ void craft_water_tick(float dt) {
                             if ((unsigned)nlz >= CRAFT_WORLD_Z) continue;
                             int nidx = (wy * CRAFT_WORLD_Z + nlz) * CRAFT_WORLD_X + nlx;
                             uint8_t nb = craft_world_blocks[nidx];
-                            if (block_id_of(nb) != BLK_WATER) continue;
+                            if (!is_water(nb)) continue;
                             int nwy = wy;
                             bool n_source = is_source_pos(nwy) && water_level_of(nb) == 0;
                             if (n_source) { fed = true; break; }
@@ -169,8 +176,62 @@ void craft_water_tick(float dt) {
                         }
                     }
                     if (!fed) {
+                        /* Unfed flowing water decays toward MAX. At
+                         * MAX it either persists (if contained) or
+                         * evaporates (if exposed):
+                         *
+                         *   contained = every horizontal neighbour is
+                         *   solid or water — i.e. there's no air for
+                         *   the cell to escape into.
+                         *
+                         * Cells stay at MAX rather than getting
+                         * promoted to source — that distinction is
+                         * what kept this from cascading like the old
+                         * sweetener. MAX water can't spread further
+                         * (spread_level = MAX+1 > MAX), so no new
+                         * tendrils form.
+                         *
+                         * Effect on the standard scenarios:
+                         *   - Hilltop dome: edge cells touch air →
+                         *     evaporate → ring shrinks → dome
+                         *     dissolves cleanly.
+                         *   - Player-dug pool: every cell is
+                         *     surrounded by walls and other water →
+                         *     pool settles at MAX and persists, even
+                         *     after the upstream source is broken.
+                         *   - Pool with a side gap: edge adjacent to
+                         *     the gap evaporates, exposes the next
+                         *     ring, drains through the gap. */
                         if (lvl >= WATER_LEVEL_MAX) {
-                            queue_event(lx, wy, lz, (uint8_t)BLK_AIR);
+                            static const int dxp[4] = { 1, -1, 0,  0 };
+                            static const int dzp[4] = { 0,  0, 1, -1 };
+                            bool contained = true;
+                            for (int d = 0; d < 4 && contained; d++) {
+                                int nlx = lx + dxp[d];
+                                int nlz = lz + dzp[d];
+                                if ((unsigned)nlx >= CRAFT_WORLD_X ||
+                                    (unsigned)nlz >= CRAFT_WORLD_Z) {
+                                    contained = false; break;
+                                }
+                                int nidx = (wy * CRAFT_WORLD_Z + nlz) * CRAFT_WORLD_X + nlx;
+                                uint8_t nb2 = craft_world_blocks[nidx];
+                                if (nb2 == BLK_AIR) {
+                                    contained = false; break;
+                                }
+                            }
+                            if (!contained) {
+                                queue_event(lx, wy, lz, (uint8_t)BLK_AIR);
+                            } else {
+                                /* Contained pool — SRAM already holds
+                                 * the right byte. Persist it to the
+                                 * chunk store so the pool survives a
+                                 * window reload instead of vanishing
+                                 * and getting regenerated from a stale
+                                 * source edit. mod_set is idempotent
+                                 * via the prev-equals-byte guard. */
+                                craft_world_persist_byte(
+                                    lx + ox, wy, lz + oz, b);
+                            }
                         } else {
                             queue_event(lx, wy, lz, water_byte(lvl + 1));
                         }
@@ -180,10 +241,23 @@ void craft_water_tick(float dt) {
         }
     }
 
-    /* Apply queued events. Translate local coords back to world. */
+    /* Apply queued events. Translate local coords back to world.
+     * Only TERMINAL transitions are persisted:
+     *   - Evaporation (BLK_AIR) goes through craft_world_set so the
+     *     chunk store learns the cell is no longer water, purging
+     *     any stale player-placement edit at this position.
+     *   - Level transitions stay on set_byte — purely transient. The
+     *     "settled, fully contained pool" branch upstream persists
+     *     those cells via craft_world_persist_byte when (and only
+     *     when) they reach a stable shape. That's the deliberate
+     *     terminal-state policy. */
     for (int i = 0; i < s_n_events; i++) {
         WaterEvent *e = &s_events[i];
-        craft_world_set_byte((int)e->lx + ox, (int)e->wy, (int)e->lz + oz,
-                             e->byte);
+        int wx = (int)e->lx + ox, wz = (int)e->lz + oz;
+        if (e->byte == BLK_AIR) {
+            craft_world_set(wx, (int)e->wy, wz, BLK_AIR);
+        } else {
+            craft_world_set_byte(wx, (int)e->wy, wz, e->byte);
+        }
     }
 }

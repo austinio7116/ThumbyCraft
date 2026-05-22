@@ -299,7 +299,7 @@ INLINE_HOT TraceHit trace_ray(Vec3 origin, Vec3 dir, bool stop_at_water) {
         /* Direct buffer read — bounds already checked above, idx is
          * maintained incrementally so this is one load. Mask off the
          * top 2 bits, which carry the water-flow level field. */
-        BlockId blk = (BlockId)(craft_world_blocks[idx] & 0x3F);
+        BlockId blk = (BlockId)craft_world_blocks[idx];
         if (blk == BLK_AIR) continue;
         /* Sprite blocks (torches, wires, ladders, pads, doors, trap-
          * doors, pistons, levers) render via the craft_torches sprite
@@ -320,7 +320,7 @@ INLINE_HOT TraceHit trace_ray(Vec3 origin, Vec3 dir, bool stop_at_water) {
             (blk == BLK_PISTON_ARM) ||
             (blk == BLK_LEVER_OFF)     || (blk == BLK_LEVER_ON);
         if (is_sprite_cell && !stop_at_water) continue;
-        if (blk == BLK_WATER) {
+        if (craft_is_water_id((uint8_t)blk)) {
             if (!stop_at_water) {
                 if (!h.passed_water) {
                     /* First water cell along the ray — record the
@@ -586,7 +586,7 @@ void craft_render_strip(const CraftCamera *cam, uint16_t *fb,
         int ix = (int)cam->pos.x;
         int iy = (int)cam->pos.y;
         int iz = (int)cam->pos.z;
-        underwater = (craft_world_get(ix, iy, iz) == BLK_WATER);
+        underwater = craft_is_water_id((uint8_t)craft_world_get(ix, iy, iz));
     }
 
     if (y_start < 0) y_start = 0;
