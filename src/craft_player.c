@@ -849,6 +849,15 @@ void craft_player_tick(CraftPlayer *p, const CraftInput *in, float dt) {
                     else if (was == BLK_PISTON_ON)     dropped = BLK_PISTON_OFF;
                     else if (was == BLK_PISTON_ARM)    dropped = BLK_AIR;
                     else if (was == BLK_TNT_FUSED)     dropped = BLK_TNT;
+                    /* Water at any level drops as the source level so
+                     * the inventory item is unified — without this a
+                     * pickup from a settled (L7) cell would land in
+                     * the inventory at BlockId 70, which fails the
+                     * placeable check (it's above the BLK_STICK cap),
+                     * while a pickup of an L0 source (BlockId 7,
+                     * below the cap) places fine. Same icon, same
+                     * stack — same drop. */
+                    else if (craft_is_water_id((uint8_t)was)) dropped = BLK_WATER_L0;
                     /* Track inventory counts in BOTH modes — creative
                      * needs them so the crafting picker can know what
                      * the player has mined. Creative just never
@@ -1033,6 +1042,14 @@ skip_attack: ;
                      * decremented at the end of this branch. */
                     BlockId place_blk = blk;
                     if (place_blk == BLK_REDSTONE) place_blk = BLK_REDSTONE_WIRE;
+                    /* Player-placed water always becomes a FLOWING
+                     * level-1 cell, never an L=0 "source". Sources
+                     * are reserved for procgen lake/ocean cells —
+                     * letting the player drop a permanent source
+                     * anywhere lets a single bucket flood the whole
+                     * world. Placed L=1 decays normally after 6-7
+                     * ticks if nothing else feeds it. */
+                    if (place_blk == BLK_WATER_L0) place_blk = BLK_WATER_L1;
                     craft_world_set(h.fx, h.fy, h.fz, place_blk);
                     float feet_y2 = p->cam.pos.y - PLAYER_EYE;
                     if (aabb_blocked(p->cam.pos.x, feet_y2, p->cam.pos.z)) {

@@ -495,6 +495,10 @@ void craft_world_set_byte(int wx, int wy, int wz, uint8_t b) {
      * deliberately skip the player-edit chunk-store path. */
 }
 
+int craft_world_mod_get(int wx, int wy, int wz) {
+    return mod_get(wx, wy, wz);
+}
+
 void craft_world_persist_byte(int wx, int wy, int wz, uint8_t b) {
     /* No SRAM write — caller is expected to either already have the
      * right value in SRAM (the "settled at MAX" pool case) or to be
@@ -528,6 +532,33 @@ void craft_world_set(int wx, int wy, int wz, BlockId blk) {
         craft_world_blocks[local_idx(lx, wy, lz)] = (uint8_t)blk;
     }
     craft_world_dirty = 1;
+
+    /* Wall-break activation: if a player just removed a solid block
+     * (prev was solid, new is air), any adjacent BLK_WATER_L0 cell
+     * is a static natural-water cell that now has an exposed face.
+     * Wake those neighbours up by converting to BLK_WATER_L1 so the
+     * water tick picks them up and they flow into the new air space.
+     * Water-tick evaporations also pass through here, but those have
+     * prev == water and so don't trigger the activation. */
+    if (blk == BLK_AIR && prev != BLK_AIR && !craft_is_water_id((uint8_t)prev)) {
+        static const int dxw[6] = { 1, -1, 0,  0, 0,  0 };
+        static const int dyw[6] = { 0,  0, 1, -1, 0,  0 };
+        static const int dzw[6] = { 0,  0, 0,  0, 1, -1 };
+        for (int d = 0; d < 6; d++) {
+            int nx = wx + dxw[d];
+            int ny = wy + dyw[d];
+            int nz = wz + dzw[d];
+            if ((unsigned)ny >= CRAFT_WORLD_Y) continue;
+            int nlx = nx - craft_world_origin_x;
+            int nlz = nz - craft_world_origin_z;
+            if ((unsigned)nlx >= CRAFT_WORLD_X) continue;
+            if ((unsigned)nlz >= CRAFT_WORLD_Z) continue;
+            int nidx = local_idx(nlx, ny, nlz);
+            if (craft_world_blocks[nidx] == BLK_WATER_L0) {
+                craft_world_blocks[nidx] = (uint8_t)BLK_WATER_L1;
+            }
+        }
+    }
     /* Torch place/remove or anything that changes solid→transparent
      * needs a lightmap rebuild. Cheap (~few ms) so just rebuild on
      * any structural change involving torches. */
@@ -617,6 +648,26 @@ void craft_world_reset_mods(void) {
     memset(s_mods, 0, sizeof s_mods);
     s_mod_count = 0;
     s_dirty_q_n = 0;
+}
+
+/* Walk the mod hash and drop every water-id entry, marking each
+ * touched chunk dirty so the flash store gets the cleaned set on
+ * the next persist. Used as a one-shot wipe right after world load
+ * to clear stray water sources persisted by older save logic — the
+ * settled-pool persist path is the only thing allowed to keep water
+ * in the mod store now. */
+int craft_world_wipe_water_mods(void) {
+    int wiped = 0;
+    for (int i = 0; i < MOD_TABLE_SIZE; i++) {
+        ModEntry *e = &s_mods[i];
+        if (!(e->flags & 1)) continue;
+        if (!craft_is_water_id(e->blk)) continue;
+        mark_chunk_dirty(chunk_of(e->wx), chunk_of(e->wz));
+        e->flags = 0;
+        s_mod_count--;
+        wiped++;
+    }
+    return wiped;
 }
 
 /* Fill the entire window using craft_gen_column (column-batched)

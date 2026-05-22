@@ -250,7 +250,9 @@ bool craft_save_deserialise(const uint8_t *in, size_t n,
 
     /* World comes back via the chunk store — load_around regenerates
      * the procedural terrain around the player's restored position
-     * and restore_window pulls in any persisted mods. */
+     * and restore_window pulls in any persisted mods. Persisted
+     * settled-pool L=0 cells survive intact, since the water tick
+     * skips them entirely; only L>=1 flow state is transient. */
     craft_world_load_around((int)p->cam.pos.x, (int)p->cam.pos.z, seed);
 
     /* Reset transient state that doesn't survive across worlds:

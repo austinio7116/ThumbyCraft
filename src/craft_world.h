@@ -138,6 +138,19 @@ void    craft_world_set_byte(int wx, int wy, int wz, uint8_t b);
  * water level info round-trips correctly. */
 void    craft_world_persist_byte(int wx, int wy, int wz, uint8_t b);
 
+/* Look up the chunk-store override for (wx, wy, wz). Returns the
+ * stored byte (0..255) or -1 if there's no entry. The water tick
+ * uses this to detect "this is a settled pool cell" — once a cell
+ * is persisted, it's an immutable fixture; flow logic skips it. */
+int     craft_world_mod_get(int wx, int wy, int wz);
+
+/* Drop every water-id entry from the mod hash and mark the affected
+ * chunks dirty so the cleanup propagates to flash on the next
+ * persist. Returns the number of entries wiped. Called once after
+ * world load to clear stray water that old save logic persisted at
+ * non-pool positions. */
+int     craft_world_wipe_water_mods(void);
+
 /* Mod-aware block lookup — used by the window shift path. Returns
  * the override block if (wx, wy, wz) is in the mod table, otherwise
  * the procedural value from craft_gen_block_at(seed). */
