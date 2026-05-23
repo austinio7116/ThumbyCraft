@@ -8,6 +8,7 @@
  */
 #include "craft_blocks.h"
 #include <string.h>
+#include <math.h>
 
 /* Atlas storage. In baked mode the bulk lives in flash (.rodata) and
  * the only writable bytes are the two slots that animate_water mutates
@@ -21,6 +22,14 @@ extern const uint16_t craft_textures_baked[CRAFT_TEX_COUNT * CRAFT_TEX_PIXELS];
 static uint16_t craft_water_frames[2][2 * CRAFT_TEX_PIXELS];
 static int      craft_water_frame_idx;
 static bool     craft_water_frames_built;
+/* Lava uses the same 2-frame animated-tile scheme as water (top + side
+ * share one tile each). Toggled at ~2 Hz — lava crawls slower than
+ * water. */
+static uint16_t craft_lava_frames[2][CRAFT_TEX_PIXELS];
+static int      craft_lava_frame_idx;
+/* Portal — swirling purple, two animated frames like lava. */
+static uint16_t craft_portal_frames[2][CRAFT_TEX_PIXELS];
+static int      craft_portal_frame_idx;
 #else
 uint16_t craft_textures[CRAFT_TEX_COUNT * CRAFT_TEX_PIXELS];
 #endif
@@ -62,6 +71,8 @@ const uint16_t *craft_block_texture(BlockId blk, Face face) {
         if (face == FACE_PY) return &craft_water_frames[fr][0 * CRAFT_TEX_PIXELS];
         if (face != FACE_NY) return &craft_water_frames[fr][1 * CRAFT_TEX_PIXELS];
     }
+    if (tex_blk == BLK_LAVA)   return craft_lava_frames[craft_lava_frame_idx & 1];
+    if (tex_blk == BLK_PORTAL) return craft_portal_frames[craft_portal_frame_idx & 1];
     return &craft_textures_baked[s * CRAFT_TEX_PIXELS];
 #else
     return &craft_textures[s * CRAFT_TEX_PIXELS];
@@ -148,6 +159,13 @@ const char *craft_block_name(BlockId blk) {
         case BLK_SLIME_BLOCK:   return "slime block";
         case BLK_SLIMEBALL:     return "slimeball";
         case BLK_SNOW:          return "snow";
+        case BLK_SNOWY_ROCK:    return "snowy rock";
+        case BLK_ICE:           return "ice";
+        case BLK_LAVA:          return "lava";
+        case BLK_OBSIDIAN:      return "obsidian";
+        case BLK_GRAVEL:        return "gravel";
+        case BLK_FLINT:         return "flint";
+        case BLK_PORTAL:        return "portal";
         case BLK_SANDSTONE:     return "sandstone";
         case BLK_CACTUS:        return "cactus";
         case BLK_VINE:          return "vine";
@@ -269,6 +287,103 @@ static void bake_water_frame(uint16_t *out_top, uint16_t *out_side, int variant)
     }
 }
 
+/* Molten lava tile — cracked basalt crust: dark cooled plates split by
+ * a glowing network of cracks (Voronoi cell boundaries). High contrast
+ * (near-black crust vs white-hot cracks), connected crack lines rather
+ * than stripes or scattered spots. Seeds wrap across the 16px edge so
+ * the pattern tiles seamlessly between adjacent lava cells. The variant
+ * nudges seed positions + crack glow so the cracks shimmer/crawl
+ * between the two animation frames. One tile serves every face. */
+static void bake_lava_frame(uint16_t *out, int variant) {
+    enum { LAVA_SEEDS = 13 };
+    float sx[LAVA_SEEDS], sy[LAVA_SEEDS];
+    uint32_t s = 0x1A1AF0u ^ (variant ? 0x9E3779B9u : 0u);
+    for (int i = 0; i < LAVA_SEEDS; i++) {
+        sx[i] = (float)(xs32(&s) & 0xFF) * (16.0f / 256.0f);
+        sy[i] = (float)(xs32(&s) & 0xFF) * (16.0f / 256.0f);
+    }
+    const float F = 6.2831853f / 16.0f;   /* base freq — periodic over 16px */
+    float ph   = variant ? 1.7f : 0.0f;   /* frame phase → the swirl crawls */
+    int   glow = variant ? 12 : 0;        /* crack brightness pulse */
+    for (int y = 0; y < CRAFT_TEX_SIZE; y++) {
+        for (int x = 0; x < CRAFT_TEX_SIZE; x++) {
+            /* Domain warp — two octaves of sinusoidal swirl. All terms
+             * are periodic over 16px, so the tile still wraps seamlessly
+             * between adjacent lava cells, but the Voronoi boundaries
+             * bend into organic, varied curves instead of straight
+             * polygon edges. */
+            float wx = x + 3.2f * sinf(F * 2.0f * y + ph)
+                         + 1.7f * sinf(F * 3.0f * y - ph * 0.5f);
+            float wy = y + 3.2f * cosf(F * 2.0f * x - ph)
+                         + 1.7f * cosf(F * 3.0f * x + ph * 0.5f);
+            float d1 = 1e9f, d2 = 1e9f;   /* nearest + second-nearest seed */
+            for (int i = 0; i < LAVA_SEEDS; i++) {
+                float dx = wx - sx[i], dy = wy - sy[i];
+                dx -= 16.0f * floorf(dx / 16.0f + 0.5f);   /* toroidal wrap */
+                dy -= 16.0f * floorf(dy / 16.0f + 0.5f);
+                float dd = dx * dx + dy * dy;
+                if (dd < d1)      { d2 = d1; d1 = dd; }
+                else if (dd < d2) { d2 = dd; }
+            }
+            float edge = d2 - d1;         /* small → on a plate boundary */
+            /* Low-frequency "temperature" field — some patches of crust
+             * glow warmer than others, breaking up flat dark plates. */
+            float warm = 0.5f + 0.5f * sinf(F * (x + y) + ph * 1.3f);
+            uint32_t n = (uint32_t)(x * 73856093) ^ (uint32_t)(y * 19349663);
+            int j = (int)(n & 7);         /* faint per-pixel break-up */
+            int rr, gg, bb;
+            if (edge < 16.0f) {           /* glowing crack */
+                int hot = (int)(16.0f - edge);   /* 0..16, hottest at seam */
+                rr = 188 + hot * 4 + glow;       /* → ~255 white-hot */
+                gg = 55  + hot * 9 + glow;       /* → ~200 */
+                bb = 8   + hot * 4;              /* → ~72 */
+            } else {                      /* dark cooled crust */
+                int crust = d1 > 26.0f ? 26 : (int)d1;
+                rr = 28 + (int)(warm * 26.0f) + crust / 2 + j;  /* ~28..70 */
+                gg = 6  + (int)(warm * 8.0f)  + crust / 3;      /* ~6..20 */
+                bb = 3;
+            }
+            if (rr < 0) rr = 0; if (rr > 255) rr = 255;
+            if (gg < 0) gg = 0; if (gg > 255) gg = 255;
+            if (bb < 0) bb = 0; if (bb > 255) bb = 255;
+            out[y * CRAFT_TEX_SIZE + x] = rgb565(rr, gg, bb);
+        }
+    }
+}
+
+/* Portal — a swirling purple haze with bright sparkle flecks. Two
+ * octaves of periodic sinusoidal warp (seamless over 16px) drive
+ * violet brightness bands that swirl; the variant offsets the phase so
+ * the swirl rotates, and the sparkles twinkle between frames. */
+static void bake_portal_frame(uint16_t *out, int variant) {
+    const float F = 6.2831853f / 16.0f;
+    float ph = variant ? 2.1f : 0.0f;
+    uint32_t s = 0x90A7A1u ^ (variant ? 0x9E3779B9u : 0u);
+    for (int y = 0; y < CRAFT_TEX_SIZE; y++) {
+        for (int x = 0; x < CRAFT_TEX_SIZE; x++) {
+            float wx = x + 3.0f * sinf(F * 2.0f * y + ph)
+                         + 1.6f * sinf(F * 3.0f * y - ph);
+            float wy = y + 3.0f * cosf(F * 2.0f * x - ph)
+                         + 1.6f * cosf(F * 3.0f * x + ph);
+            float swirl = sinf(F * (wx + wy)) * 0.5f
+                        + sinf(F * 2.0f * wx - ph) * 0.5f;   /* -1..1 */
+            int p = (int)(96.0f + 70.0f * swirl);            /* ~26..166 */
+            if (p < 0) p = 0;
+            int rr = p + 40;          /* violet: strong R + B, weak G */
+            int gg = p / 4;
+            int bb = p + 70;
+            uint32_t r = xs32(&s);
+            if ((r & 0x3f) == 0) {    /* sparse twinkle */
+                rr = 235; gg = 200; bb = 255;
+            }
+            if (rr < 0) rr = 0; if (rr > 255) rr = 255;
+            if (gg < 0) gg = 0; if (gg > 255) gg = 255;
+            if (bb < 0) bb = 0; if (bb > 255) bb = 255;
+            out[y * CRAFT_TEX_SIZE + x] = rgb565(rr, gg, bb);
+        }
+    }
+}
+
 void craft_blocks_animate_water(float t) {
 #ifdef CRAFT_TEXTURES_BAKED
     /* Lazy first-time build — guard for the case where build_textures
@@ -278,17 +393,33 @@ void craft_blocks_animate_water(float t) {
                          &craft_water_frames[0][1 * CRAFT_TEX_PIXELS], 0);
         bake_water_frame(&craft_water_frames[1][0 * CRAFT_TEX_PIXELS],
                          &craft_water_frames[1][1 * CRAFT_TEX_PIXELS], 1);
+        bake_lava_frame(craft_lava_frames[0], 0);
+        bake_lava_frame(craft_lava_frames[1], 1);
+        bake_portal_frame(craft_portal_frames[0], 0);
+        bake_portal_frame(craft_portal_frames[1], 1);
         craft_water_frames_built = true;
     }
     /* 4 Hz toggle — same cadence as classic Minecraft water. */
     craft_water_frame_idx = ((int)(t * 4.0f)) & 1;
+    /* Lava crawls slower — 2 Hz. */
+    craft_lava_frame_idx = ((int)(t * 2.0f)) & 1;
+    /* Portal swirls at 3 Hz. */
+    craft_portal_frame_idx = ((int)(t * 3.0f)) & 1;
 #else
     /* Unbaked (host development) path — write the chosen frame
-     * straight into the atlas slot used by the renderer. */
+     * straight into the atlas slots used by the renderer. */
     uint16_t *top  = &craft_textures[(BLK_WATER * 3 + 0) * CRAFT_TEX_PIXELS];
     uint16_t *side = &craft_textures[(BLK_WATER * 3 + 1) * CRAFT_TEX_PIXELS];
     int variant = ((int)(t * 4.0f)) & 1;
     bake_water_frame(top, side, variant);
+    int lvar = ((int)(t * 2.0f)) & 1;
+    bake_lava_frame(&craft_textures[(BLK_LAVA * 3 + 0) * CRAFT_TEX_PIXELS], lvar);
+    bake_lava_frame(&craft_textures[(BLK_LAVA * 3 + 1) * CRAFT_TEX_PIXELS], lvar);
+    bake_lava_frame(&craft_textures[(BLK_LAVA * 3 + 2) * CRAFT_TEX_PIXELS], lvar);
+    int pvar = ((int)(t * 3.0f)) & 1;
+    bake_portal_frame(&craft_textures[(BLK_PORTAL * 3 + 0) * CRAFT_TEX_PIXELS], pvar);
+    bake_portal_frame(&craft_textures[(BLK_PORTAL * 3 + 1) * CRAFT_TEX_PIXELS], pvar);
+    bake_portal_frame(&craft_textures[(BLK_PORTAL * 3 + 2) * CRAFT_TEX_PIXELS], pvar);
 #endif
 }
 
@@ -324,8 +455,14 @@ void craft_blocks_build_textures(void) {
                      &craft_water_frames[0][1 * CRAFT_TEX_PIXELS], 0);
     bake_water_frame(&craft_water_frames[1][0 * CRAFT_TEX_PIXELS],
                      &craft_water_frames[1][1 * CRAFT_TEX_PIXELS], 1);
+    bake_lava_frame(craft_lava_frames[0], 0);
+    bake_lava_frame(craft_lava_frames[1], 1);
+    bake_portal_frame(craft_portal_frames[0], 0);
+    bake_portal_frame(craft_portal_frames[1], 1);
     craft_water_frames_built = true;
     craft_water_frame_idx = 0;
+    craft_lava_frame_idx = 0;
+    craft_portal_frame_idx = 0;
 }
 #else
 /* Generate an ore tile: speckled-stone base with ~18 small material
@@ -1316,11 +1453,12 @@ void craft_blocks_build_textures(void) {
         }
     }
 
-    /* SLIMEBALL — item icon: a small green blob centred on a
-     * transparent (magenta-keyed) field so the hotbar shows a drop. */
+    /* SLIMEBALL — item icon: a green blob with a highlight on a dark
+     * backdrop (the engine has no texel transparency — every pixel
+     * shows, so the tile is filled). */
     {
         uint16_t *t = &craft_textures[(BLK_SLIMEBALL * 3 + 1) * CRAFT_TEX_PIXELS];
-        fill_solid(t, 0xF81F);   /* magenta = transparent */
+        fill_solid(t, rgb565(28, 34, 28));
         for (int y = 0; y < CRAFT_TEX_SIZE; y++)
             for (int x = 0; x < CRAFT_TEX_SIZE; x++) {
                 int dx = x - 8, dy = y - 8;
@@ -1335,8 +1473,9 @@ void craft_blocks_build_textures(void) {
                t, sizeof(uint16_t) * CRAFT_TEX_PIXELS);
     }
 
-    /* SNOW — near-white speckle top; sides are a snow cap over a thin
-     * dirt band so the layer reads at the surface. */
+    /* SNOW — snow over a dirt/grass band (white top, snow-capped dirt
+     * sides). The "snow dusting on ground" look for the taiga. Mountain
+     * caps use BLK_SNOWY_ROCK instead so they don't get a dirt band. */
     {
         uint16_t *top = &craft_textures[(BLK_SNOW * 3 + 0) * CRAFT_TEX_PIXELS];
         speckle(top, 0x5009u, 235, 240, 250, 12);
@@ -1348,6 +1487,112 @@ void craft_blocks_build_textures(void) {
         memcpy(&craft_textures[(BLK_SNOW * 3 + 2) * CRAFT_TEX_PIXELS],
                &craft_textures[(BLK_DIRT * 3 + 1) * CRAFT_TEX_PIXELS],
                sizeof(uint16_t) * CRAFT_TEX_PIXELS);   /* dirt bottom */
+    }
+
+    /* SNOWY ROCK — mountain cap: white snow top, grey stone sides with
+     * a white snow rim along the upper edge, stone bottom. Reads as
+     * snow lying on rock (no dirt band). */
+    {
+        uint16_t *top = &craft_textures[(BLK_SNOWY_ROCK * 3 + 0) * CRAFT_TEX_PIXELS];
+        speckle(top, 0x5A09u, 235, 240, 250, 12);
+        uint16_t *side = &craft_textures[(BLK_SNOWY_ROCK * 3 + 1) * CRAFT_TEX_PIXELS];
+        speckle(side, 0x5A0Cu, 120, 122, 130, 22);   /* stone-grey base */
+        for (int y = 0; y < 4; y++)                  /* snow rim on top rows */
+            for (int x = 0; x < CRAFT_TEX_SIZE; x++)
+                side[y * CRAFT_TEX_SIZE + x] = rgb565(232, 238, 248);
+        memcpy(&craft_textures[(BLK_SNOWY_ROCK * 3 + 2) * CRAFT_TEX_PIXELS],
+               &craft_textures[(BLK_STONE * 3 + 1) * CRAFT_TEX_PIXELS],
+               sizeof(uint16_t) * CRAFT_TEX_PIXELS);   /* stone bottom */
+    }
+
+    /* ICE — frozen sheet: pale icy-blue Voronoi plates separated by fine
+     * darker fissures (cracked ice). Static (not animated). Seeds wrap
+     * toroidally so the crack network tiles seamlessly across a frozen
+     * lake, and each plate gets a slight shade offset so the sheet reads
+     * as many fused panes rather than flat blue. */
+    {
+        enum { ICE_SEEDS = 10 };
+        int isx[ICE_SEEDS], isy[ICE_SEEDS], itint[ICE_SEEDS];
+        uint32_t s = 0x1CE50Fu;
+        for (int i = 0; i < ICE_SEEDS; i++) {
+            isx[i]   = (int)(xs32(&s) & 15);
+            isy[i]   = (int)(xs32(&s) & 15);
+            itint[i] = (int)(xs32(&s) % 24) - 12;   /* per-plate shade -12..+11 */
+        }
+        uint16_t *t0 = &craft_textures[(BLK_ICE * 3 + 0) * CRAFT_TEX_PIXELS];
+        for (int y = 0; y < CRAFT_TEX_SIZE; y++) {
+            for (int x = 0; x < CRAFT_TEX_SIZE; x++) {
+                int d1 = 9999, d2 = 9999, ni = 0;
+                for (int i = 0; i < ICE_SEEDS; i++) {
+                    int dx = x - isx[i], dy = y - isy[i];
+                    if      (dx >  8) dx -= 16; else if (dx < -8) dx += 16;
+                    if      (dy >  8) dy -= 16; else if (dy < -8) dy += 16;
+                    int dd = dx * dx + dy * dy;
+                    if (dd < d1)      { d2 = d1; d1 = dd; ni = i; }
+                    else if (dd < d2) { d2 = dd; }
+                }
+                int edge = d2 - d1;            /* small → on a plate seam */
+                uint32_t n = (uint32_t)(x * 73856093) ^ (uint32_t)(y * 19349663);
+                int j = (int)(n & 3);          /* faint per-pixel break-up */
+                int rr, gg, bb;
+                if (edge < 6) {                /* darker fissure hairline */
+                    rr = 120; gg = 150; bb = 195;
+                } else {                       /* icy plate, per-plate shade */
+                    int tnt = itint[ni];
+                    rr = 178 + tnt + j;
+                    gg = 208 + tnt + j;
+                    bb = 236 + tnt / 2;
+                }
+                if (rr < 0) rr = 0; if (rr > 255) rr = 255;
+                if (gg < 0) gg = 0; if (gg > 255) gg = 255;
+                if (bb < 0) bb = 0; if (bb > 255) bb = 255;
+                t0[y * CRAFT_TEX_SIZE + x] = rgb565(rr, gg, bb);
+            }
+        }
+        memcpy(&craft_textures[(BLK_ICE * 3 + 1) * CRAFT_TEX_PIXELS], t0,
+               sizeof(uint16_t) * CRAFT_TEX_PIXELS);
+        memcpy(&craft_textures[(BLK_ICE * 3 + 2) * CRAFT_TEX_PIXELS], t0,
+               sizeof(uint16_t) * CRAFT_TEX_PIXELS);
+    }
+
+    /* LAVA / PORTAL — initial (frame 0) tiles on all faces. The live
+     * tiles are re-baked every frame by craft_blocks_animate_water; this
+     * just seeds the slots so they're never uninitialised before the
+     * first animate call. */
+    for (int f = 0; f < 3; f++) {
+        bake_lava_frame(&craft_textures[(BLK_LAVA * 3 + f) * CRAFT_TEX_PIXELS], 0);
+        bake_portal_frame(&craft_textures[(BLK_PORTAL * 3 + f) * CRAFT_TEX_PIXELS], 0);
+    }
+
+    /* GRAVEL — grey speckle with scattered darker pebbles, all faces. */
+    for (int f = 0; f < 3; f++) {
+        uint16_t *t = &craft_textures[(BLK_GRAVEL * 3 + f) * CRAFT_TEX_PIXELS];
+        speckle(t, 0x6AA7E1u + f, 140, 138, 134, 40);
+        uint32_t s = 0x6AA7E1u ^ (f * 0x1000u);
+        for (int n = 0; n < 14; n++) {            /* darker pebbles */
+            int cx = (int)(xs32(&s) & 15);
+            int cy = (int)(xs32(&s) & 15);
+            t[cy * CRAFT_TEX_SIZE + cx] = rgb565(92, 90, 86);
+        }
+    }
+
+    /* FLINT — item icon only (never a world cell): dark grey shard. */
+    for (int f = 0; f < 3; f++) {
+        uint16_t *t = &craft_textures[(BLK_FLINT * 3 + f) * CRAFT_TEX_PIXELS];
+        speckle(t, 0xF11A7u + f, 60, 60, 66, 18);
+    }
+
+    /* OBSIDIAN — near-black with a faint purple sheen + sparse brighter
+     * violet flecks, all faces alike. */
+    for (int f = 0; f < 3; f++) {
+        uint16_t *t = &craft_textures[(BLK_OBSIDIAN * 3 + f) * CRAFT_TEX_PIXELS];
+        speckle(t, 0x0B51D1u + f, 26, 18, 38, 14);   /* dark purple-black */
+        uint32_t s = 0x0B51D1u ^ (f * 0x1000u);
+        for (int n = 0; n < 10; n++) {               /* sparse violet flecks */
+            int cx = (int)(xs32(&s) & 15);
+            int cy = (int)(xs32(&s) & 15);
+            t[cy * CRAFT_TEX_SIZE + cx] = rgb565(78, 54, 110);
+        }
     }
 
     /* SANDSTONE — tan with faint horizontal banding. */
@@ -1370,21 +1615,23 @@ void craft_blocks_build_textures(void) {
         }
     }
 
-    /* VINE — green strands on a magenta-transparent field (drawn as a
-     * sprite, but a cube texture is the held-item / fallback icon). */
+    /* VINE — drawn in-world as a 3-strand sprite cuboid; this atlas
+     * tile is only the hotbar icon, so it's a full image (dark
+     * backdrop + green strands, like the ladder). */
     for (int f = 0; f < 3; f++) {
         uint16_t *t = &craft_textures[(BLK_VINE * 3 + f) * CRAFT_TEX_PIXELS];
-        fill_solid(t, 0xF81F);
+        fill_solid(t, rgb565(20, 28, 18));
         for (int x = 1; x < CRAFT_TEX_SIZE; x += 4)
             for (int y = 0; y < CRAFT_TEX_SIZE; y++)
                 if (((x * 3 + y) & 7) != 0)
                     t[y * CRAFT_TEX_SIZE + x] = rgb565(55, 120, 45);
     }
 
-    /* LILY PAD — flat green disc with a notch, magenta elsewhere. */
+    /* LILY PAD — drawn in-world as a flat sprite slab; this tile is
+     * the hotbar icon: a green disc on a water-blue backdrop. */
     for (int f = 0; f < 3; f++) {
         uint16_t *t = &craft_textures[(BLK_LILY_PAD * 3 + f) * CRAFT_TEX_PIXELS];
-        fill_solid(t, 0xF81F);
+        fill_solid(t, rgb565(40, 80, 110));
         for (int y = 0; y < CRAFT_TEX_SIZE; y++)
             for (int x = 0; x < CRAFT_TEX_SIZE; x++) {
                 int dx = x - 8, dy = y - 8;

@@ -12,20 +12,81 @@ worlds.
 </p>
 
 <p align="center">
-  <img src="docs/screenshots/craft-gameplay.jpg" width="240" alt="Surface gameplay — torch on ground, hearts HUD">
-  <img src="docs/screenshots/craft-cave.jpg" width="240" alt="Cave exploration under torch light">
-  <img src="docs/screenshots/craft-hilltop.jpg" width="240" alt="Hilltop view with bow held — distant grassland">
+  <img src="docs/screenshots/shot1_terrain.jpg" width="240" alt="Forest — trees and hearts HUD">
+  <img src="docs/screenshots/shot3_jungle.jpg" width="240" alt="Jungle — tall trees with hanging vines">
+  <img src="docs/screenshots/shot4_water.jpg" width="240" alt="Swamp — giant tree over open water">
+</p>
+
+<p align="center">
+  <img src="docs/screenshots/shot6_desert.jpg" width="240" alt="Desert biome">
+  <img src="docs/screenshots/shot5_tundra.jpg" width="240" alt="Tundra — snow and a frozen lake">
+  <img src="docs/screenshots/shot2_overview.jpg" width="240" alt="Hilltop overview">
+</p>
+
+<p align="center">
+  <img src="docs/screenshots/lava.gif" width="420" alt="Animated lava glowing in a cave">
+  <br><em>Cave lava — animated, light-casting, and lethal.</em>
 </p>
 
 ```
 ~30 fps  ·  64³ block window over an infinite world  ·  5 hostile + 3 passive mob types
-8 building variants (A-frame / hipped / longhouse / L-cottages / watchtower / church / castle)
-giant boss spider  ·  redstone circuits, TNT, pistons, doors, ladders, trapdoors
+8 climate biomes (plains/forest/desert/taiga/swamp/mountains/jungle/savanna) with tinted foliage
+desert temples + ziggurats with baked redstone arrow traps and high-tier loot
+cave lava (light source + animated + lethal) · water+lava → obsidian · gravel → flint · lit portals
+redstone circuits, TNT, dispensers, observers, pistons, doors, ladders, trapdoors · giant boss spider
 furnaces + chests with rarity-tiered loot  ·  full chest + furnace persistence across saves
-4 control schemes incl. d-pad-walk + double-tap-hold reverse  ·  4-slot save + screenshot picker
+6 control schemes incl. d-pad-walk + double-tap-hold reverse  ·  4-slot save + screenshot picker
 Debussy Clair de Lune soundtrack — random key each loop, pitch sliding toward bright in caves
 drifting clouds  ·  flash-backed worlds  ·  280 MHz dual-core M33 tile-stealing raycaster
 ```
+
+---
+
+## What's new in 1.15
+
+The biggest content drop since launch — a full climate-biome overworld
+plus the lava → obsidian → portal chain.
+
+**Biomes.** The world is now split into eight climate biomes driven by
+a temperature × humidity map: **plains, forest, desert, taiga, swamp,
+mountains, jungle, savanna**. Grass and leaves are tinted per biome
+(murky swamp greens, cold taiga blue-greens, golden savanna), and each
+biome grows its own flora — oak/birch, snowy conifers, giant swamp
+trees with hanging vines, jungle "mini-giants", flat-topped acacias,
+cactus, lily pads. New blocks: snow, sandstone, cactus, vine, lily pad,
+snowy rock.
+
+**Mountains & tundra.** Mountains rise into bare rock and an
+altitude-driven **snow line** whose height tracks temperature, so cold
+peaks cap in snow that blends down into neighbouring tundra. Tundra
+lakes **freeze over** — a walkable sheet of ice with water preserved
+beneath, snowy beaches at the waterline.
+
+**Desert temples.** Sandstone **stepped pyramids** and **walled
+ziggurats** spawn in the desert (rarely as jungle pyramids), each
+hiding a treasure room rigged with **baked-in redstone arrow traps** —
+pressure pads around the chest and an observer that fires a volley the
+moment you open the door — guarding high-tier loot.
+
+**Lava, obsidian & portals.**
+- **Cave lava** pools in the deep caverns and in **magma pockets** sealed
+  in mountain rock. It's animated (a churning cracked-basalt texture),
+  **casts light** like a torch, and **burns** — stay in it and you die.
+- Flow **water onto lava to make obsidian** (diamond-pickaxe only).
+- Mine **gravel** (new) for a chance at **flint**, then strike flint on
+  an obsidian frame to **light a portal** — a swirling purple gateway
+  (teleport destination coming in a later release).
+
+**Redstone wave 2.** Dispensers (fire arrows on a pulse), targets
+(emit when arrow-struck), observers, note blocks, lamps, NOT-gates and
+repeaters; slime blocks (bounce) crafted from slimeball drops; the
+piston split into regular + sticky. **Mobs now trigger pressure pads**,
+and pads seed wire networks. Plus a redstone perf fix so idle
+dispensers no longer cost any framerate.
+
+> ℹ️ **Saves carry over.** The save format dual-reads every version
+> back to v5, so existing worlds load — new terrain (biomes, lava,
+> ores) appears as you explore into freshly generated chunks.
 
 ---
 

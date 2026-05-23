@@ -459,7 +459,11 @@ void craft_world_rebuild_lightmap(void) {
     for (int lz = 0; lz < CRAFT_WORLD_Z; lz++) {
         for (int lx = 0; lx < CRAFT_WORLD_X; lx++) {
             for (int wy = 0; wy < CRAFT_WORLD_Y; wy++) {
-                if ((craft_world_blocks[local_idx(lx, wy, lz)] & 0x3F) == BLK_TORCH) {
+                uint8_t b = craft_world_blocks[local_idx(lx, wy, lz)];
+                /* Torches, lava and lit portals all emit light. (These
+                 * use a full-byte compare — their ids are above the
+                 * legacy 6-bit mask that the torch check still relies on.) */
+                if ((b & 0x3F) == BLK_TORCH || b == BLK_LAVA || b == BLK_PORTAL) {
                     light_flood_from(lx, wy, lz);
                 }
             }

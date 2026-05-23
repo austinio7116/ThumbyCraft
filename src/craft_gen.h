@@ -16,6 +16,9 @@
 #include "craft_chests.h"
 
 #define CRAFT_WATER_LEVEL 28
+/* Lava floods carved cave cells at or below this Y, forming lava lakes
+ * in the deep caverns (well under the water table). */
+#define CRAFT_LAVA_LEVEL  10
 
 /* Fill the world buffer with freshly-generated terrain from `seed`. */
 void craft_gen_world(uint32_t seed);

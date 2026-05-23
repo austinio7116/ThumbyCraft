@@ -115,8 +115,8 @@ void craft_redstone_rescan(void) {
             b == BLK_LAMP     || b == BLK_LAMP_ON     ||
             b == BLK_NOTE_BLOCK || b == BLK_NOTE_BLOCK_ON ||
             b == BLK_OBSERVER || b == BLK_OBSERVER_ON ||
-            b == BLK_DISPENSER || b == BLK_DISPENSER_ON ||
-            b == BLK_TARGET   || b == BLK_TARGET_ON) n++;
+            b == BLK_DISPENSER_ON ||
+            b == BLK_TARGET_ON) n++;
     }
     s_active = n;
 }
@@ -125,9 +125,18 @@ void craft_redstone_note_change(BlockId prev, BlockId blk) {
     int delta = 0;
     /* Sources count toward s_active so the tick can early-exit when
      * the window has no powered cells. Solid redstone blocks act as
-     * permanent ON sources (vanilla rule). The new gates and sinks
-     * (NOT/DELAY/OBSERVER/LAMP/NOTE_BLOCK) also count — gates emit
-     * synthetic power, sinks need their bit refreshed each tick. */
+     * permanent ON sources (vanilla rule). Gates that emit (NOT/DELAY)
+     * and the polling OBSERVER also count.
+     *
+     * DISPENSER and TARGET are PURELY REACTIVE: a dispenser fires only
+     * when an adjacent power source energises it, and a target emits
+     * only when an arrow hits it (which sets the _ON state). The thing
+     * that drives them — the wire/lever/pad, or the arrow-set TARGET_ON
+     * — is already counted, so their idle OFF state must NOT count.
+     * Counting it kept s_active>0 for every dispenser in the world,
+     * defeating the fast path and running the full 64³ scan every tick
+     * (a dispenser "just existing" tanked the framerate). Only the _ON
+     * states count, so a fired dispenser / hit target still reverts. */
     if (prev == BLK_LEVER_ON || prev == BLK_REDSTONE_WIRE_ON ||
         prev == BLK_REDSTONE_BLOCK ||
         prev == BLK_NOT_GATE || prev == BLK_NOT_GATE_ON ||
@@ -135,8 +144,8 @@ void craft_redstone_note_change(BlockId prev, BlockId blk) {
         prev == BLK_LAMP     || prev == BLK_LAMP_ON     ||
         prev == BLK_NOTE_BLOCK || prev == BLK_NOTE_BLOCK_ON ||
         prev == BLK_OBSERVER || prev == BLK_OBSERVER_ON ||
-        prev == BLK_DISPENSER || prev == BLK_DISPENSER_ON ||
-        prev == BLK_TARGET   || prev == BLK_TARGET_ON) delta--;
+        prev == BLK_DISPENSER_ON ||
+        prev == BLK_TARGET_ON) delta--;
     if (blk  == BLK_LEVER_ON || blk  == BLK_REDSTONE_WIRE_ON ||
         blk  == BLK_REDSTONE_BLOCK ||
         blk  == BLK_NOT_GATE || blk  == BLK_NOT_GATE_ON ||
@@ -144,8 +153,8 @@ void craft_redstone_note_change(BlockId prev, BlockId blk) {
         blk  == BLK_LAMP     || blk  == BLK_LAMP_ON     ||
         blk  == BLK_NOTE_BLOCK || blk  == BLK_NOTE_BLOCK_ON ||
         blk  == BLK_OBSERVER || blk  == BLK_OBSERVER_ON ||
-        blk  == BLK_DISPENSER || blk  == BLK_DISPENSER_ON ||
-        blk  == BLK_TARGET   || blk  == BLK_TARGET_ON) delta++;
+        blk  == BLK_DISPENSER_ON ||
+        blk  == BLK_TARGET_ON) delta++;
     s_active += delta;
     if (s_active < 0) s_active = 0;   /* clamp against drift */
 }
@@ -154,12 +163,23 @@ void craft_redstone_note_change(BlockId prev, BlockId blk) {
  * Player tick reports its current pressure-pad cell each frame; the
  * redstone tick treats that as a power source. Single-cell latch is
  * enough for player demos. */
-static int s_pad_wx, s_pad_wy, s_pad_wz;
-static bool s_pad_held;
+/* Pressed-pad set — rebuilt every frame by craft_redstone_pads_clear()
+ * + per-entity note_pressure. Holds the player's pad plus any pads
+ * mobs are standing on, so several pads can be active at once. */
+#define PAD_MAX 16
+static int s_pad_wx[PAD_MAX], s_pad_wy[PAD_MAX], s_pad_wz[PAD_MAX];
+static int s_pad_n;
+static int s_pad_n_prev;   /* pad count at the previous tick — see fast path */
+
+void craft_redstone_pads_clear(void) { s_pad_n = 0; }
+
 void craft_redstone_note_pressure(int wx, int wy, int wz) {
-    if (wy < 0) { s_pad_held = false; return; }
-    s_pad_wx = wx; s_pad_wy = wy; s_pad_wz = wz;
-    s_pad_held = true;
+    if (wy < 0) return;                 /* legacy "not on a pad" — no-op */
+    for (int i = 0; i < s_pad_n; i++)   /* dedup: two entities on one pad */
+        if (s_pad_wx[i] == wx && s_pad_wy[i] == wy && s_pad_wz[i] == wz) return;
+    if (s_pad_n >= PAD_MAX) return;
+    s_pad_wx[s_pad_n] = wx; s_pad_wy[s_pad_n] = wy; s_pad_wz[s_pad_n] = wz;
+    s_pad_n++;
 }
 
 #define FUSE_MAX 8
@@ -263,9 +283,11 @@ void craft_redstone_tick(float dt) {
      * 256K scan entirely. The counter is kept in sync by
      * note_change (on craft_world_set) and by the writes below.
      * Pressure pads bypass this — they can be the sole power
-     * source in a circuit. Driven-block scan also bypasses so
-     * removing power correctly resets doors/pistons. */
-    if (s_active == 0 && !s_pad_held) return;
+     * source in a circuit. We also run one extra "settle" tick after
+     * the last pad releases (s_pad_n_prev) so pad-driven dispensers /
+     * doors that latched _ON without any wire get reverted instead of
+     * staying stuck on. */
+    if (s_active == 0 && s_pad_n == 0 && s_pad_n_prev == 0) return;
 
     int ox = craft_world_origin_x;
     int oz = craft_world_origin_z;
@@ -421,31 +443,31 @@ void craft_redstone_tick(float dt) {
         }
     }
 
-    /* Pressure pad as a source — if the player reported standing on
-     * one, seed its 6-adjacent cells just like a lever_on would. */
-    if (s_pad_held) {
-        int plx = s_pad_wx - ox;
-        int plz = s_pad_wz - oz;
-        if ((unsigned)plx < CRAFT_WORLD_X && (unsigned)plz < CRAFT_WORLD_Z &&
-            (unsigned)s_pad_wy < CRAFT_WORLD_Y) {
-            static const int dx[6] = { 1,-1, 0, 0, 0, 0 };
-            static const int dy[6] = { 0, 0, 1,-1, 0, 0 };
-            static const int dz[6] = { 0, 0, 0, 0, 1,-1 };
-            for (int d = 0; d < 6; d++) {
-                int nlx = plx + dx[d];
-                int nwy = s_pad_wy + dy[d];
-                int nlz = plz + dz[d];
-                if ((unsigned)nlx >= CRAFT_WORLD_X) continue;
-                if ((unsigned)nlz >= CRAFT_WORLD_Z) continue;
-                if ((unsigned)nwy >= CRAFT_WORLD_Y) continue;
-                BlockId nb = craft_world_get(nlx + ox, nwy, nlz + oz);
-                if (nb == BLK_REDSTONE_WIRE || nb == BLK_REDSTONE_WIRE_ON) {
-                    uint32_t k = key_of(nlx, nwy, nlz);
-                    if (visited_add(k) && frontier_n < BFS_MAX) {
-                        s_frontier[frontier_n++] = (RsCell){
-                            (uint8_t)nlx, (uint8_t)nwy, (uint8_t)nlz
-                        };
-                    }
+    /* Pressure pads as sources — each pressed pad (player or any mob)
+     * seeds its 6-adjacent wire cells just like a lever_on would. */
+    for (int pi = 0; pi < s_pad_n; pi++) {
+        int plx = s_pad_wx[pi] - ox;
+        int plz = s_pad_wz[pi] - oz;
+        int pwy = s_pad_wy[pi];
+        if ((unsigned)plx >= CRAFT_WORLD_X || (unsigned)plz >= CRAFT_WORLD_Z ||
+            (unsigned)pwy >= CRAFT_WORLD_Y) continue;
+        static const int dx[6] = { 1,-1, 0, 0, 0, 0 };
+        static const int dy[6] = { 0, 0, 1,-1, 0, 0 };
+        static const int dz[6] = { 0, 0, 0, 0, 1,-1 };
+        for (int d = 0; d < 6; d++) {
+            int nlx = plx + dx[d];
+            int nwy = pwy + dy[d];
+            int nlz = plz + dz[d];
+            if ((unsigned)nlx >= CRAFT_WORLD_X) continue;
+            if ((unsigned)nlz >= CRAFT_WORLD_Z) continue;
+            if ((unsigned)nwy >= CRAFT_WORLD_Y) continue;
+            BlockId nb = craft_world_get(nlx + ox, nwy, nlz + oz);
+            if (nb == BLK_REDSTONE_WIRE || nb == BLK_REDSTONE_WIRE_ON) {
+                uint32_t k = key_of(nlx, nwy, nlz);
+                if (visited_add(k) && frontier_n < BFS_MAX) {
+                    s_frontier[frontier_n++] = (RsCell){
+                        (uint8_t)nlx, (uint8_t)nwy, (uint8_t)nlz
+                    };
                 }
             }
         }
@@ -538,14 +560,15 @@ void craft_redstone_tick(float dt) {
                         powered = true;
                     }
                 }
-                /* Pressure-pad direct neighbour check. */
-                if (s_pad_held) {
-                    int adwx = (lx + ox) - s_pad_wx;
-                    int adwy = wy       - s_pad_wy;
-                    int adwz = (lz + oz) - s_pad_wz;
+                /* Pressure-pad direct neighbour check — any pressed pad. */
+                for (int pi = 0; pi < s_pad_n; pi++) {
+                    int adwx = (lx + ox) - s_pad_wx[pi];
+                    int adwy = wy        - s_pad_wy[pi];
+                    int adwz = (lz + oz) - s_pad_wz[pi];
                     if (adwx*adwx + adwy*adwy + adwz*adwz == 1) {
                         powered = true;
                         redstone_adj = true;
+                        break;
                     }
                 }
                 int wx = lx + ox, wz = lz + oz;
@@ -757,10 +780,10 @@ void craft_redstone_tick(float dt) {
                                 input_powered = true;
                             }
                         }
-                        if (!input_powered && s_pad_held) {
-                            int dwx = (lx + ox) - s_pad_wx;
-                            int dwy = wy - s_pad_wy;
-                            int dwz = (lz + oz) - s_pad_wz;
+                        for (int pi = 0; !input_powered && pi < s_pad_n; pi++) {
+                            int dwx = (lx + ox) - s_pad_wx[pi];
+                            int dwy = wy         - s_pad_wy[pi];
+                            int dwz = (lz + oz) - s_pad_wz[pi];
                             if (dwx*dwx + dwy*dwy + dwz*dwz == 1) input_powered = true;
                         }
                     }
@@ -845,4 +868,9 @@ void craft_redstone_tick(float dt) {
      * above with one window scan instead of N (one per craft_world_set
      * call) that would happen if we used the player-place path. */
     if (state_changed) craft_torches_rebuild();
+
+    /* Remember this tick's pad count so the next tick still runs once
+     * after the last pad releases — that settle tick reverts pad-driven
+     * dispensers / doors that have no wire to clear them otherwise. */
+    s_pad_n_prev = s_pad_n;
 }

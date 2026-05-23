@@ -171,6 +171,21 @@ bool craft_save_deserialise(const uint8_t *in, size_t n,
     } else if (version == CRAFT_SAVE_VERSION_V9) {
         inv_len = CRAFT_SAVE_INVENTORY_LEN_V9;
         has_orient = true;
+    } else if (version == CRAFT_SAVE_VERSION_V10) {
+        inv_len = CRAFT_SAVE_INVENTORY_LEN_V10;
+        has_orient = true;
+    } else if (version == CRAFT_SAVE_VERSION_V11) {
+        inv_len = CRAFT_SAVE_INVENTORY_LEN_V11;
+        has_orient = true;
+    } else if (version == CRAFT_SAVE_VERSION_V12) {
+        inv_len = CRAFT_SAVE_INVENTORY_LEN_V12;
+        has_orient = true;
+    } else if (version == CRAFT_SAVE_VERSION_V13) {
+        inv_len = CRAFT_SAVE_INVENTORY_LEN_V13;
+        has_orient = true;
+    } else if (version == CRAFT_SAVE_VERSION_V14) {
+        inv_len = CRAFT_SAVE_INVENTORY_LEN_V14;
+        has_orient = true;
     } else if (version == CRAFT_SAVE_VERSION) {
         inv_len = BLK_COUNT;
         has_orient = true;

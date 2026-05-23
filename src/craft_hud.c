@@ -220,8 +220,20 @@ void craft_hud_draw(uint16_t *fb, const CraftPlayer *p, int fps) {
     craft_font_draw(fb, name, (CRAFT_FB_W - nw) / 2, y0 - 8, 0xFFFF);
 
     if (fps > 0) {
-        char buf[16];
-        snprintf(buf, sizeof buf, "%d", fps);
+        char buf[20];
+        /* Biome letter before the FPS — debug readout of where the
+         * player is standing. Indexed by CraftBiome id (see craft_gen):
+         * P plains, F forest, D desert, T taiga, S swamp, M mountains,
+         * J jungle, A savanna. */
+        char bl = '?';
+        int plx = (int)floorf(p->cam.pos.x) - craft_world_origin_x;
+        int plz = (int)floorf(p->cam.pos.z) - craft_world_origin_z;
+        if ((unsigned)plx < CRAFT_WORLD_X && (unsigned)plz < CRAFT_WORLD_Z) {
+            static const char L[8] = { 'P','F','D','T','S','M','J','A' };
+            uint8_t bi = craft_world_biome[plz * CRAFT_WORLD_X + plx];
+            if (bi < 8) bl = L[bi];
+        }
+        snprintf(buf, sizeof buf, "%c %d", bl, fps);
         craft_font_draw(fb, buf, CRAFT_FB_W - craft_font_width(buf) - 2, 1, 0xFFE0);
     }
     /* World position coords (top-right, under the FPS counter).

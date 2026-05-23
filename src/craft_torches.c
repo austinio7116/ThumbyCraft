@@ -16,6 +16,7 @@
 #include "craft_torches.h"
 #include "craft_world.h"
 #include "craft_blocks.h"
+#include "craft_render.h"        /* craft_render_brightness_q8 for sprite lighting */
 #include "craft_tool_models.h"   /* CraftToolPart — shared cuboid struct */
 
 #include <string.h>
@@ -390,8 +391,11 @@ static void pad_parts(TorchCuboid out[2]) {
  * a tree canopy and against a wall. */
 static int vine_parts_n(int orient, TorchCuboid *out) {
     (void)orient;
-    uint16_t v  = rgb565(55, 120, 45);
-    uint16_t vd = rgb565(38, 90, 35);
+    /* Mid-dark green; sprites are now lit per-cell (see render below)
+     * so this dims correctly in shadow rather than needing to be
+     * near-black. */
+    uint16_t v  = rgb565(42, 95, 34);
+    uint16_t vd = rgb565(30, 72, 26);
     out[0].cx = 0.30f; out[0].cy = 0.5f; out[0].cz = 0.34f;
     out[0].hx = 0.045f; out[0].hy = 0.5f; out[0].hz = 0.045f; out[0].color = v;
     out[1].cx = 0.66f; out[1].cy = 0.5f; out[1].cz = 0.58f;
@@ -407,8 +411,10 @@ static void lily_parts(TorchCuboid out[2]) {
     pad_parts(out);
     out[0].color = rgb565(75, 155, 75);
     out[1].color = rgb565(45, 110, 45);
-    out[0].cy = 0.02f; out[0].hy = 0.02f;
-    out[1].cy = 0.012f; out[1].hy = 0.012f;
+    /* Sit clearly proud of the water surface so the flat pad doesn't
+     * z-fight the water plane and vanish up close. */
+    out[0].cy = 0.22f; out[0].hy = 0.035f;
+    out[1].cy = 0.20f; out[1].hy = 0.025f;
 }
 
 /* Door slab — thin vertical panel spanning the doorway when closed,
@@ -1105,20 +1111,35 @@ void craft_torches_render(const CraftCamera *cam, uint16_t *fb) {
                 float dl  = (dl2 > 1.0001f) ? sqrtf(dl2) : 1.0f;
                 float wdist = best_t * dl;
                 int q = (int)(wdist * 255.0f / CRAFT_MAX_DIST_FOR_ZBUF);
+                /* Lily pads lie in the water-surface plane and would
+                 * lose the depth tie to the water (drawn first) when
+                 * viewed up close — pull them a few buckets toward the
+                 * camera so they always win that coplanar tie. */
+                if (t->kind == TORCH_KIND_LILY_PAD) q -= 4;
                 if (q < 0)   q = 0;
                 if (q > 254) q = 254;
                 int idx = sy * CRAFT_FB_W + sx;
                 if (craft_zbuf[idx] <= (uint8_t)q) continue;
 
-                /* Flame stays bright regardless of time of day; stick
-                 * uses normal shading. Wires both slabs always read
-                 * as glowing dust — same treatment as the flame. */
-                if (!best_is_flame && t->kind == TORCH_KIND_TORCH) {
+                /* Lighting. True light sources (the torch flame, and
+                 * powered redstone dust) glow at a fixed brightness
+                 * regardless of time of day. EVERY other sprite cuboid
+                 * — ladder, door, trapdoor, piston, lever, wire-off,
+                 * vine, lily pad — is lit PER-CELL exactly like the
+                 * world blocks: sky-exposed cells take the day/night
+                 * ambient, buried/shadowed cells go dim, torch light
+                 * floors it. (Previously most of these rendered at raw
+                 * cuboid brightness and glowed at night / in caves.) */
+                if (best_is_flame ||
+                    t->kind == TORCH_KIND_TORCH ||
+                    t->kind == TORCH_KIND_WIRE_ON) {
                     best_color = shade565(best_color, 220);
-                } else if (t->kind == TORCH_KIND_LADDER) {
-                    /* Ladders take partial shading so they read as
-                     * physical wood, not glowing. */
-                    best_color = shade565(best_color, 200);
+                } else {
+                    int m = craft_world_sky_exposed(t->wx, t->wy, t->wz)
+                              ? craft_render_brightness_q8() : 48;
+                    int tl = craft_world_light_level(t->wx, t->wy, t->wz);
+                    if (tl > 0) { int fl = 70 + tl * 55; if (m < fl) m = fl; }
+                    best_color = shade565(best_color, m);
                 }
                 /* Picker highlight — tint toward white on the
                  * selected cell. */

@@ -32,11 +32,18 @@ void craft_redstone_rescan(void);
  * powered. Pass the previous block id and the new one. */
 void craft_redstone_note_change(BlockId prev_blk, BlockId new_blk);
 
-/* The player ticks each frame to report whether they're standing on
- * a pressure pad. If so, the redstone tick treats that cell as a
- * power source (like a held-down lever). Pass any negative wy to
- * clear an existing report. */
+/* Every frame, each entity standing on a pressure pad (the player AND
+ * any mob) reports its pad cell. The redstone tick treats every
+ * reported pad as a power source (like a held-down lever): it seeds
+ * adjacent wires and powers directly-adjacent driven blocks. Negative
+ * wy is ignored (legacy "not on a pad"). The set is rebuilt each frame
+ * after craft_redstone_pads_clear(), so it always reflects who is
+ * currently standing on pads. */
 void craft_redstone_note_pressure(int wx, int wy, int wz);
+
+/* Clear the pressed-pad set. Call once per frame, before the player
+ * and mob ticks re-report their pads. */
+void craft_redstone_pads_clear(void);
 
 /* Tick the TNT fuse timers — separate from the 5 Hz propagation
  * tick because the fuse counts in real seconds. Call every frame

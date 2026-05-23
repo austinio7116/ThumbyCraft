@@ -23,5 +23,8 @@ add_executable(bake_textures
 )
 target_include_directories(bake_textures PRIVATE ${SRC})
 target_compile_options(bake_textures PRIVATE -O2 -Wall)
+# craft_blocks.c's texture generator now uses sinf/cosf/floorf (lava
+# swirl) — link the math library.
+target_link_libraries(bake_textures PRIVATE m)
 # Explicitly leave CRAFT_TEXTURES_BAKED undefined here so the baker
 # uses the BSS storage path of craft_blocks.c.

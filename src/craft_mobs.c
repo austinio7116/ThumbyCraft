@@ -24,6 +24,7 @@
 #include "craft_particles.h"
 #include "craft_drops.h"
 #include "craft_gen.h"   /* CRAFT_WATER_LEVEL */
+#include "craft_redstone.h"  /* pressure-pad reporting */
 
 #include <string.h>
 
@@ -984,6 +985,17 @@ void craft_mobs_tick(float dt, CraftPlayer *p) {
             float gy = floorf(m->pos.y - 0.05f) + 1.0f;
             if (m->pos.y < gy) m->pos.y = gy;
             m->vel.y = 0;
+        }
+
+        /* Pressure-pad trigger — a mob standing on a pad presses it,
+         * exactly like the player (the pad cell is at the mob's feet).
+         * Lets mobs spring temple traps and player-built circuits. */
+        {
+            int mp_x = (int)floorf(m->pos.x);
+            int mp_y = (int)floorf(m->pos.y);
+            int mp_z = (int)floorf(m->pos.z);
+            if (craft_world_get(mp_x, mp_y, mp_z) == BLK_PRESSURE_PAD)
+                craft_redstone_note_pressure(mp_x, mp_y, mp_z);
         }
     }
 }

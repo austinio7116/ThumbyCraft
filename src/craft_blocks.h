@@ -146,6 +146,13 @@ typedef enum {
     BLK_CACTUS          = 86,   /* desert plant */
     BLK_VINE            = 87,   /* hanging / climbable sprite */
     BLK_LILY_PAD        = 88,   /* flat pad on swamp water */
+    BLK_SNOWY_ROCK      = 89,   /* mountain cap — snow on stone (save v11) */
+    BLK_ICE             = 90,   /* frozen tundra water surface (save v12) */
+    BLK_LAVA            = 91,   /* cave lava — light source + hazard (save v13) */
+    BLK_OBSIDIAN        = 92,   /* water-quenched lava — diamond-pick only (save v14) */
+    BLK_GRAVEL          = 93,   /* worldgen patches; mining ~10% drops flint (save v15) */
+    BLK_FLINT           = 94,   /* item — lights an obsidian portal frame (save v15) */
+    BLK_PORTAL          = 95,   /* lit portal — swirling purple, walk-through (save v15) */
     BLK_COUNT
 } BlockId;
 
@@ -247,6 +254,8 @@ static inline bool craft_block_opaque(BlockId blk) {
  * they need an explicit allow-list. */
 static inline bool craft_block_solid(BlockId blk) {
     if (blk == BLK_AIR || craft_is_water_id((uint8_t)blk) || blk == BLK_TORCH) return false;
+    if (blk == BLK_LAVA) return false;   /* fluid — you sink into it */
+    if (blk == BLK_PORTAL) return false; /* walk-through shimmer */
     if (blk == BLK_REDSTONE_WIRE || blk == BLK_REDSTONE_WIRE_ON) return false;
     if (blk == BLK_FURNACE) return true;
     if (blk == BLK_CHEST) return true;
@@ -271,7 +280,9 @@ static inline bool craft_block_solid(BlockId blk) {
     /* Biome blocks: snow/sandstone/cactus are solid cubes. Vine and
      * lily pad are pass-through sprites (handled by the >=STICK
      * default below — they're not solid). */
-    if (blk == BLK_SNOW || blk == BLK_SANDSTONE || blk == BLK_CACTUS) return true;
+    if (blk == BLK_SNOW || blk == BLK_SANDSTONE || blk == BLK_CACTUS ||
+        blk == BLK_SNOWY_ROCK || blk == BLK_ICE || blk == BLK_OBSIDIAN ||
+        blk == BLK_GRAVEL) return true;
     if (blk >= BLK_SILVER_ORE && blk <= BLK_REDSTONE_ORE)   return true;
     if (blk >= BLK_SILVER_BLOCK && blk <= BLK_REDSTONE_BLOCK) return true;
     if (blk >= BLK_STICK) return false;   /* inventory items */
@@ -282,6 +293,7 @@ static inline bool craft_block_solid(BlockId blk) {
  * entries have inventory slots but never become cells. */
 static inline bool craft_block_placeable(BlockId blk) {
     if (blk == BLK_AIR) return false;
+    if (blk == BLK_LAVA) return false;   /* world-gen hazard, no bucket yet */
     if (blk == BLK_FURNACE || blk == BLK_CHEST) return true;
     /* BLK_REDSTONE is an inventory item; placing it converts to
      * BLK_REDSTONE_WIRE (handled in the player's B-press path), so
@@ -297,7 +309,8 @@ static inline bool craft_block_placeable(BlockId blk) {
     if (blk == BLK_DISPENSER || blk == BLK_TARGET ||
         blk == BLK_SLIME_BLOCK) return true;
     if (blk == BLK_SNOW || blk == BLK_SANDSTONE || blk == BLK_CACTUS ||
-        blk == BLK_VINE || blk == BLK_LILY_PAD) return true;
+        blk == BLK_VINE || blk == BLK_LILY_PAD || blk == BLK_ICE ||
+        blk == BLK_OBSIDIAN || blk == BLK_GRAVEL) return true;
     if (blk >= BLK_SILVER_ORE && blk <= BLK_REDSTONE_ORE)   return true;
     if (blk >= BLK_SILVER_BLOCK && blk <= BLK_REDSTONE_BLOCK) return true;
     if (blk >= BLK_STICK) return false;
@@ -305,12 +318,14 @@ static inline bool craft_block_placeable(BlockId blk) {
 }
 
 /* Mining tier required. 0 = barehanded, 1 = wood+ pickaxe,
- * 2 = stone+ pickaxe, 3 = iron+ pickaxe. */
+ * 2 = stone+ pickaxe, 3 = iron+ pickaxe, 4 = diamond pickaxe only. */
 static inline int craft_block_pickaxe_tier(BlockId blk) {
-    if (blk == BLK_STONE || blk == BLK_COBBLE || blk == BLK_COAL_ORE) return 1;
+    if (blk == BLK_STONE || blk == BLK_COBBLE || blk == BLK_COAL_ORE ||
+        blk == BLK_SNOWY_ROCK) return 1;
     if (blk == BLK_IRON_ORE || blk == BLK_SILVER_ORE) return 2;
     if (blk == BLK_GOLD_ORE || blk == BLK_DIAMOND_ORE ||
         blk == BLK_REDSTONE_ORE) return 3;
+    if (blk == BLK_OBSIDIAN) return 4;   /* diamond pickaxe only */
     if (blk >= BLK_SILVER_BLOCK && blk <= BLK_REDSTONE_BLOCK) return 3;
     return 0;
 }

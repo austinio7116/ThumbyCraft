@@ -190,15 +190,17 @@ INLINE_HOT uint16_t shade(uint16_t c, int m) {
  * distinctly without re-baking the atlas. Desert slot is unused
  * (no grass/leaves there). */
 #define RGB565C(r,g,b) (uint16_t)((((r)>>3)<<11)|(((g)>>2)<<5)|((b)>>3))
-static const uint16_t s_biome_tint[6] = {
-    RGB565C(130, 190,  80),   /* plains    — bright grass        */
-    RGB565C( 85, 160,  70),   /* forest    — deep green          */
+static const uint16_t s_biome_tint[8] = {
+    RGB565C(140, 200,  70),   /* plains    — bright yellow-green */
+    RGB565C( 60, 140,  55),   /* forest    — deep green          */
     RGB565C(190, 180, 120),   /* desert    — (unused)            */
-    RGB565C(120, 158, 128),   /* taiga     — cold blue-green     */
-    RGB565C( 95, 108,  55),   /* swamp     — murky olive         */
-    RGB565C(120, 150, 115),   /* mountains — grey-green          */
+    RGB565C(140, 175, 165),   /* taiga     — cold blue-green     */
+    RGB565C( 95, 100,  40),   /* swamp     — murky brown-olive   */
+    RGB565C(130, 150, 120),   /* mountains — grey-green          */
+    RGB565C( 45, 175,  40),   /* jungle    — vivid green         */
+    RGB565C(195, 175,  70),   /* savanna   — dry tan-yellow      */
 };
-#define BIOME_TINT_T 110       /* ~43% blend toward the target */
+#define BIOME_TINT_T 165       /* ~64% blend — clearly visible */
 
 INLINE_HOT uint16_t biome_tint(uint16_t c, uint16_t tgt) {
     int r1 = (c   >> 11) & 0x1F, g1 = (c   >> 5) & 0x3F, b1 = c   & 0x1F;
@@ -343,6 +345,8 @@ INLINE_HOT TraceHit trace_ray(Vec3 origin, Vec3 dir, bool stop_at_water) {
             (blk == BLK_TRAPDOOR_OFF)  || (blk == BLK_TRAPDOOR_ON) ||
             (blk == BLK_PISTON_OFF)    || (blk == BLK_PISTON_ON) ||
             (blk == BLK_PISTON_ARM) ||
+            (blk == BLK_STICKY_PISTON_OFF) || (blk == BLK_STICKY_PISTON_ON) ||
+            (blk == BLK_VINE)          || (blk == BLK_LILY_PAD) ||
             (blk == BLK_LEVER_OFF)     || (blk == BLK_LEVER_ON);
         if (is_sprite_cell && !stop_at_water) continue;
         if (craft_is_water_id((uint8_t)blk)) {
@@ -678,7 +682,27 @@ void craft_render_strip(const CraftCamera *cam, uint16_t *fb,
                     int tv = (int)(h.v * CRAFT_TEX_SIZE);
                     if (tu < 0) tu = 0; else if (tu >= CRAFT_TEX_SIZE) tu = CRAFT_TEX_SIZE - 1;
                     if (tv < 0) tv = 0; else if (tv >= CRAFT_TEX_SIZE) tv = CRAFT_TEX_SIZE - 1;
-                    c = tex[tv * CRAFT_TEX_SIZE + tu];
+                    if (h.blk == BLK_LAVA) {
+                        /* Per-cell offset + D4 transform so a lava lake
+                         * doesn't show the same 16px tile in every cell.
+                         * The tile is toroidally seamless (period 16), so
+                         * an offset just reveals a different patch with no
+                         * within-face seam; flips/swaps add orientations.
+                         * Hash is per world cell so it's stable + animates. */
+                        uint32_t hsh = (uint32_t)(h.fx * 73856093)
+                                     ^ (uint32_t)(h.fy * 19349663)
+                                     ^ (uint32_t)(h.fz * 83492791);
+                        hsh ^= hsh >> 13; hsh *= 0x9E3779B1u; hsh ^= hsh >> 16;
+                        int u = tu, v = tv;
+                        if (hsh & 0x400) { int t = u; u = v; v = t; }
+                        if (hsh & 0x100) u = (CRAFT_TEX_SIZE - 1) - u;
+                        if (hsh & 0x200) v = (CRAFT_TEX_SIZE - 1) - v;
+                        u = (u + (int)(hsh        & (CRAFT_TEX_SIZE - 1))) & (CRAFT_TEX_SIZE - 1);
+                        v = (v + (int)((hsh >> 4) & (CRAFT_TEX_SIZE - 1))) & (CRAFT_TEX_SIZE - 1);
+                        c = tex[v * CRAFT_TEX_SIZE + u];
+                    } else {
+                        c = tex[tv * CRAFT_TEX_SIZE + tu];
+                    }
                 }
                 /* Biome tint — grass tops and all leaf faces blend
                  * toward the column's biome colour (swamp murky,

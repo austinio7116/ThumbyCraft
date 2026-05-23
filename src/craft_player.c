@@ -146,6 +146,65 @@ static bool aabb_blocked(float px, float feet_y, float pz) {
     return false;
 }
 
+/* --- Portal lighting --------------------------------------------- *
+ *
+ * Flood the AIR region in a single vertical plane (axis 0 = vary X+Y at
+ * fixed Z; axis 1 = vary Z+Y at fixed X) starting at (ax,ay,az). Valid
+ * only if every in-plane neighbour of the region is obsidian (a fully
+ * enclosed frame) and the region is small. On success the cells become
+ * BLK_PORTAL and it returns true. */
+static bool portal_try_plane(int ax, int ay, int az, int axis) {
+    enum { CAP = 16 };
+    int qx[CAP], qy[CAP], qz[CAP];
+    int n = 0, head = 0;
+    qx[n] = ax; qy[n] = ay; qz[n] = az; n++;
+    bool valid = true;
+    while (head < n && valid) {
+        int cx = qx[head], cy = qy[head], cz = qz[head]; head++;
+        for (int d = 0; d < 4; d++) {
+            int nx = cx, ny = cy, nz = cz;
+            if      (d == 0) ny++;
+            else if (d == 1) ny--;
+            else if (axis == 0) nx += (d == 2) ? 1 : -1;
+            else                nz += (d == 2) ? 1 : -1;
+            BlockId nb = craft_world_get(nx, ny, nz);
+            if (nb == BLK_OBSIDIAN || nb == BLK_PORTAL) continue;   /* frame */
+            if (nb == BLK_AIR || craft_is_water_id((uint8_t)nb)) {
+                bool seen = false;
+                for (int i = 0; i < n; i++)
+                    if (qx[i] == nx && qy[i] == ny && qz[i] == nz) { seen = true; break; }
+                if (!seen) {
+                    if (n >= CAP) { valid = false; break; }   /* too big — not a frame */
+                    qx[n] = nx; qy[n] = ny; qz[n] = nz; n++;
+                }
+            } else {
+                valid = false; break;     /* leaks through a non-obsidian wall */
+            }
+        }
+    }
+    if (!valid || n == 0) return false;
+    for (int i = 0; i < n; i++)
+        craft_world_set(qx[i], qy[i], qz[i], BLK_PORTAL);
+    return true;
+}
+
+/* Try to light a portal off the obsidian block at (obx,oby,obz): for
+ * each air cell touching it, attempt an enclosed frame in either
+ * vertical plane. Returns true on the first one that fills. */
+static bool craft_try_light_portal(int obx, int oby, int obz) {
+    static const int dx[6] = { 1, -1, 0, 0, 0, 0 };
+    static const int dy[6] = { 0, 0, 1, -1, 0, 0 };
+    static const int dz[6] = { 0, 0, 0, 0, 1, -1 };
+    for (int d = 0; d < 6; d++) {
+        int ax = obx + dx[d], ay = oby + dy[d], az = obz + dz[d];
+        BlockId a = craft_world_get(ax, ay, az);
+        if (a != BLK_AIR && !craft_is_water_id((uint8_t)a)) continue;
+        if (portal_try_plane(ax, ay, az, 0)) return true;
+        if (portal_try_plane(ax, ay, az, 1)) return true;
+    }
+    return false;
+}
+
 /* Auto-step over 1-block obstacles.
  *
  * Strategy: smooth teleport (cam.pos.y += 1.0, no jump arc) gated by
@@ -644,6 +703,26 @@ void craft_player_tick(CraftPlayer *p, const CraftInput *in, float dt) {
         }
     }
 
+    /* Lava burns. Any part of the player's body AABB sitting in a lava
+     * cell deals damage; take_damage's 1.2 s cooldown makes it a steady
+     * lethal tick (with the usual red flash + sound), so standing in
+     * lava kills you in a few seconds. */
+    {
+        float feet_y = p->cam.pos.y - PLAYER_EYE;
+        int lx0 = (int)floorf(p->cam.pos.x - PLAYER_HALF_W);
+        int lx1 = (int)floorf(p->cam.pos.x + PLAYER_HALF_W);
+        int lz0 = (int)floorf(p->cam.pos.z - PLAYER_HALF_W);
+        int lz1 = (int)floorf(p->cam.pos.z + PLAYER_HALF_W);
+        int ly0 = (int)floorf(feet_y + 0.001f);
+        int ly1 = (int)floorf(feet_y + PLAYER_HEIGHT);
+        bool in_lava = false;
+        for (int yy = ly0; yy <= ly1 && !in_lava; yy++)
+            for (int zz = lz0; zz <= lz1 && !in_lava; zz++)
+                for (int xx = lx0; xx <= lx1 && !in_lava; xx++)
+                    if (craft_world_get(xx, yy, zz) == BLK_LAVA) in_lava = true;
+        if (in_lava) craft_player_take_damage(p, 3);
+    }
+
     /* ----- Place / break / attack (only when MENU not held) ---- */
     if (!in->menu) {
         /* Console schemes swap the action-button assignments: attack/
@@ -801,7 +880,7 @@ void craft_player_tick(CraftPlayer *p, const CraftInput *in, float dt) {
                  * they own; reject if the block needs a higher tier. */
                 int need = craft_block_pickaxe_tier(was);
                 int have = 0;
-                if      (p->inventory[BLK_PICKAXE_DIAMOND] > 0) have = 3;
+                if      (p->inventory[BLK_PICKAXE_DIAMOND] > 0) have = 4;  /* only diamond mines obsidian */
                 else if (p->inventory[BLK_PICKAXE_GOLD]    > 0) have = 3;
                 else if (p->inventory[BLK_PICKAXE_SILVER]  > 0) have = 3;
                 else if (p->inventory[BLK_PICKAXE_IRON]    > 0) have = 3;
@@ -862,6 +941,16 @@ void craft_player_tick(CraftPlayer *p, const CraftInput *in, float dt) {
                     else if (was == BLK_TRAPDOOR_ON)   dropped = BLK_TRAPDOOR_OFF;
                     else if (was == BLK_PISTON_ON)     dropped = BLK_PISTON_OFF;
                     else if (was == BLK_PISTON_ARM)    dropped = BLK_AIR;
+                    else if (was == BLK_LAVA)          dropped = BLK_AIR;   /* never pick up lava */
+                    else if (was == BLK_GRAVEL) {
+                        /* ~10% of gravel yields flint (the rest gravel).
+                         * Deterministic per-cell so re-mining is stable. */
+                        uint32_t gh = (uint32_t)(h.bx * 73856093)
+                                    ^ (uint32_t)(h.by * 19349663)
+                                    ^ (uint32_t)(h.bz * 83492791);
+                        gh ^= gh >> 13; gh *= 0x9E3779B1u; gh ^= gh >> 16;
+                        dropped = (gh % 10u == 0u) ? BLK_FLINT : BLK_GRAVEL;
+                    }
                     else if (was == BLK_TNT_FUSED)     dropped = BLK_TNT;
                     /* Water at any level drops as the source level so
                      * the inventory item is unified — without this a
@@ -1022,6 +1111,19 @@ skip_attack: ;
                                                 face | (setting << 3));
                     craft_audio_place(BLK_DELAY);
                     goto place_done;
+                }
+                /* Flint on obsidian — light a portal. If the obsidian is
+                 * part of a properly enclosed frame, its interior fills
+                 * with the swirling portal block and one flint is spent. */
+                if (hit_blk == BLK_OBSIDIAN &&
+                    p->hotbar[p->hotbar_idx] == BLK_FLINT) {
+                    bool have_flint = (p->mode == CRAFT_MODE_CREATIVE) ||
+                                      p->inventory[BLK_FLINT] > 0;
+                    if (have_flint && craft_try_light_portal(h.bx, h.by, h.bz)) {
+                        if (p->mode == CRAFT_MODE_SURVIVAL) p->inventory[BLK_FLINT]--;
+                        craft_audio_place(BLK_PORTAL);
+                        goto place_done;
+                    }
                 }
             }
             /* Ladder-in-own-cell shortcut.

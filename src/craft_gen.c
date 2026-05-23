@@ -12,6 +12,8 @@
  */
 #include "craft_gen.h"
 #include "craft_world.h"
+#include "craft_blocks.h"      /* FACE_* for baked redstone trap orients */
+#include "craft_torches.h"     /* craft_torches_record_orient (trap dispensers) */
 
 static uint32_t hash3(int x, int y, int z) {
     uint32_t h = (uint32_t)(x * 374761393) ^
@@ -122,7 +124,10 @@ typedef enum {
     CBIOME_TAIGA,        /* cold conifer forest */
     CBIOME_SWAMP,        /* warm, very wet, low + flat, giant trees */
     CBIOME_MOUNTAINS,    /* extreme hills */
+    CBIOME_JUNGLE,       /* hot + wet — tall dense trees + vines */
+    CBIOME_SAVANNA,      /* hot + moderate — acacias, dry grass */
 } CraftBiome;
+#define CBIOME_COUNT 8
 
 static float temperature_at(int x, int z, uint32_t seed) {
     return fbm((float)x * 0.0062f, (float)z * 0.0062f, seed ^ 0x713D17E5u);
@@ -137,7 +142,9 @@ static float humidity_at(int x, int z, uint32_t seed) {
 static float swamp_factor(int x, int z, uint32_t seed) {
     float t = temperature_at(x, z, seed);
     float hu = humidity_at(x, z, seed);
-    if (t < 0.38f) return 0.0f;            /* too cold → taiga, not swamp */
+    /* Only TEMPERATE wetland is swamp; cold is taiga, hot+wet is
+     * jungle (which keeps rolling terrain, not flat wetland). */
+    if (t < 0.38f || t > 0.66f) return 0.0f;
     if (hu < 0.62f) return 0.0f;
     float s = (hu - 0.62f) / 0.18f;
     return s > 1.0f ? 1.0f : s;
@@ -147,11 +154,15 @@ static float swamp_factor(int x, int z, uint32_t seed) {
  * already have the mountain factor (craft_gen_column) avoid a
  * redundant noise eval. */
 static CraftBiome biome_classify(float m, float t, float hu) {
-    if (m > 0.5f)                  return CBIOME_MOUNTAINS; /* elevation wins */
-    if (t < 0.38f)                 return CBIOME_TAIGA;     /* cold */
-    if (hu > 0.62f)                return CBIOME_SWAMP;     /* warm + wet */
-    if (t > 0.66f && hu < 0.40f)   return CBIOME_DESERT;    /* hot + dry */
-    if (hu > 0.48f)                return CBIOME_FOREST;    /* temperate + moist */
+    if (m > 0.5f) return CBIOME_MOUNTAINS;          /* elevation wins */
+    if (t < 0.38f) return CBIOME_TAIGA;             /* cold */
+    if (t > 0.66f) {                                 /* hot band */
+        if (hu > 0.60f) return CBIOME_JUNGLE;        /* hot + wet */
+        if (hu < 0.33f) return CBIOME_DESERT;        /* hot + dry */
+        return CBIOME_SAVANNA;                        /* hot + moderate */
+    }
+    if (hu > 0.62f) return CBIOME_SWAMP;             /* temperate + wet */
+    if (hu > 0.48f) return CBIOME_FOREST;            /* temperate + moist */
     return CBIOME_PLAINS;
 }
 
@@ -159,6 +170,19 @@ static CraftBiome craft_biome_at(int x, int z, uint32_t seed) {
     return biome_classify(mountain_factor(x, z, seed),
                           temperature_at(x, z, seed),
                           humidity_at(x, z, seed));
+}
+
+/* Cheap biome lookup for cells inside the resident window — reads the
+ * per-column biome map that craft_gen_column already filled, avoiding
+ * three fresh fbm evals. Falls back to the full classify for the rare
+ * out-of-window query (e.g. a chest probe near the edge). Used by the
+ * building spawn path, which runs over the whole window on load. */
+static CraftBiome biome_at_cached(int x, int z, uint32_t seed) {
+    int blx = x - craft_world_origin_x;
+    int blz = z - craft_world_origin_z;
+    if ((unsigned)blx < CRAFT_WORLD_X && (unsigned)blz < CRAFT_WORLD_Z)
+        return (CraftBiome)craft_world_biome[blz * CRAFT_WORLD_X + blx];
+    return craft_biome_at(x, z, seed);
 }
 
 /* River shape is inlined in height_at — see below. The two
@@ -318,11 +342,13 @@ static bool tree_at(int x, int z, uint32_t seed) {
     CraftBiome b = craft_biome_at(x, z, seed);
     uint32_t mask;
     switch (b) {
-        case CBIOME_DESERT:    return false;     /* no trees (cacti TBD) */
+        case CBIOME_DESERT:    return false;     /* no trees (cactus is separate) */
+        case CBIOME_JUNGLE:    mask = 0x1F; break;  /* ~1/32 — dense canopy */
         case CBIOME_FOREST:    mask = 0x1F; break;  /* ~1/32 — dense */
         case CBIOME_TAIGA:     mask = 0x3F; break;  /* ~1/64 */
         case CBIOME_MOUNTAINS: mask = 0x7F; break;  /* ~1/128 — sparse pine */
-        case CBIOME_SWAMP:     mask = 0x1FF; break; /* ~1/512 — giants are huge */
+        case CBIOME_SAVANNA:   mask = 0x1FF; break; /* ~1/512 — sparse acacias */
+        case CBIOME_SWAMP:     mask = 0x7F; break;  /* ~1/128 oaks; ~1/8 of them giant */
         case CBIOME_PLAINS:
         default:               mask = 0xFF; break;  /* ~1/256 — sparse */
     }
@@ -336,6 +362,8 @@ typedef enum {
     TREE_OAK_LARGE,      /* Minecraft big oak — 8-tall trunk with branches */
     TREE_PINE,           /* Tall conifer — pointed tip, wide layered base */
     TREE_SWAMP_GIANT,    /* Swamp signature — 2×2 trunk, broad drooping canopy */
+    TREE_JUNGLE,         /* Tall single trunk, layered crown, hanging vines */
+    TREE_ACACIA,         /* Savanna — slanted trunk, flat wide canopy */
 } TreeType;
 
 /* Pick a tree shape per position deterministically, by biome:
@@ -346,7 +374,19 @@ typedef enum {
 static TreeType tree_type_at(int x, int z, uint32_t seed) {
     CraftBiome b = craft_biome_at(x, z, seed);
     if (b == CBIOME_MOUNTAINS || b == CBIOME_TAIGA) return TREE_PINE;
-    if (b == CBIOME_SWAMP) return TREE_SWAMP_GIANT;
+    if (b == CBIOME_SWAMP) {
+        /* Mostly normal swamp oaks; an occasional giant as a landmark
+         * (~1/8 of swamp trees) so the biome isn't a forest of giants. */
+        uint32_t r = hash3(x, z, seed ^ 0x5A11AB1Eu);
+        return ((r & 0x7) == 0) ? TREE_SWAMP_GIANT : TREE_OAK;
+    }
+    if (b == CBIOME_JUNGLE) {
+        /* Dense jungle: mostly small (oak) understory with ~1/4 tall
+         * jungle trees rising above — not a wall of identical giants. */
+        uint32_t r = hash3(x, z, seed ^ 0x10661E00u);
+        return ((r & 0x3) == 0) ? TREE_JUNGLE : TREE_OAK;
+    }
+    if (b == CBIOME_SAVANNA) return TREE_ACACIA;
     uint32_t r = hash3(x, z, seed ^ 0x7E47A1B5u);
     int roll = (int)((r >> 3) & 0xFF);
     int large_cut = (b == CBIOME_FOREST) ? 170 : 192;   /* lower = more big oaks */
@@ -368,6 +408,19 @@ static inline int abs_i(int v) { return v < 0 ? -v : v; }
 static inline int max_chess(int dx, int dz) {
     int a = abs_i(dx), b = abs_i(dz);
     return a > b ? a : b;
+}
+
+/* Stable per-leaf-cell pseudo-random, seeded by the tree's variant
+ * byte + the cell offset. Pure function → identical across chunk
+ * reloads (no leaf flicker), but differs per tree and per cell so a
+ * canopy can have a ragged, non-geometric edge. */
+static inline uint32_t leaf_jitter(int variant, int dx, int dz, int y) {
+    uint32_t h = (uint32_t)variant * 2654435761u
+               ^ (uint32_t)(dx * 73856093)
+               ^ (uint32_t)(dz * 19349663)
+               ^ (uint32_t)(y  * 83492791);
+    h ^= h >> 13; h *= 0x85EBCA6Bu; h ^= h >> 16;
+    return h;
 }
 
 /* STANDARD MINECRAFT OAK
@@ -562,15 +615,25 @@ static BlockId tree_block_swamp_giant(int variant, int dx, int dz,
 
     /* Thin UMBRELLA crown — a wide flat disc with a small domed cap
      * and a 1-cell underside lip at the rim. Bold silhouette, not a
-     * leaf blob. */
+     * leaf blob. Rim cells are nibbled by a position-seeded hash so
+     * the edge is ragged and each tree (variant) differs — interior
+     * cells are always kept so the shape stays solid. */
     if (ady == 1) {                       /* small domed cap */
-        if (rad2 <= 3.5f * 3.5f) return BLK_LEAVES;
+        if (rad2 <= 3.5f * 3.5f) {
+            if (rad2 <= 2.0f * 2.0f ||
+                (leaf_jitter(variant, dx, dz, y) & 7) != 0) return BLK_LEAVES;
+        }
     }
     if (ady == 0) {                       /* the wide flat canopy */
-        if (rad2 <= 6.9f * 6.9f && !in_trunk_xz) return BLK_LEAVES;
+        if (rad2 <= 6.9f * 6.9f && !in_trunk_xz) {
+            if (rad2 <= 5.0f * 5.0f ||
+                (leaf_jitter(variant, dx, dz, y) & 3) != 0) return BLK_LEAVES;
+        }
     }
     if (ady == -1) {                      /* underside lip — edge only */
-        if (rad2 >= 4.0f * 4.0f && rad2 <= 6.9f * 6.9f) return BLK_LEAVES;
+        if (rad2 >= 4.0f * 4.0f && rad2 <= 6.9f * 6.9f) {
+            if ((leaf_jitter(variant, dx, dz, y) & 1) == 0) return BLK_LEAVES;
+        }
     }
     /* Hanging VINES — real vine sprites dangling from the rim, each a
      * 2-4 cell run below the underside lip. Distinct from the leaves
@@ -587,12 +650,74 @@ static BlockId tree_block_swamp_giant(int variant, int dx, int dz,
     return BLK_AIR;
 }
 
+/* JUNGLE — a "mini giant": a single trunk (9 cells) crowned by a
+ * rounded three-layer bushy canopy with PROMINENT vines dangling off
+ * the rim — the jungle's signature. Taller than a large oak (8) but
+ * well short of the swamp giant (18) so it reads as a mid-tier tree,
+ * not a giant. Smaller and rounder than the giant's flat umbrella.
+ * Canopy reach = 2. */
+static BlockId tree_block_jungle(int variant, int dx, int dz, int y, int trunk_base) {
+    (void)variant;
+    int trunk_y = trunk_base + 1;
+    int top = trunk_y + 8;             /* 9-tall trunk */
+    if (dx == 0 && dz == 0 && y >= trunk_y && y <= top) return BLK_WOOD;
+    int adx = abs_i(dx), adz = abs_i(dz);
+    int chess = max_chess(dx, dz);
+    int ady = y - top;
+    /* Rounded crown: two wide 5×5-minus-corner layers, a 3×3, a cap. */
+    if (ady == -2 || ady == -1) {
+        if (chess <= 2 && !(adx == 2 && adz == 2))
+            if (!(dx == 0 && dz == 0)) return BLK_LEAVES;
+    }
+    if (ady == 0) {
+        if (chess <= 1) return BLK_LEAVES;
+    }
+    if (ady == 1) {
+        if (dx == 0 && dz == 0) return BLK_LEAVES;
+    }
+    /* Dangling vines — dense (every other rim cell) and long (4 cells
+     * below the canopy), the jungle look. */
+    if (ady <= -3 && ady >= -6) {
+        if (chess == 2 && ((dx * 5 + dz * 11) & 1) == 0) return BLK_VINE;
+    }
+    return BLK_AIR;
+}
+
+/* ACACIA — the savanna silhouette: a short straight trunk that kinks
+ * diagonally, topped by a thin flat umbrella. Variant chooses the
+ * lean direction. Canopy reach = 5 (slant 2 + disc 3). */
+static BlockId tree_block_acacia(int variant, int dx, int dz, int y, int trunk_base) {
+    int trunk_y = trunk_base + 1;
+    int straight_top = trunk_y + 4;             /* 5-cell straight base */
+    if (dx == 0 && dz == 0 && y >= trunk_y && y <= straight_top) return BLK_WOOD;
+    int axis = variant & 1;
+    int sgn  = (variant & 2) ? -1 : 1;
+    int sdx  = axis ? 0 : sgn;
+    int sdz  = axis ? sgn : 0;
+    /* Two diagonal kink cells lifting the canopy off-centre. */
+    if (y == straight_top + 1 && dx == sdx && dz == sdz) return BLK_WOOD;
+    if (y == straight_top + 2 && dx == 2 * sdx && dz == 2 * sdz) return BLK_WOOD;
+    /* Flat umbrella centred on the kink tip. */
+    int ldx = dx - 2 * sdx, ldz = dz - 2 * sdz;
+    int lchess = max_chess(ldx, ldz);
+    int ldy = y - (straight_top + 2);
+    if (ldy == 1) {                              /* wide flat disc */
+        if (lchess <= 3 && !(abs_i(ldx) == 3 && abs_i(ldz) == 3)) return BLK_LEAVES;
+    }
+    if (ldy == 2) {                              /* thin centre cap */
+        if (lchess <= 1) return BLK_LEAVES;
+    }
+    return BLK_AIR;
+}
+
 static BlockId tree_block_at(TreeType t, int variant, int dx, int dz,
                              int y, int trunk_base) {
     switch (t) {
         case TREE_OAK_LARGE: return tree_block_oak_large(variant, dx, dz, y, trunk_base);
         case TREE_PINE:      return tree_block_pine(dx, dz, y, trunk_base);
         case TREE_SWAMP_GIANT: return tree_block_swamp_giant(variant, dx, dz, y, trunk_base);
+        case TREE_JUNGLE:    return tree_block_jungle(variant, dx, dz, y, trunk_base);
+        case TREE_ACACIA:    return tree_block_acacia(variant, dx, dz, y, trunk_base);
         case TREE_OAK:
         default:             return tree_block_oak(dx, dz, y, trunk_base);
     }
@@ -624,9 +749,13 @@ static BlockId tree_block_at(TreeType t, int variant, int dx, int dz,
  *  6 Church         5×5×7       gable+  STONE + PLANK + WOOD steeple
  *                                steepl. + GLASS + TORCH
  *  7 Castle Keep    7×7×6       battl.  STONE + COBBLE battlements
+ *  8 Desert Temple  9×9×7       pyramid SANDSTONE stepped pyramid +
+ *                                        trapped treasure room (desert)
+ *  9 Desert Ziggurat9×9×5       keep    SANDSTONE walled keep + roof
+ *                                        terrace + trapped room (desert)
  */
-#define HUT_W       7
-#define HUT_H       7
+#define HUT_W       9
+#define HUT_H       9
 #define HUT_TOP_DY  7
 
 enum HutType {
@@ -638,6 +767,8 @@ enum HutType {
     HUT_TYPE_TOWER     = 5,
     HUT_TYPE_CHURCH    = 6,
     HUT_TYPE_CASTLE    = 7,
+    HUT_TYPE_TEMPLE    = 8,   /* desert: stepped sandstone pyramid */
+    HUT_TYPE_ZIGGURAT  = 9,   /* desert: sandstone walled keep */
 };
 
 static int hut_w(int type) {
@@ -645,6 +776,8 @@ static int hut_w(int type) {
         case HUT_TYPE_LONGHOUSE: return 7;
         case HUT_TYPE_TOWER:     return 3;
         case HUT_TYPE_CASTLE:    return 7;
+        case HUT_TYPE_TEMPLE:
+        case HUT_TYPE_ZIGGURAT:  return 9;
         default:                 return 5;
     }
 }
@@ -653,27 +786,35 @@ static int hut_h(int type) {
         case HUT_TYPE_LONGHOUSE: return 3;
         case HUT_TYPE_TOWER:     return 3;
         case HUT_TYPE_CASTLE:    return 7;
+        case HUT_TYPE_TEMPLE:
+        case HUT_TYPE_ZIGGURAT:  return 9;
         default:                 return 5;
     }
 }
 static int hut_top(int type) {
     switch (type) {
-        case HUT_TYPE_TOWER:  return 7;
-        case HUT_TYPE_CHURCH: return 7;
-        case HUT_TYPE_CASTLE: return 6;
-        default:              return 5;
+        case HUT_TYPE_TOWER:    return 7;
+        case HUT_TYPE_CHURCH:   return 7;
+        case HUT_TYPE_CASTLE:   return 6;
+        case HUT_TYPE_TEMPLE:   return 7;   /* stepped pyramid cap */
+        case HUT_TYPE_ZIGGURAT: return 5;   /* roof terrace + battlements */
+        default:                return 5;
     }
 }
 static int hut_chest_dx(int type) {
     switch (type) {
         case HUT_TYPE_LONGHOUSE: return 1;   /* back corner of 7×3 hall */
         case HUT_TYPE_CASTLE:    return 3;   /* centre of 7×7 keep */
+        case HUT_TYPE_TEMPLE:
+        case HUT_TYPE_ZIGGURAT:  return 4;   /* dir-invariant room centre */
         default:                 return 1;
     }
 }
 static int hut_chest_dz(int type) {
     switch (type) {
         case HUT_TYPE_CASTLE:    return 3;   /* centre of 7×7 keep */
+        case HUT_TYPE_TEMPLE:
+        case HUT_TYPE_ZIGGURAT:  return 4;   /* dir-invariant room centre */
         default:                 return 1;
     }
 }
@@ -690,7 +831,26 @@ static int hut_door_dir(int hx, int hz, uint32_t seed) {
  * rarer. Chest loot tier is rolled independently from a separate
  * hash dimension, so a plain cottage can still hide a legendary
  * chest. */
+/* Temples are a biome-gated landmark, NOT one of the village rolls:
+ *   desert  — dense (~1/1024 origins), the desert's only building
+ *   jungle  — rare jungle pyramids (~1/16384), alongside normal villages
+ *   else    — never.
+ * Uses the same origin hash as hut_origin_at so the temple/village
+ * decision stays consistent between the two. */
+static bool hut_is_temple_site(int hx, int hz, uint32_t seed, CraftBiome b) {
+    uint32_t rt = hash3(hx, hz, seed ^ 0xCAB1F00Du);
+    if (b == CBIOME_DESERT) return (rt & 0x3FFu)  == 0;   /* ~1/1024  */
+    if (b == CBIOME_JUNGLE) return (rt & 0x3FFFu) == 0;   /* ~1/16384 */
+    return false;
+}
+
 static int hut_type(int hx, int hz, uint32_t seed) {
+    /* Temple sites (desert always, jungle rarely) yield a pyramid or
+     * ziggurat — ~65% / ~35%. Everything else rolls a village design. */
+    if (hut_is_temple_site(hx, hz, seed, biome_at_cached(hx, hz, seed))) {
+        uint32_t dr = hash3(hx, hz, seed ^ 0x7E3D17u) & 0xFFu;
+        return (dr < 166) ? HUT_TYPE_TEMPLE : HUT_TYPE_ZIGGURAT;
+    }
     uint32_t r = hash3(hx, hz, seed ^ 0xC0FFEEEEu) & 0xFFu;
     if (r <  46) return HUT_TYPE_AFRAME;       /* ~18% */
     if (r <  92) return HUT_TYPE_HIPPED;       /* ~18% */
@@ -703,20 +863,28 @@ static int hut_type(int hx, int hz, uint32_t seed) {
 }
 
 static bool hut_origin_at(int hx, int hz, uint32_t seed) {
-    uint32_t r = hash3(hx, hz, seed ^ 0xCAB1F00Du);
-    /* ~1 in 4 096 columns → roughly one building per 64×64 region.
-     * 4× denser than the original 1/16384 so the player actually
-     * encounters one while exploring. */
-    if ((r & 0xFFF) != 0) return false;
+    /* Two independent hashes: the temple/origin hash and a village hash.
+     * Pre-reject the vast majority cheaply before any noise/biome work —
+     * a column hosts something only if a temple hash (densest, 1/1024)
+     * or a village hash (1/4096) hits. */
+    uint32_t rt = hash3(hx, hz, seed ^ 0xCAB1F00Du);
+    uint32_t rv = hash3(hx, hz, seed ^ 0x5117A6E5u);
+    bool maybe_temple  = ((rt & 0x3FFu) == 0);
+    bool maybe_village = ((rv & 0xFFFu) == 0);
+    if (!maybe_temple && !maybe_village) return false;
     /* Lowland-only — mountain biome shrugs buildings off. */
     float m = mountain_factor(hx, hz, seed);
     if (m > 0.20f) return false;
-    /* Above water, naturally flat across THIS type's actual footprint
-     * — smaller designs (e.g. 3×3 watchtower) don't need a full 7×7
-     * patch of flat ground, so they spawn more readily on hilly
-     * lowlands than the 7×7 castle does. */
+    /* Above water, naturally flat across THIS type's actual footprint. */
     int ref_h = height_at(hx, hz, seed);
     if (ref_h <= CRAFT_WATER_LEVEL + 1) return false;
+    /* Per-biome presence: desert → dense temples only (no villages);
+     * jungle → rare temples + normal villages; elsewhere → villages
+     * only. Temples never appear outside desert/jungle. */
+    CraftBiome b   = biome_at_cached(hx, hz, seed);
+    bool temple    = hut_is_temple_site(hx, hz, seed, b);
+    bool village   = (b != CBIOME_DESERT) && maybe_village;
+    if (!temple && !village) return false;
     int type = hut_type(hx, hz, seed);
     int W = hut_w(type), H = hut_h(type);
     int min_h = ref_h, max_h = ref_h;
@@ -727,8 +895,13 @@ static bool hut_origin_at(int hx, int hz, uint32_t seed) {
             if (h > max_h) max_h = h;
         }
     }
-    /* Reject sloped sites — walls would hang in air or bury. */
-    if (max_h - min_h > 1) return false;
+    /* Reject sloped sites — walls would hang in air or bury. Temples
+     * get a touch more tolerance: their thick sandstone base hides a
+     * 1-cell step, and desert flats large enough for a 9×9 footprint
+     * are scarce, so being too strict makes them near-impossible to
+     * find. */
+    int flat_tol = (type == HUT_TYPE_TEMPLE || type == HUT_TYPE_ZIGGURAT) ? 2 : 1;
+    if (max_h - min_h > flat_tol) return false;
     return true;
 }
 
@@ -1088,6 +1261,126 @@ static BlockId hut_block_castle(int dx, int dz, int dy, int dir, int W, int H) {
     return BLK_STONE;
 }
 
+/* --- Desert temples (types 8 / 9) --------------------------------
+ *
+ * Both share a 7×7×2 hollow treasure room inside a 9×9 footprint, a
+ * baked redstone trap kit, and a centre chest (4,4) whose loot is
+ * biased high in craft_gen_seed_hut_chest. They differ only in the
+ * exterior shell wrapped around that room: TEMPLE is a stepped
+ * pyramid, ZIGGURAT is a walled keep with a rooftop terrace.
+ *
+ * Trap kit (door-relative (along, depth); depth=0 is the door wall):
+ *   - a real DOOR at the entrance (along 4, depth 0),
+ *   - an OBSERVER watching that door → WIRE → DISPENSER that fires
+ *     back across the threshold the instant the door is opened,
+ *   - three PRESSURE_PADs around the centre chest, each backed by a
+ *     directly-adjacent DISPENSER that fires inward when stepped on.
+ * The chest sits at the dir-invariant centre (4,4), so the existing
+ * single-chest detect/seed plumbing works without per-dir math. */
+
+/* Map door-relative (along, depth) → local (dx, dz). The centre (4,4)
+ * is invariant under all four door directions. */
+static void temple_ad(int dir, int along, int depth, int *dx, int *dz) {
+    switch (dir) {
+        case 0: *dx = along;     *dz = depth;     break; /* door dz=0, +Z in */
+        case 1: *dx = along;     *dz = 8 - depth; break; /* door dz=8, -Z in */
+        case 2: *dx = 8 - depth; *dz = along;     break; /* door dx=8, -X in */
+        default:*dx = depth;     *dz = along;     break; /* door dx=0, +X in */
+    }
+}
+/* World face pointing back toward the door (the -depth direction). */
+static int temple_face_to_door(int dir) {
+    switch (dir) { case 0: return FACE_NZ; case 1: return FACE_PZ;
+                   case 2: return FACE_PX; default: return FACE_NX; }
+}
+/* World faces for +along / -along (lateral across the door wall). */
+static int temple_face_plus_along(int dir)  { return (dir < 2) ? FACE_PX : FACE_PZ; }
+static int temple_face_minus_along(int dir) { return (dir < 2) ? FACE_NX : FACE_NZ; }
+
+/* Face sentinels resolved per-dir at use. */
+#define TF_NONE   (-1)
+#define TF_DOOR   (-2)
+#define TF_PALONG (-3)
+#define TF_MALONG (-4)
+
+typedef struct { int8_t along, depth, dy; uint8_t blk; int8_t face; } TempleCell;
+static const TempleCell k_temple_cells[] = {
+    /* entrance door (2 cells tall) */
+    { 4, 0, 1, BLK_DOOR_OFF,      TF_DOOR  },
+    { 4, 0, 2, BLK_DOOR_OFF,      TF_DOOR  },
+    /* door-watch observer → wire → dispenser firing back at the entrant */
+    { 4, 1, 2, BLK_OBSERVER,      TF_DOOR  },
+    { 4, 2, 2, BLK_REDSTONE_WIRE, TF_NONE  },
+    { 4, 2, 1, BLK_DISPENSER,     TF_DOOR  },
+    /* treasure pads + inward dispensers ringing the centre chest (4,4) */
+    { 3, 4, 1, BLK_PRESSURE_PAD,  TF_NONE  },
+    { 2, 4, 1, BLK_DISPENSER,     TF_PALONG},
+    { 5, 4, 1, BLK_PRESSURE_PAD,  TF_NONE  },
+    { 6, 4, 1, BLK_DISPENSER,     TF_MALONG},
+    { 4, 5, 1, BLK_PRESSURE_PAD,  TF_NONE  },
+    { 4, 6, 1, BLK_DISPENSER,     TF_DOOR  },
+    /* corner torches so the loot is visible */
+    { 1, 1, 1, BLK_TORCH,         TF_NONE  },
+    { 7, 7, 1, BLK_TORCH,         TF_NONE  },
+};
+
+static int temple_resolve_face(int dir, int f) {
+    switch (f) {
+        case TF_DOOR:   return temple_face_to_door(dir);
+        case TF_PALONG: return temple_face_plus_along(dir);
+        case TF_MALONG: return temple_face_minus_along(dir);
+        default:        return -1;
+    }
+}
+/* If local (dx,dz,dy) is a trap cell, set *blk + *face (face = -1 when
+ * none) and return true. */
+static bool temple_trap_at(int dx, int dz, int dy, int dir,
+                           BlockId *out_blk, int *out_face) {
+    for (unsigned i = 0; i < sizeof(k_temple_cells)/sizeof(k_temple_cells[0]); i++) {
+        const TempleCell *c = &k_temple_cells[i];
+        if (c->dy != dy) continue;
+        int tdx, tdz;
+        temple_ad(dir, c->along, c->depth, &tdx, &tdz);
+        if (tdx == dx && tdz == dz) {
+            *out_blk  = (BlockId)c->blk;
+            *out_face = temple_resolve_face(dir, c->face);
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Stepped sandstone pyramid shell: each pair of levels insets by one,
+ * 9×9 base → 3×3 cap over seven courses. */
+static BlockId temple_pyramid_shell(int dx, int dz, int dy) {
+    int inset = (dy - 1) / 2;
+    if (dx >= inset && dx <= 8 - inset && dz >= inset && dz <= 8 - inset)
+        return BLK_SANDSTONE;
+    return BLK_AIR;
+}
+/* Walled keep shell: solid perimeter walls dy 1..4, a roof slab over
+ * the room at dy 3, an open rooftop terrace at dy 4, battlements dy 5. */
+static BlockId temple_ziggurat_shell(int dx, int dz, int dy) {
+    bool perim = (dx == 0 || dx == 8 || dz == 0 || dz == 8);
+    if (dy <= 4) {
+        if (perim)   return BLK_SANDSTONE;   /* walls */
+        if (dy == 3) return BLK_SANDSTONE;   /* roof slab over the room */
+        return BLK_AIR;                      /* dy4 terrace (dy1,2 room handled) */
+    }
+    if (dy == 5 && perim && ((dx + dz) & 1) == 0)
+        return BLK_SANDSTONE;                /* crenellations */
+    return BLK_AIR;
+}
+
+static BlockId hut_block_temple(int dx, int dz, int dy, int dir, bool zig) {
+    BlockId tb; int tf;
+    if (temple_trap_at(dx, dz, dy, dir, &tb, &tf)) return tb;
+    /* Hollow 7×7×2 treasure room; its ceiling is the shell's dy=3 slab. */
+    if (dy <= 2 && dx >= 1 && dx <= 7 && dz >= 1 && dz <= 7) return BLK_AIR;
+    return zig ? temple_ziggurat_shell(dx, dz, dy)
+               : temple_pyramid_shell(dx, dz, dy);
+}
+
 /* Dispatch hut-local cell to the per-type rule. dx, dz are clamped
  * to the type's actual footprint; dy is in [1, hut_top(type)]. */
 static BlockId hut_block_local(int dx, int dz, int dy, int dir, int type) {
@@ -1113,6 +1406,8 @@ static BlockId hut_block_local(int dx, int dz, int dy, int dir, int type) {
         case HUT_TYPE_TOWER:     return hut_block_tower    (dx, dz, dy, dir, W, H);
         case HUT_TYPE_CHURCH:    return hut_block_church   (dx, dz, dy, dir, W, H);
         case HUT_TYPE_CASTLE:    return hut_block_castle   (dx, dz, dy, dir, W, H);
+        case HUT_TYPE_TEMPLE:    return hut_block_temple   (dx, dz, dy, dir, false);
+        case HUT_TYPE_ZIGGURAT:  return hut_block_temple   (dx, dz, dy, dir, true);
     }
     return BLK_AIR;
 }
@@ -1210,8 +1505,8 @@ void craft_gen_column(int wx, int wz, uint32_t seed,
     int wl = CRAFT_WATER_LEVEL;
     /* Reuse the mountain factor already computed above; only the two
      * climate fields are fresh here. */
-    CraftBiome biome = biome_classify(m, temperature_at(wx, wz, seed),
-                                      humidity_at(wx, wz, seed));
+    float t_clim = temperature_at(wx, wz, seed);
+    CraftBiome biome = biome_classify(m, t_clim, humidity_at(wx, wz, seed));
     /* Record the biome for this column so the renderer can tint grass
      * + leaves. Only when the column is inside the resident window. */
     {
@@ -1225,8 +1520,20 @@ void craft_gen_column(int wx, int wz, uint32_t seed,
      * bare stone; deserts are sand all the way; everything else
      * (plains/forest/taiga/swamp) is grass. */
     BlockId surface;
-    if (h <= wl + 1)                          surface = BLK_SAND;   /* shore */
-    else if (biome == CBIOME_MOUNTAINS && h > wl + 18) surface = BLK_STONE;
+    if (h <= wl + 1)                          /* shore */
+        surface = (biome == CBIOME_TAIGA) ? BLK_SNOW   /* snowy beach */
+                                          : BLK_SAND;
+    else if (biome == CBIOME_MOUNTAINS) {
+        /* Altitude-gated snow whose snow LINE drops with temperature:
+         * a cold mountain (t≈0) is snow-capped from ~wl+6 — low enough
+         * to blend into adjacent taiga/tundra snow — while a hot
+         * mountain (t≈1) only caps above ~wl+36. Below the snow line
+         * it's bare rock on the steeper slopes, grass on the flanks. */
+        int snow_line = wl + 6 + (int)(t_clim * 30.0f);
+        if      (h > snow_line) surface = BLK_SNOWY_ROCK;
+        else if (h > wl + 16)   surface = BLK_STONE;
+        else                    surface = BLK_GRASS;
+    }
     else if (biome == CBIOME_DESERT)          surface = BLK_SAND;
     else if (biome == CBIOME_TAIGA)           surface = BLK_SNOW;   /* snowy cap */
     else                                      surface = BLK_GRASS;
@@ -1244,8 +1551,26 @@ void craft_gen_column(int wx, int wz, uint32_t seed,
          * entirely so ore doesn't get assigned to it. y<2 stays
          * solid as a "bedrock" floor. */
         if (y >= 2 && y < cave_top && is_cave(wx, y, wz, seed)) {
-            out[y] = BLK_AIR;
+            /* Deep caverns pool lava; higher caves are open air. */
+            out[y] = (y <= CRAFT_LAVA_LEVEL) ? BLK_LAVA : BLK_AIR;
             continue;
+        }
+        /* Lava pockets — ~4×4×4 magma blobs embedded in solid stone
+         * ABOVE the deep lava line, so lava also turns up higher in the
+         * rock (and far more often inside mountains). They sit sealed in
+         * stone until a cave or the player's digging opens the hollow.
+         * The >>2 quantised hash makes neighbouring cells share a value,
+         * giving coherent blobs rather than single specks. */
+        if (y > CRAFT_LAVA_LEVEL && y < h - 5) {
+            uint32_t pk = hash3(wx >> 2, y >> 2, wz >> 2) ^ (seed * 0x9E3779B9u);
+            uint32_t prate = (m > 0.5f) ? 0xFFu : 0x3FFu;   /* mountains 4× denser */
+            if ((pk & prate) == 0) { out[y] = BLK_LAVA; continue; }
+        }
+        /* Gravel patches — ~2×2×2 blobs in the upper stone, exposed in
+         * cliff faces and cave walls. Mining them sometimes yields flint. */
+        if (y > h - 20) {
+            uint32_t gk = hash3(wx >> 1, y >> 1, wz >> 1) ^ (seed * 0x85EBCA6Bu);
+            if ((gk & 0x3Fu) == 0) { out[y] = BLK_GRAVEL; continue; }
         }
         uint32_t r = hash3(wx, y, wz) ^ (seed * 1370529931u);
         BlockId b = BLK_STONE;
@@ -1259,13 +1584,14 @@ void craft_gen_column(int wx, int wz, uint32_t seed,
         else if ((r & iron_mask) == 0)       b = BLK_IRON_ORE;
         out[y] = b;
     }
+    bool mtn_sub = (biome == CBIOME_MOUNTAINS);
     for (int y = h - 3; y < h; y++) {
-        /* Mountains: stone sub-surface. Deserts: one more sand layer
-         * under the surface, then sandstone (the vanilla band).
-         * Otherwise dirt. */
-        if (m > 0.5f && h > wl + 18) out[y] = BLK_STONE;
-        else if (desert_sub)         out[y] = (y == h - 1) ? BLK_SAND : BLK_SANDSTONE;
-        else                         out[y] = BLK_DIRT;
+        /* Mountains: solid rock right under the surface (so snow/stone
+         * caps sit on rock, not a mud band). Deserts: a sand layer
+         * then sandstone. Otherwise dirt. */
+        if (mtn_sub)         out[y] = BLK_STONE;
+        else if (desert_sub) out[y] = (y == h - 1) ? BLK_SAND : BLK_SANDSTONE;
+        else                 out[y] = BLK_DIRT;
     }
     out[h] = surface;
     /* Above-surface fill — fused single loop so GCC can't lower the
@@ -1274,6 +1600,10 @@ void craft_gen_column(int wx, int wz, uint32_t seed,
     for (int y = h + 1; y < CRAFT_WORLD_Y; y++) {
         out[y] = (y <= wl) ? BLK_WATER : BLK_AIR;
     }
+    /* Tundra freezes over: the topmost water cell becomes a walkable
+     * sheet of ICE, with the water column preserved beneath it. */
+    if (biome == CBIOME_TAIGA && wl < CRAFT_WORLD_Y && out[wl] == BLK_WATER)
+        out[wl] = BLK_ICE;
 
     /* Column-local biome features — single-column so they need no
      * cross-column stamp. Reuse the biome already classified above. */
@@ -1307,7 +1637,9 @@ void craft_gen_column(int wx, int wz, uint32_t seed,
 static int tree_radius(TreeType t) {
     switch (t) {
         case TREE_SWAMP_GIANT: return 7;   /* wide spreading canopy */
+        case TREE_ACACIA:      return 5;   /* slant offset + flat disc */
         case TREE_OAK_LARGE:   return 3;   /* branch tip + leaf ring */
+        case TREE_JUNGLE:      return 2;
         case TREE_PINE:        return 2;
         case TREE_OAK:
         default:               return 2;
@@ -1390,6 +1722,15 @@ static void stamp_region(uint32_t seed, int tlx0, int tlx1,
                         BlockId hb = (BlockId)hut_block_local(hlx, hlz, dy, dir, type);
                         int idx = (y * CRAFT_WORLD_Z + clz) * CRAFT_WORLD_X + clx;
                         craft_world_blocks[idx] = (uint8_t)hb;
+                        /* Bake the facing of temple trap blocks (dispenser
+                         * fire direction, observer watch direction) into
+                         * the orient table so the redstone tick aims them
+                         * correctly. */
+                        if (type == HUT_TYPE_TEMPLE || type == HUT_TYPE_ZIGGURAT) {
+                            BlockId tb; int tf;
+                            if (temple_trap_at(hlx, hlz, dy, dir, &tb, &tf) && tf >= 0)
+                                craft_torches_record_orient(cwx, y, cwz, tf);
+                        }
                     }
                 }
             }
@@ -1434,42 +1775,58 @@ Vec3 craft_gen_spawn(void) {
      * or inside a hut wall and be permanently stuck. */
     int cx = craft_world_origin_x + CRAFT_WORLD_X / 2;
     int cz = craft_world_origin_z + CRAFT_WORLD_Z / 2;
+    /* Two-tier search outward from centre. A candidate must have a
+     * grass/sand top with two clear non-water cells of headroom above
+     * the waterline. We PREFER the closest such spot that also sits in
+     * the middle of one biome (every column within ±BIOME_PAD shares
+     * its biome id) so the player doesn't land on a 4-biome junction.
+     * The first plain valid spot is kept as a fallback if no uniform
+     * spot turns up. */
+    const int BIOME_PAD = 6;
+    int fb_x = -1, fb_y = 0, fb_z = 0;
     for (int radius = 0; radius < CRAFT_WORLD_X / 2; radius++) {
         for (int dz = -radius; dz <= radius; dz++) {
             for (int dx = -radius; dx <= radius; dx++) {
                 int x = cx + dx, z = cz + dz;
-                /* Find topmost grass/sand cell. */
                 int gy = -1;
                 for (int y = CRAFT_WORLD_Y - 2; y > 0; y--) {
                     BlockId blk = craft_world_get(x, y, z);
-                    if (blk == BLK_GRASS || blk == BLK_SAND) {
-                        gy = y;
-                        break;
-                    }
+                    if (blk == BLK_GRASS || blk == BLK_SAND) { gy = y; break; }
                 }
                 if (gy < 0) continue;
-                /* Headroom check — both cells the player will occupy
-                 * must be non-solid AND non-water. craft_block_solid
-                 * lets water count as passable, which would otherwise
-                 * spawn the player on a sand-bottomed underwater
-                 * column or right on a shoreline tile with water at
-                 * head height. */
                 BlockId head1 = craft_world_get(x, gy + 1, z);
                 BlockId head2 = craft_world_get(x, gy + 2, z);
                 if (craft_block_solid(head1) || craft_block_solid(head2)) continue;
                 if (craft_is_water_id((uint8_t)head1) ||
                     craft_is_water_id((uint8_t)head2)) continue;
-                /* Belt-and-braces: require the ground tile itself to
-                 * sit at or above the water surface — even a "dry"
-                 * SAND column at gy=WATER_LEVEL has its top face
-                 * flush with the waterline. */
                 if (gy < CRAFT_WATER_LEVEL + 1) continue;
-                return v3((float)x + 0.5f,
-                          (float)gy + 1.0f + 1.6f,
-                          (float)z + 0.5f);
+                if (fb_x < 0) { fb_x = x; fb_y = gy; fb_z = z; }  /* fallback */
+                /* Biome-uniform neighbourhood check via the per-column
+                 * biome map (this column is inside the window). */
+                int lx = x - craft_world_origin_x;
+                int lz = z - craft_world_origin_z;
+                if ((unsigned)lx >= CRAFT_WORLD_X || (unsigned)lz >= CRAFT_WORLD_Z)
+                    continue;
+                uint8_t b0 = craft_world_biome[lz * CRAFT_WORLD_X + lx];
+                bool uniform = true;
+                for (int pz = -BIOME_PAD; pz <= BIOME_PAD && uniform; pz++) {
+                    for (int px = -BIOME_PAD; px <= BIOME_PAD; px++) {
+                        int nx = lx + px, nz = lz + pz;
+                        if ((unsigned)nx >= CRAFT_WORLD_X ||
+                            (unsigned)nz >= CRAFT_WORLD_Z) continue;
+                        if (craft_world_biome[nz * CRAFT_WORLD_X + nx] != b0) {
+                            uniform = false; break;
+                        }
+                    }
+                }
+                if (uniform)
+                    return v3((float)x + 0.5f, (float)gy + 1.0f + 1.6f,
+                              (float)z + 0.5f);
             }
         }
     }
+    if (fb_x >= 0)
+        return v3((float)fb_x + 0.5f, (float)fb_y + 1.0f + 1.6f, (float)fb_z + 0.5f);
     return v3((float)cx + 0.5f, (float)CRAFT_WATER_LEVEL + 2.0f, (float)cz + 0.5f);
 }
 
@@ -1515,6 +1872,20 @@ void craft_gen_seed_hut_chest(CraftChest *c, int wx, int wy, int wz,
     else if (tier_roll < 205)  tier = 1;
     else if (tier_roll < 243)  tier = 2;
     else                       tier = 3;
+
+    /* Temple chests (desert + jungle) are the landmark payoff for
+     * braving the arrow traps — never below T2, ~40% legendary T3. The
+     * chest sits at the dir-invariant centre (4,4) of a 9×9 temple, so
+     * the origin is (wx-4, wz-4); confirm it's actually a temple there
+     * (not a village) before applying the bias. */
+    if (tier < 2) {
+        int ox = wx - 4, oz = wz - 4;
+        if (hut_origin_at(ox, oz, seed)) {
+            int t = hut_type(ox, oz, seed);
+            if (t == HUT_TYPE_TEMPLE || t == HUT_TYPE_ZIGGURAT)
+                tier = ((r >> 28) & 3) == 0 ? 3 : 2;
+        }
+    }
 
     int slot = 0;
 

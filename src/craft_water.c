@@ -191,6 +191,28 @@ void craft_water_tick(float dt) {
 
                 uint8_t lvl = water_level_of(b);
 
+                /* Water touching lava petrifies it into obsidian — any
+                 * contact (the simple rule). Checked here in the flowing-
+                 * water path, so it fires when the player pours/flows
+                 * water onto a lava cell; natural lava sits far below the
+                 * water table and only reacts once disturbed water reaches
+                 * it. craft_world_set persists the change + drops the
+                 * lava's light. */
+                {
+                    static const int ldx[6] = { 1, -1, 0, 0, 0, 0 };
+                    static const int ldy[6] = { 0, 0, 1, -1, 0, 0 };
+                    static const int ldz[6] = { 0, 0, 0, 0, 1, -1 };
+                    for (int d = 0; d < 6; d++) {
+                        int nlx = lx + ldx[d], nwy = wy + ldy[d], nlz = lz + ldz[d];
+                        if ((unsigned)nlx >= CRAFT_WORLD_X) continue;
+                        if ((unsigned)nlz >= CRAFT_WORLD_Z) continue;
+                        if ((unsigned)nwy >= CRAFT_WORLD_Y) continue;
+                        int nidx = (nwy * CRAFT_WORLD_Z + nlz) * CRAFT_WORLD_X + nlx;
+                        if (craft_world_blocks[nidx] == BLK_LAVA)
+                            craft_world_set(nlx + ox, nwy, nlz + oz, BLK_OBSIDIAN);
+                    }
+                }
+
                 /* --- Fall down --- *
                  * A cell over air drops a flowing L=1 into the cell
                  * below. NOT L=0 — landing as L=0 would create a

@@ -696,6 +696,9 @@ void craft_main_step(const CraftInput *in, float dt, int fps) {
     }
     s_world_time += dt;
     if (s_world_time >= CRAFT_DAY_LENGTH) s_world_time -= CRAFT_DAY_LENGTH;
+    /* Reset the pressed-pad set; the player + mob ticks below re-report
+     * any pads they're standing on this frame. */
+    craft_redstone_pads_clear();
     craft_player_tick(&s_player, in, dt);
     held_swing_tick_after_player(dt);
     craft_world_maybe_shift((int)s_player.cam.pos.x,
@@ -790,6 +793,9 @@ void craft_main_tick(const CraftInput *in, float dt) {
     }
     s_world_time += dt;
     if (s_world_time >= CRAFT_DAY_LENGTH) s_world_time -= CRAFT_DAY_LENGTH;
+    /* Reset the pressed-pad set; the player + mob ticks below re-report
+     * any pads they're standing on this frame. */
+    craft_redstone_pads_clear();
     craft_player_tick(&s_player, in, dt);
     held_swing_tick_after_player(dt);
     craft_world_maybe_shift((int)s_player.cam.pos.x,
