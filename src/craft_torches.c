@@ -173,6 +173,8 @@ void craft_torches_rebuild(void) {
                 else if (b == BLK_REDSTONE_WIRE)     kind = TORCH_KIND_WIRE;
                 else if (b == BLK_REDSTONE_WIRE_ON)  kind = TORCH_KIND_WIRE_ON;
                 else if (b == BLK_LADDER)            kind = TORCH_KIND_LADDER;
+                else if (b == BLK_VINE)              kind = TORCH_KIND_VINE;
+                else if (b == BLK_LILY_PAD)          kind = TORCH_KIND_LILY_PAD;
                 else if (b == BLK_PRESSURE_PAD)      kind = TORCH_KIND_PRESSURE_PAD;
                 else if (b == BLK_DOOR_OFF)          kind = TORCH_KIND_DOOR_CLOSED;
                 else if (b == BLK_DOOR_ON)           kind = TORCH_KIND_DOOR_OPEN;
@@ -195,6 +197,7 @@ void craft_torches_rebuild(void) {
                 t->kind   = kind;
                 t->connect = 0;
                 if (kind == TORCH_KIND_TORCH || kind == TORCH_KIND_LADDER ||
+                    kind == TORCH_KIND_VINE ||
                     kind == TORCH_KIND_DOOR_CLOSED  || kind == TORCH_KIND_DOOR_OPEN ||
                     kind == TORCH_KIND_TRAPDOOR_CLOSED || kind == TORCH_KIND_TRAPDOOR_OPEN ||
                     kind == TORCH_KIND_PISTON_OFF || kind == TORCH_KIND_PISTON_ON ||
@@ -380,6 +383,32 @@ static void pad_parts(TorchCuboid out[2]) {
     out[1].cx = 0.5f; out[1].cy = 0.08f; out[1].cz = 0.5f;
     out[1].hx = 0.45f; out[1].hy = 0.025f; out[1].hz = 0.45f;
     out[1].color = edge;
+}
+
+/* VINE — three thin vertical strands hanging the full height of the
+ * cell. Orient-independent so it reads as a dangling vine both under
+ * a tree canopy and against a wall. */
+static int vine_parts_n(int orient, TorchCuboid *out) {
+    (void)orient;
+    uint16_t v  = rgb565(55, 120, 45);
+    uint16_t vd = rgb565(38, 90, 35);
+    out[0].cx = 0.30f; out[0].cy = 0.5f; out[0].cz = 0.34f;
+    out[0].hx = 0.045f; out[0].hy = 0.5f; out[0].hz = 0.045f; out[0].color = v;
+    out[1].cx = 0.66f; out[1].cy = 0.5f; out[1].cz = 0.58f;
+    out[1].hx = 0.045f; out[1].hy = 0.5f; out[1].hz = 0.045f; out[1].color = vd;
+    out[2].cx = 0.48f; out[2].cy = 0.5f; out[2].cz = 0.70f;
+    out[2].hx = 0.04f; out[2].hy = 0.5f; out[2].hz = 0.04f; out[2].color = v;
+    return 3;
+}
+
+/* LILY PAD — reuse the pressure pad's flat slab, recoloured green and
+ * dropped flush to the water surface. */
+static void lily_parts(TorchCuboid out[2]) {
+    pad_parts(out);
+    out[0].color = rgb565(75, 155, 75);
+    out[1].color = rgb565(45, 110, 45);
+    out[0].cy = 0.02f; out[0].hy = 0.02f;
+    out[1].cy = 0.012f; out[1].hy = 0.012f;
 }
 
 /* Door slab — thin vertical panel spanning the doorway when closed,
@@ -786,6 +815,8 @@ static int torch_parts_full(int kind, int orient, uint8_t connect,
     if (kind == TORCH_KIND_WIRE)              { return wire_parts_n(false, connect, out); }
     if (kind == TORCH_KIND_WIRE_ON)           { return wire_parts_n(true,  connect, out); }
     if (kind == TORCH_KIND_LADDER)            { return ladder_parts_n(orient, out); }
+    if (kind == TORCH_KIND_VINE)              { return vine_parts_n(orient, out); }
+    if (kind == TORCH_KIND_LILY_PAD)          { lily_parts(out); return 2; }
     if (kind == TORCH_KIND_PRESSURE_PAD)      { pad_parts(out); return 2; }
     if (kind == TORCH_KIND_DOOR_CLOSED)       { return door_parts_n(false, orient, out); }
     if (kind == TORCH_KIND_DOOR_OPEN)         { return door_parts_n(true,  orient, out); }
@@ -1107,6 +1138,8 @@ int craft_torches_block_model(uint8_t b, int orient,
     int kind;
     switch (b) {
         case BLK_LADDER:           kind = TORCH_KIND_LADDER; break;
+        case BLK_VINE:             kind = TORCH_KIND_VINE; break;
+        case BLK_LILY_PAD:         kind = TORCH_KIND_LILY_PAD; break;
         case BLK_REDSTONE_WIRE:    kind = TORCH_KIND_WIRE; break;
         case BLK_REDSTONE_WIRE_ON: kind = TORCH_KIND_WIRE_ON; break;
         case BLK_PRESSURE_PAD:     kind = TORCH_KIND_PRESSURE_PAD; break;

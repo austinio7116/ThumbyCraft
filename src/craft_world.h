@@ -42,6 +42,12 @@ extern uint8_t craft_world_lightmap[CRAFT_LIGHTMAP_BYTES];
  * column's contents change. */
 extern uint8_t craft_world_skyheight[CRAFT_WORLD_X * CRAFT_WORLD_Z];
 
+/* Per-column biome id (CraftBiome, 0..5), written by craft_gen_column
+ * as the window fills. The renderer reads it to tint grass and leaf
+ * faces per biome (swamp murky, taiga cold, etc.). Local-indexed like
+ * the skyheight map. */
+extern uint8_t craft_world_biome[CRAFT_WORLD_X * CRAFT_WORLD_Z];
+
 static inline bool craft_world_sky_exposed(int wx, int wy, int wz) {
     int lx = wx - craft_world_origin_x;
     int lz = wz - craft_world_origin_z;

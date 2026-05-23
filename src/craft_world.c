@@ -29,6 +29,7 @@ int      craft_world_origin_x;
 int      craft_world_origin_z;
 uint8_t  craft_world_lightmap[CRAFT_LIGHTMAP_BYTES];
 uint8_t  craft_world_skyheight[CRAFT_WORLD_X * CRAFT_WORLD_Z];
+uint8_t  craft_world_biome[CRAFT_WORLD_X * CRAFT_WORLD_Z];
 
 #define CRAFT_SHIFT      16    /* slide step in world units */
 #define CRAFT_EDGE_MARGIN 16   /* shift triggers within this many cells of edge */
@@ -351,6 +352,7 @@ static inline bool light_transparent(BlockId b) {
     if (b == BLK_PISTON_OFF    || b == BLK_PISTON_ON ||
         b == BLK_STICKY_PISTON_OFF || b == BLK_STICKY_PISTON_ON ||
         b == BLK_PISTON_ARM) return true;
+    if (b == BLK_VINE || b == BLK_LILY_PAD) return true;
     return false;
 }
 
@@ -431,6 +433,7 @@ static inline bool blocks_sky(BlockId b) {
     if (b == BLK_PISTON_OFF    || b == BLK_PISTON_ON ||
         b == BLK_STICKY_PISTON_OFF || b == BLK_STICKY_PISTON_ON ||
         b == BLK_PISTON_ARM) return false;
+    if (b == BLK_VINE || b == BLK_LILY_PAD) return false;
     return true;
 }
 
@@ -602,6 +605,8 @@ void craft_world_set(int wx, int wy, int wz, BlockId blk) {
                           (b) == BLK_PISTON_ON        ||     \
                           (b) == BLK_STICKY_PISTON_OFF ||    \
                           (b) == BLK_STICKY_PISTON_ON ||     \
+                          (b) == BLK_VINE             ||     \
+                          (b) == BLK_LILY_PAD         ||     \
                           (b) == BLK_TNT              ||     \
                           (b) == BLK_TNT_FUSED        ||     \
                           (b) == BLK_REDSTONE_BLOCK)
@@ -758,6 +763,13 @@ static void shift_x(int dx, uint32_t seed) {
             }
         }
     }
+    /* Slide the per-column biome map in lockstep (one Z-row of X bytes
+     * each) — the new strip's entries are rewritten by regen below. */
+    for (int lz = 0; lz < CRAFT_WORLD_Z; lz++) {
+        uint8_t *brow = &craft_world_biome[lz * CRAFT_WORLD_X];
+        if (dx > 0) memmove(brow, brow + dx, CRAFT_WORLD_X - dx);
+        else        memmove(brow + (-dx), brow, CRAFT_WORLD_X + dx);
+    }
     craft_world_origin_x += dx;
     /* Height cache anchors on origin — drop and re-anchor before
      * any regen so the lazy fill writes against the new window. */
@@ -792,6 +804,16 @@ static void shift_z(int dz, uint32_t seed) {
                     layer,
                     (CRAFT_WORLD_Z + dz) * row_bytes);
         }
+    }
+    /* Slide the per-column biome map in Z (whole rows of X bytes). */
+    if (dz > 0) {
+        memmove(craft_world_biome,
+                craft_world_biome + dz * CRAFT_WORLD_X,
+                (size_t)(CRAFT_WORLD_Z - dz) * CRAFT_WORLD_X);
+    } else {
+        memmove(craft_world_biome + (-dz) * CRAFT_WORLD_X,
+                craft_world_biome,
+                (size_t)(CRAFT_WORLD_Z + dz) * CRAFT_WORLD_X);
     }
     craft_world_origin_z += dz;
     /* Re-anchor the height cache to the new origin before regen. */

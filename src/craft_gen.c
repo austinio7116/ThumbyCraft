@@ -109,6 +109,58 @@ static float flatland_factor(int x, int z, uint32_t seed) {
     return (n - 0.55f) / 0.23f;
 }
 
+/* --- Climate model (temperature × humidity) ---------------------- *
+ * Beta-1.8-style biome assignment: two independent low-frequency
+ * noise fields (regions ~150 cells wide) pick the lowland biome via
+ * a small lookup. Mountain noise (mountain_factor) overrides to the
+ * Extreme-Hills equivalent where elevation is high. Used for surface
+ * blocks, tree selection, and swamp terrain lowering. */
+typedef enum {
+    CBIOME_PLAINS = 0,
+    CBIOME_FOREST,
+    CBIOME_DESERT,
+    CBIOME_TAIGA,        /* cold conifer forest */
+    CBIOME_SWAMP,        /* warm, very wet, low + flat, giant trees */
+    CBIOME_MOUNTAINS,    /* extreme hills */
+} CraftBiome;
+
+static float temperature_at(int x, int z, uint32_t seed) {
+    return fbm((float)x * 0.0062f, (float)z * 0.0062f, seed ^ 0x713D17E5u);
+}
+static float humidity_at(int x, int z, uint32_t seed) {
+    return fbm((float)x * 0.0062f, (float)z * 0.0062f, seed ^ 0x4D015700u);
+}
+
+/* Swamp-ness in [0,1] — high where it's warm AND very humid. Pulled
+ * out of the classifier because height_at needs it (swamps sit flat
+ * at water level) without paying for the full biome decision. */
+static float swamp_factor(int x, int z, uint32_t seed) {
+    float t = temperature_at(x, z, seed);
+    float hu = humidity_at(x, z, seed);
+    if (t < 0.38f) return 0.0f;            /* too cold → taiga, not swamp */
+    if (hu < 0.62f) return 0.0f;
+    float s = (hu - 0.62f) / 0.18f;
+    return s > 1.0f ? 1.0f : s;
+}
+
+/* Pure classifier from precomputed factors — lets callers that
+ * already have the mountain factor (craft_gen_column) avoid a
+ * redundant noise eval. */
+static CraftBiome biome_classify(float m, float t, float hu) {
+    if (m > 0.5f)                  return CBIOME_MOUNTAINS; /* elevation wins */
+    if (t < 0.38f)                 return CBIOME_TAIGA;     /* cold */
+    if (hu > 0.62f)                return CBIOME_SWAMP;     /* warm + wet */
+    if (t > 0.66f && hu < 0.40f)   return CBIOME_DESERT;    /* hot + dry */
+    if (hu > 0.48f)                return CBIOME_FOREST;    /* temperate + moist */
+    return CBIOME_PLAINS;
+}
+
+static CraftBiome craft_biome_at(int x, int z, uint32_t seed) {
+    return biome_classify(mountain_factor(x, z, seed),
+                          temperature_at(x, z, seed),
+                          humidity_at(x, z, seed));
+}
+
 /* River shape is inlined in height_at — see below. The two
  * concentric zones (channel + bank slope) share the same noise
  * sample, so it's cheaper to compute it once in-place. */
@@ -136,6 +188,20 @@ static int height_at(int x, int z, uint32_t seed) {
      * shouldn't co-exist; biome decides which is which). */
     float m = mountain_factor(x, z, seed) * (1.0f - f);
     height += (int)(m * 22.0f);
+
+    /* Swamps sit flat and low — pull warm, very-humid lowland columns
+     * down toward water level so they read as wetland, not hills.
+     * Gated on m (<0.2) so mountains aren't drowned. */
+    if (m < 0.2f) {
+        float sw = swamp_factor(x, z, seed);
+        if (sw > 0.0f) {
+            int target = CRAFT_WATER_LEVEL - 1;
+            if (height > target) {
+                float keep = 1.0f - sw * 0.9f;
+                height = target + (int)((float)(height - target) * keep + 0.5f);
+            }
+        }
+    }
 
     /* River carving + BANK SLOPE.
      *
@@ -243,7 +309,24 @@ static bool is_cave(int x, int y, int z, uint32_t seed) {
  * dominated by tree-neighbour scans into background noise. */
 static bool tree_at(int x, int z, uint32_t seed) {
     uint32_t r = hash3(x, z, seed ^ 0xA1B2C3D4u);
-    if ((r & 0x7F) != 0) return false;
+    /* Cheap pre-gate at the DENSEST biome rate (forest, ~1/32) so the
+     * per-biome decision below only runs for the few survivors — the
+     * climate noise stays out of the hot reject path. Every per-biome
+     * mask is a superset of these low bits, so the gate never drops a
+     * column a denser biome would have kept. */
+    if ((r & 0x1F) != 0) return false;
+    CraftBiome b = craft_biome_at(x, z, seed);
+    uint32_t mask;
+    switch (b) {
+        case CBIOME_DESERT:    return false;     /* no trees (cacti TBD) */
+        case CBIOME_FOREST:    mask = 0x1F; break;  /* ~1/32 — dense */
+        case CBIOME_TAIGA:     mask = 0x3F; break;  /* ~1/64 */
+        case CBIOME_MOUNTAINS: mask = 0x7F; break;  /* ~1/128 — sparse pine */
+        case CBIOME_SWAMP:     mask = 0x1FF; break; /* ~1/512 — giants are huge */
+        case CBIOME_PLAINS:
+        default:               mask = 0xFF; break;  /* ~1/256 — sparse */
+    }
+    if ((r & mask) != 0) return false;
     int h = height_at(x, z, seed);
     return h > CRAFT_WATER_LEVEL + 1;
 }
@@ -255,17 +338,19 @@ typedef enum {
     TREE_SWAMP_GIANT,    /* Swamp signature — 2×2 trunk, broad drooping canopy */
 } TreeType;
 
-/* Pick a tree shape per position deterministically. Mountain biome
- * is all pine; grassland is mostly standard oak with occasional
- * large oaks for variety. */
+/* Pick a tree shape per position deterministically, by biome:
+ *   Mountains / Taiga → pine
+ *   Swamp             → giant swamp tree
+ *   Forest            → oak, ~⅓ large oak (lusher)
+ *   Plains / other    → oak, ~¼ large oak */
 static TreeType tree_type_at(int x, int z, uint32_t seed) {
-    float m = mountain_factor(x, z, seed);
-    if (m > 0.4f) return TREE_PINE;
+    CraftBiome b = craft_biome_at(x, z, seed);
+    if (b == CBIOME_MOUNTAINS || b == CBIOME_TAIGA) return TREE_PINE;
+    if (b == CBIOME_SWAMP) return TREE_SWAMP_GIANT;
     uint32_t r = hash3(x, z, seed ^ 0x7E47A1B5u);
     int roll = (int)((r >> 3) & 0xFF);
-    /* Grassland: ~75% standard oak, ~25% large oak. */
-    if (roll < 192) return TREE_OAK;
-    return TREE_OAK_LARGE;
+    int large_cut = (b == CBIOME_FOREST) ? 170 : 192;   /* lower = more big oaks */
+    return (roll < large_cut) ? TREE_OAK : TREE_OAK_LARGE;
 }
 
 /* Per-tree variant byte — used to rotate branch directions and so on.
@@ -443,30 +528,60 @@ static BlockId tree_block_pine(int dx, int dz, int y, int trunk_base) {
  * there's no sqrt in the hot path. */
 static BlockId tree_block_swamp_giant(int variant, int dx, int dz,
                                       int y, int trunk_base) {
-    (void)variant;
     int trunk_y = trunk_base + 1;
-    int top = trunk_y + 10;            /* 11-tall 2×2 trunk */
+    int top = trunk_y + 17;            /* 18-tall 2×2 trunk — towering */
     bool in_trunk_xz = (dx == 0 || dx == 1) && (dz == 0 || dz == 1);
     if (in_trunk_xz && y >= trunk_y && y <= top) return BLK_WOOD;
+
+    /* Two LEAFY limbs on opposite sides (variant-chosen axis), set LOW
+     * on the trunk and staggered in height so they read as distinct
+     * branches well below the crown — each a 3-cell arm that rises one
+     * cell, tipped with a small leaf cluster. */
+    int axis = variant & 1;
+    for (int s = 0; s < 2; s++) {
+        int sgn = s ? -1 : 1;
+        int by  = trunk_y + (s ? 11 : 8);
+        int ax  = axis ? 0 : sgn;
+        int az  = axis ? sgn : 0;
+        for (int r = 1; r <= 3; r++) {
+            int wy = by + (r >= 2 ? 1 : 0);   /* arm lifts after 1 cell */
+            if (y == wy && dx == ax * r && dz == az * r) return BLK_WOOD;
+        }
+        /* Leaf cluster around the tip (offset 3, one cell up). */
+        int ldx = dx - ax * 3, ldz = dz - az * 3, ldy = y - (by + 1);
+        if (ldy >= -1 && ldy <= 1) {
+            int reach = (ldy == 0) ? 2 : 1;
+            if (abs_i(ldx) + abs_i(ldz) <= reach) return BLK_LEAVES;
+        }
+    }
 
     /* Distance² from the trunk centre at (0.5, 0.5). */
     float cx = (float)dx - 0.5f, cz = (float)dz - 0.5f;
     float rad2 = cx * cx + cz * cz;
     int ady = y - top;
 
-    /* Three broad, flattish crown layers. Widest just below the top,
-     * tapering to a smaller cap. */
-    if (ady >= -1 && ady <= 1) {
-        float maxr = (ady == 1) ? 3.0f : (ady == 0 ? 5.5f : 6.7f);
-        if (rad2 <= maxr * maxr) {
-            if (!(in_trunk_xz && ady <= 0)) return BLK_LEAVES;
-        }
+    /* Thin UMBRELLA crown — a wide flat disc with a small domed cap
+     * and a 1-cell underside lip at the rim. Bold silhouette, not a
+     * leaf blob. */
+    if (ady == 1) {                       /* small domed cap */
+        if (rad2 <= 3.5f * 3.5f) return BLK_LEAVES;
     }
-    /* Drooping rim — sparse leaf columns hanging 2-4 cells below the
-     * widest layer's perimeter, the swampy "vine" look. */
-    if (ady >= -4 && ady < -1) {
-        if (rad2 >= 5.0f * 5.0f && rad2 <= 6.7f * 6.7f) {
-            if (((dx * 7 + dz * 13) & 3) == 0) return BLK_LEAVES;
+    if (ady == 0) {                       /* the wide flat canopy */
+        if (rad2 <= 6.9f * 6.9f && !in_trunk_xz) return BLK_LEAVES;
+    }
+    if (ady == -1) {                      /* underside lip — edge only */
+        if (rad2 >= 4.0f * 4.0f && rad2 <= 6.9f * 6.9f) return BLK_LEAVES;
+    }
+    /* Hanging VINES — real vine sprites dangling from the rim, each a
+     * 2-4 cell run below the underside lip. Distinct from the leaves
+     * so the swamp's tendrils read as vines, not foliage. */
+    if (ady <= -2 && ady >= -6) {
+        if (rad2 >= 4.5f * 4.5f && rad2 <= 6.9f * 6.9f) {
+            int key = dx * 7 + dz * 13;
+            if ((key & 3) == 0) {
+                int hang = 2 + ((key >> 2) & 1) + ((dx ^ dz) & 1);  /* 2-4 */
+                if ((-ady - 1) <= hang) return BLK_VINE;
+            }
         }
     }
     return BLK_AIR;
@@ -1093,12 +1208,29 @@ void craft_gen_column(int wx, int wz, uint32_t seed,
 
     /* Terrain pass — stone (or coal ore) / dirt / surface / water / air. */
     int wl = CRAFT_WATER_LEVEL;
-    /* Mountain peaks: surface is stone rather than grass once we're
-     * well above tree line. */
+    /* Reuse the mountain factor already computed above; only the two
+     * climate fields are fresh here. */
+    CraftBiome biome = biome_classify(m, temperature_at(wx, wz, seed),
+                                      humidity_at(wx, wz, seed));
+    /* Record the biome for this column so the renderer can tint grass
+     * + leaves. Only when the column is inside the resident window. */
+    {
+        int blx = wx - craft_world_origin_x;
+        int blz = wz - craft_world_origin_z;
+        if ((unsigned)blx < CRAFT_WORLD_X && (unsigned)blz < CRAFT_WORLD_Z)
+            craft_world_biome[blz * CRAFT_WORLD_X + blx] = (uint8_t)biome;
+    }
+    /* Surface block by biome. Shorelines (h ≤ wl+1) are always sand
+     * regardless of biome; mountain peaks above the tree line are
+     * bare stone; deserts are sand all the way; everything else
+     * (plains/forest/taiga/swamp) is grass. */
     BlockId surface;
-    if (h <= wl + 1)                    surface = BLK_SAND;
-    else if (m > 0.5f && h > wl + 18)   surface = BLK_STONE;
-    else                                surface = BLK_GRASS;
+    if (h <= wl + 1)                          surface = BLK_SAND;   /* shore */
+    else if (biome == CBIOME_MOUNTAINS && h > wl + 18) surface = BLK_STONE;
+    else if (biome == CBIOME_DESERT)          surface = BLK_SAND;
+    else if (biome == CBIOME_TAIGA)           surface = BLK_SNOW;   /* snowy cap */
+    else                                      surface = BLK_GRASS;
+    bool desert_sub = (biome == CBIOME_DESERT);
     /* Cave depth floor — caves only carve below (h - 8) so the top
      * 5 cells under any surface stay solid. Without this, hill
      * columns next to rivers expose 3-4 cells of cave mouths in
@@ -1128,8 +1260,12 @@ void craft_gen_column(int wx, int wz, uint32_t seed,
         out[y] = b;
     }
     for (int y = h - 3; y < h; y++) {
-        /* Mountains: replace dirt sub-surface with stone too. */
-        out[y] = (m > 0.5f && h > wl + 18) ? BLK_STONE : BLK_DIRT;
+        /* Mountains: stone sub-surface. Deserts: one more sand layer
+         * under the surface, then sandstone (the vanilla band).
+         * Otherwise dirt. */
+        if (m > 0.5f && h > wl + 18) out[y] = BLK_STONE;
+        else if (desert_sub)         out[y] = (y == h - 1) ? BLK_SAND : BLK_SANDSTONE;
+        else                         out[y] = BLK_DIRT;
     }
     out[h] = surface;
     /* Above-surface fill — fused single loop so GCC can't lower the
@@ -1137,6 +1273,24 @@ void craft_gen_column(int wx, int wz, uint32_t seed,
      * (h > wl) underflows to a huge unsigned and smashes the stack. */
     for (int y = h + 1; y < CRAFT_WORLD_Y; y++) {
         out[y] = (y <= wl) ? BLK_WATER : BLK_AIR;
+    }
+
+    /* Column-local biome features — single-column so they need no
+     * cross-column stamp. Reuse the biome already classified above. */
+    if (biome == CBIOME_DESERT && h > wl + 1) {
+        /* Cactus — sparse 1-3 tall column on the sand. */
+        uint32_t cr = hash3(wx, wz, seed ^ 0x0CAC7005u);
+        if ((cr & 0x3F) == 0) {                 /* ~1/64 desert columns */
+            int ch = 1 + (int)((cr >> 8) % 3);
+            for (int c = 1; c <= ch && h + c < CRAFT_WORLD_Y; c++)
+                out[h + c] = BLK_CACTUS;
+        }
+    } else if (biome == CBIOME_SWAMP && h < wl) {
+        /* Lily pad — flat sprite on the water surface (cell above the
+         * topmost water cell at wl). */
+        uint32_t lr = hash3(wx, wz, seed ^ 0x11A9AD05u);
+        if ((lr & 0x7) == 0 && wl + 1 < CRAFT_WORLD_Y && out[wl + 1] == BLK_AIR)
+            out[wl + 1] = BLK_LILY_PAD;
     }
 
     /* Trees and huts are NOT stamped per-column any more — they're

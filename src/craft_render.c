@@ -184,6 +184,31 @@ INLINE_HOT uint16_t shade(uint16_t c, int m) {
     return (uint16_t)((r << 11) | (g << 5) | b);
 }
 
+/* Biome tint targets for grass + leaves, indexed by CraftBiome
+ * (0 plains, 1 forest, 2 desert, 3 taiga, 4 swamp, 5 mountains).
+ * Grass-top and leaf texels blend toward these so each biome reads
+ * distinctly without re-baking the atlas. Desert slot is unused
+ * (no grass/leaves there). */
+#define RGB565C(r,g,b) (uint16_t)((((r)>>3)<<11)|(((g)>>2)<<5)|((b)>>3))
+static const uint16_t s_biome_tint[6] = {
+    RGB565C(130, 190,  80),   /* plains    — bright grass        */
+    RGB565C( 85, 160,  70),   /* forest    — deep green          */
+    RGB565C(190, 180, 120),   /* desert    — (unused)            */
+    RGB565C(120, 158, 128),   /* taiga     — cold blue-green     */
+    RGB565C( 95, 108,  55),   /* swamp     — murky olive         */
+    RGB565C(120, 150, 115),   /* mountains — grey-green          */
+};
+#define BIOME_TINT_T 110       /* ~43% blend toward the target */
+
+INLINE_HOT uint16_t biome_tint(uint16_t c, uint16_t tgt) {
+    int r1 = (c   >> 11) & 0x1F, g1 = (c   >> 5) & 0x3F, b1 = c   & 0x1F;
+    int r2 = (tgt >> 11) & 0x1F, g2 = (tgt >> 5) & 0x3F, b2 = tgt & 0x1F;
+    int rr = r1 + ((r2 - r1) * BIOME_TINT_T >> 8);
+    int gg = g1 + ((g2 - g1) * BIOME_TINT_T >> 8);
+    int bb = b1 + ((b2 - b1) * BIOME_TINT_T >> 8);
+    return (uint16_t)((rr << 11) | (gg << 5) | bb);
+}
+
 /* Base per-face shading. Final value = (face_shade * brightness) >> 8
  * so the world dims smoothly with the day/night cycle. */
 static const uint16_t face_shade[6] = {
@@ -654,6 +679,19 @@ void craft_render_strip(const CraftCamera *cam, uint16_t *fb,
                     if (tu < 0) tu = 0; else if (tu >= CRAFT_TEX_SIZE) tu = CRAFT_TEX_SIZE - 1;
                     if (tv < 0) tv = 0; else if (tv >= CRAFT_TEX_SIZE) tv = CRAFT_TEX_SIZE - 1;
                     c = tex[tv * CRAFT_TEX_SIZE + tu];
+                }
+                /* Biome tint — grass tops and all leaf faces blend
+                 * toward the column's biome colour (swamp murky,
+                 * taiga cold, etc.). Grass sides stay dirt-coloured. */
+                if (h.blk == BLK_LEAVES ||
+                    (h.blk == BLK_GRASS && h.face == FACE_PY)) {
+                    int blx = h.fx - craft_world_origin_x;
+                    int blz = h.fz - craft_world_origin_z;
+                    if ((unsigned)blx < CRAFT_WORLD_X &&
+                        (unsigned)blz < CRAFT_WORLD_Z) {
+                        c = biome_tint(c, s_biome_tint[
+                            craft_world_biome[blz * CRAFT_WORLD_X + blx]]);
+                    }
                 }
                 /* Sky vs cave brightness, with torch overlay.
                  *  - Air cell adjacent to face is sky-exposed → use

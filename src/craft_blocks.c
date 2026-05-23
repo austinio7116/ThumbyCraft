@@ -147,6 +147,11 @@ const char *craft_block_name(BlockId blk) {
         case BLK_TARGET_ON:     return "target";
         case BLK_SLIME_BLOCK:   return "slime block";
         case BLK_SLIMEBALL:     return "slimeball";
+        case BLK_SNOW:          return "snow";
+        case BLK_SANDSTONE:     return "sandstone";
+        case BLK_CACTUS:        return "cactus";
+        case BLK_VINE:          return "vine";
+        case BLK_LILY_PAD:      return "lily pad";
         case BLK_WATER_L1:
         case BLK_WATER_L2:
         case BLK_WATER_L3:
@@ -1328,6 +1333,64 @@ void craft_blocks_build_textures(void) {
                t, sizeof(uint16_t) * CRAFT_TEX_PIXELS);
         memcpy(&craft_textures[(BLK_SLIMEBALL * 3 + 2) * CRAFT_TEX_PIXELS],
                t, sizeof(uint16_t) * CRAFT_TEX_PIXELS);
+    }
+
+    /* SNOW — near-white speckle top; sides are a snow cap over a thin
+     * dirt band so the layer reads at the surface. */
+    {
+        uint16_t *top = &craft_textures[(BLK_SNOW * 3 + 0) * CRAFT_TEX_PIXELS];
+        speckle(top, 0x5009u, 235, 240, 250, 12);
+        uint16_t *side = &craft_textures[(BLK_SNOW * 3 + 1) * CRAFT_TEX_PIXELS];
+        speckle(side, 0x5102, 120, 90, 70, 18);   /* dirt base */
+        for (int y = 0; y < 5; y++)               /* snow cap on top rows */
+            for (int x = 0; x < CRAFT_TEX_SIZE; x++)
+                side[y * CRAFT_TEX_SIZE + x] = rgb565(235, 240, 250);
+        memcpy(&craft_textures[(BLK_SNOW * 3 + 2) * CRAFT_TEX_PIXELS],
+               &craft_textures[(BLK_DIRT * 3 + 1) * CRAFT_TEX_PIXELS],
+               sizeof(uint16_t) * CRAFT_TEX_PIXELS);   /* dirt bottom */
+    }
+
+    /* SANDSTONE — tan with faint horizontal banding. */
+    for (int f = 0; f < 3; f++) {
+        uint16_t *t = &craft_textures[(BLK_SANDSTONE * 3 + f) * CRAFT_TEX_PIXELS];
+        speckle(t, 0x5A5Du + f, 210, 195, 150, 14);
+        for (int y = 0; y < CRAFT_TEX_SIZE; y += 5)
+            for (int x = 0; x < CRAFT_TEX_SIZE; x++)
+                t[y * CRAFT_TEX_SIZE + x] = rgb565(185, 170, 128);
+    }
+
+    /* CACTUS — green with darker vertical ribs and a notched top. */
+    for (int f = 0; f < 3; f++) {
+        uint16_t *t = &craft_textures[(BLK_CACTUS * 3 + f) * CRAFT_TEX_PIXELS];
+        speckle(t, 0xCAC0u + f, 60, 130, 60, 16);
+        if (f == 1) {                              /* side ribs */
+            for (int x = 3; x < CRAFT_TEX_SIZE; x += 5)
+                for (int y = 0; y < CRAFT_TEX_SIZE; y++)
+                    t[y * CRAFT_TEX_SIZE + x] = rgb565(35, 90, 40);
+        }
+    }
+
+    /* VINE — green strands on a magenta-transparent field (drawn as a
+     * sprite, but a cube texture is the held-item / fallback icon). */
+    for (int f = 0; f < 3; f++) {
+        uint16_t *t = &craft_textures[(BLK_VINE * 3 + f) * CRAFT_TEX_PIXELS];
+        fill_solid(t, 0xF81F);
+        for (int x = 1; x < CRAFT_TEX_SIZE; x += 4)
+            for (int y = 0; y < CRAFT_TEX_SIZE; y++)
+                if (((x * 3 + y) & 7) != 0)
+                    t[y * CRAFT_TEX_SIZE + x] = rgb565(55, 120, 45);
+    }
+
+    /* LILY PAD — flat green disc with a notch, magenta elsewhere. */
+    for (int f = 0; f < 3; f++) {
+        uint16_t *t = &craft_textures[(BLK_LILY_PAD * 3 + f) * CRAFT_TEX_PIXELS];
+        fill_solid(t, 0xF81F);
+        for (int y = 0; y < CRAFT_TEX_SIZE; y++)
+            for (int x = 0; x < CRAFT_TEX_SIZE; x++) {
+                int dx = x - 8, dy = y - 8;
+                if (dx*dx + dy*dy <= 42 && !(dx > 0 && dy > 0 && dx + dy > 6))
+                    t[y * CRAFT_TEX_SIZE + x] = rgb565(70, 150, 70);
+            }
     }
 }
 #endif /* CRAFT_TEXTURES_BAKED */

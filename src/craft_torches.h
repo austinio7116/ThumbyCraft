@@ -40,6 +40,8 @@ typedef enum {
     TORCH_KIND_PISTON_ARM  = 11,  /* shaft continuation + head, extended */
     TORCH_KIND_LEVER_OFF   = 12,  /* base plate + tilted handle */
     TORCH_KIND_LEVER_ON    = 13,
+    TORCH_KIND_VINE        = 14,  /* green hanging strands (ladder-like) */
+    TORCH_KIND_LILY_PAD    = 15,  /* flat green disc on the water surface */
 } TorchKind;
 
 typedef struct {

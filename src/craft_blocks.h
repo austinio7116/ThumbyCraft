@@ -137,6 +137,15 @@ typedef enum {
      * and is crafted from a plain piston + a slimeball. */
     BLK_STICKY_PISTON_OFF = 82,
     BLK_STICKY_PISTON_ON  = 83,
+    /* --- Biome blocks (save v10) ----------------------------------- *
+     * Surface/feature blocks for the first-wave biomes: snow caps the
+     * taiga, sandstone + cactus flesh out the desert, lily pads dress
+     * swamp water, and vines hang from swamp trees / climbable walls. */
+    BLK_SNOW            = 84,   /* snowy surface — taiga / tundra */
+    BLK_SANDSTONE       = 85,   /* desert sub-surface */
+    BLK_CACTUS          = 86,   /* desert plant */
+    BLK_VINE            = 87,   /* hanging / climbable sprite */
+    BLK_LILY_PAD        = 88,   /* flat pad on swamp water */
     BLK_COUNT
 } BlockId;
 
@@ -225,6 +234,9 @@ static inline bool craft_block_opaque(BlockId blk) {
     /* Levers render as a 3D mounted switch via the sprite system,
      * not as a full-cell cube. */
     if (blk == BLK_LEVER_OFF || blk == BLK_LEVER_ON) return false;
+    /* Vines + lily pads are thin sprites — non-opaque so the
+     * raycaster passes through and the sprite pass draws them. */
+    if (blk == BLK_VINE || blk == BLK_LILY_PAD) return false;
     return blk != BLK_AIR && !craft_is_water_id((uint8_t)blk) && blk != BLK_GLASS;
 }
 
@@ -256,6 +268,10 @@ static inline bool craft_block_solid(BlockId blk) {
     if (blk == BLK_DISPENSER || blk == BLK_DISPENSER_ON ||
         blk == BLK_TARGET     || blk == BLK_TARGET_ON    ||
         blk == BLK_SLIME_BLOCK) return true;
+    /* Biome blocks: snow/sandstone/cactus are solid cubes. Vine and
+     * lily pad are pass-through sprites (handled by the >=STICK
+     * default below — they're not solid). */
+    if (blk == BLK_SNOW || blk == BLK_SANDSTONE || blk == BLK_CACTUS) return true;
     if (blk >= BLK_SILVER_ORE && blk <= BLK_REDSTONE_ORE)   return true;
     if (blk >= BLK_SILVER_BLOCK && blk <= BLK_REDSTONE_BLOCK) return true;
     if (blk >= BLK_STICK) return false;   /* inventory items */
@@ -280,6 +296,8 @@ static inline bool craft_block_placeable(BlockId blk) {
         blk == BLK_NOT_GATE || blk == BLK_DELAY) return true;
     if (blk == BLK_DISPENSER || blk == BLK_TARGET ||
         blk == BLK_SLIME_BLOCK) return true;
+    if (blk == BLK_SNOW || blk == BLK_SANDSTONE || blk == BLK_CACTUS ||
+        blk == BLK_VINE || blk == BLK_LILY_PAD) return true;
     if (blk >= BLK_SILVER_ORE && blk <= BLK_REDSTONE_ORE)   return true;
     if (blk >= BLK_SILVER_BLOCK && blk <= BLK_REDSTONE_BLOCK) return true;
     if (blk >= BLK_STICK) return false;
