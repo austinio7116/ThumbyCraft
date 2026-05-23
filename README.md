@@ -81,8 +81,7 @@ moment you open the door — guarding high-tier loot.
 (emit when arrow-struck), observers, note blocks, lamps, NOT-gates and
 repeaters; slime blocks (bounce) crafted from slimeball drops; the
 piston split into regular + sticky. **Mobs now trigger pressure pads**,
-and pads seed wire networks. Plus a redstone perf fix so idle
-dispensers no longer cost any framerate.
+and pads seed wire networks.
 
 > ℹ️ **Saves carry over.** The save format dual-reads every version
 > back to v5, so existing worlds load — new terrain (biomes, lava,
