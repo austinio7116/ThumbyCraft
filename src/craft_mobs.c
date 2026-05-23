@@ -366,12 +366,13 @@ static void mob_die_with_loot(CraftMob *m) {
         if (((unsigned)((uintptr_t)m >> 4) & 1) == 0) {
             craft_drops_spawn(BLK_ARROW, (Vec3){ p.x, p.y, p.z + 0.15f });
         }
-    } else if (m->type == MOB_SLIME || m->type == MOB_SPIDER ||
-               m->type == MOB_CREEPER) {
-        /* Debug: every hostile mob drops a bow + 2 arrows so the user
-         * can verify the drops pipeline end-to-end without relying on
-         * the harder-to-melee skeleton. Tier-2 loot pass will scope
-         * this back to per-mob recipes (slime ball, spider eye, etc). */
+    } else if (m->type == MOB_SLIME) {
+        /* Slimes drop 2 slimeballs — 4 craft a slime block. */
+        craft_drops_spawn(BLK_SLIMEBALL, (Vec3){ p.x + 0.15f, p.y, p.z });
+        craft_drops_spawn(BLK_SLIMEBALL, (Vec3){ p.x - 0.15f, p.y, p.z });
+    } else if (m->type == MOB_SPIDER || m->type == MOB_CREEPER) {
+        /* Debug: spider/creeper still drop a bow + 2 arrows so the
+         * ranged loop stays testable. Per-mob loot is a later pass. */
         craft_drops_spawn(BLK_BOW, p);
         craft_drops_spawn(BLK_ARROW, (Vec3){ p.x + 0.15f, p.y, p.z });
         craft_drops_spawn(BLK_ARROW, (Vec3){ p.x - 0.15f, p.y, p.z });
@@ -1274,7 +1275,14 @@ void craft_arrows_tick(float dt, CraftPlayer *p) {
         int bx = (int)floorf(a->pos.x);
         int by = (int)floorf(a->pos.y);
         int bz = (int)floorf(a->pos.z);
-        if (craft_block_solid(craft_world_get(bx, by, bz))) {
+        BlockId hitb = craft_world_get(bx, by, bz);
+        if (craft_block_solid(hitb)) {
+            /* Target block — arm a 1-tick redstone pulse. The redstone
+             * tick reverts TARGET_ON → TARGET and emits power for that
+             * one tick. */
+            if (hitb == BLK_TARGET) {
+                craft_world_set(bx, by, bz, BLK_TARGET_ON);
+            }
             craft_drops_spawn(BLK_ARROW, a->pos);
             a->alive = false;
             continue;

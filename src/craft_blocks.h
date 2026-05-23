@@ -119,6 +119,24 @@ typedef enum {
     BLK_LAMP_ON         = 73,   /* lit variant */
     BLK_NOT_GATE_ON     = 74,   /* output-on variant */
     BLK_DELAY_ON        = 75,   /* this-tick output-on variant */
+    /* --- Second redstone wave (save v9) ---------------------------- *
+     * Dispenser fires an arrow along its orient face on a rising
+     * redstone edge; target emits a 1-tick pulse when an arrow hits
+     * it; slime block bounces fall damage and crafts from slimeballs.
+     * Each redstone-stateful block keeps its _ON variant for clean
+     * chunk-store round-tripping. */
+    BLK_DISPENSER       = 76,
+    BLK_DISPENSER_ON    = 77,   /* was-powered (rising-edge latch) */
+    BLK_TARGET          = 78,
+    BLK_TARGET_ON       = 79,   /* arrow-struck pulse variant */
+    BLK_SLIME_BLOCK     = 80,
+    BLK_SLIMEBALL       = 81,   /* inventory item — slime mob drop */
+    /* Sticky piston — pulls its block back on retract. The original
+     * BLK_PISTON_* is now the plain (non-sticky) piston that just
+     * drops the block when it retracts. Sticky shares BLK_PISTON_ARM
+     * and is crafted from a plain piston + a slimeball. */
+    BLK_STICKY_PISTON_OFF = 82,
+    BLK_STICKY_PISTON_ON  = 83,
     BLK_COUNT
 } BlockId;
 
@@ -202,7 +220,8 @@ static inline bool craft_block_opaque(BlockId blk) {
      * orient-aware geometry so they look like real MC pistons. The
      * base cells are still solid for collision. */
     if (blk == BLK_PISTON_OFF || blk == BLK_PISTON_ON ||
-        blk == BLK_PISTON_ARM) return false;
+        blk == BLK_PISTON_ARM ||
+        blk == BLK_STICKY_PISTON_OFF || blk == BLK_STICKY_PISTON_ON) return false;
     /* Levers render as a 3D mounted switch via the sprite system,
      * not as a full-cell cube. */
     if (blk == BLK_LEVER_OFF || blk == BLK_LEVER_ON) return false;
@@ -224,13 +243,19 @@ static inline bool craft_block_solid(BlockId blk) {
     if (blk == BLK_LADDER || blk == BLK_PRESSURE_PAD) return false;
     if (blk == BLK_DOOR_ON || blk == BLK_TRAPDOOR_ON) return false;
     if (blk == BLK_DOOR_OFF || blk == BLK_TRAPDOOR_OFF) return true;
-    if (blk == BLK_PISTON_OFF || blk == BLK_PISTON_ON || blk == BLK_PISTON_ARM) return true;
+    if (blk == BLK_PISTON_OFF || blk == BLK_PISTON_ON || blk == BLK_PISTON_ARM ||
+        blk == BLK_STICKY_PISTON_OFF || blk == BLK_STICKY_PISTON_ON) return true;
     if (blk == BLK_TNT || blk == BLK_TNT_FUSED) return true;
     /* All five new redstone blocks are solid cubes (no sprite-cell
      * pass-through). Their state visualisation rides through the
      * normal cube renderer with state-aware texture selection. */
     if (blk == BLK_OBSERVER || blk == BLK_NOTE_BLOCK || blk == BLK_LAMP ||
         blk == BLK_NOT_GATE || blk == BLK_DELAY) return true;
+    /* Second-wave blocks: dispenser/target/slime are solid cubes
+     * (incl. their _ON variants). Slimeball is an item, not solid. */
+    if (blk == BLK_DISPENSER || blk == BLK_DISPENSER_ON ||
+        blk == BLK_TARGET     || blk == BLK_TARGET_ON    ||
+        blk == BLK_SLIME_BLOCK) return true;
     if (blk >= BLK_SILVER_ORE && blk <= BLK_REDSTONE_ORE)   return true;
     if (blk >= BLK_SILVER_BLOCK && blk <= BLK_REDSTONE_BLOCK) return true;
     if (blk >= BLK_STICK) return false;   /* inventory items */
@@ -249,10 +274,12 @@ static inline bool craft_block_placeable(BlockId blk) {
     if (blk == BLK_REDSTONE || blk == BLK_LEVER_OFF) return true;
     if (blk == BLK_LADDER || blk == BLK_PRESSURE_PAD) return true;
     if (blk == BLK_TRAPDOOR_OFF || blk == BLK_DOOR_OFF) return true;
-    if (blk == BLK_PISTON_OFF) return true;
+    if (blk == BLK_PISTON_OFF || blk == BLK_STICKY_PISTON_OFF) return true;
     if (blk == BLK_TNT) return true;
     if (blk == BLK_OBSERVER || blk == BLK_NOTE_BLOCK || blk == BLK_LAMP ||
         blk == BLK_NOT_GATE || blk == BLK_DELAY) return true;
+    if (blk == BLK_DISPENSER || blk == BLK_TARGET ||
+        blk == BLK_SLIME_BLOCK) return true;
     if (blk >= BLK_SILVER_ORE && blk <= BLK_REDSTONE_ORE)   return true;
     if (blk >= BLK_SILVER_BLOCK && blk <= BLK_REDSTONE_BLOCK) return true;
     if (blk >= BLK_STICK) return false;

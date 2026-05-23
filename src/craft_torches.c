@@ -180,6 +180,8 @@ void craft_torches_rebuild(void) {
                 else if (b == BLK_TRAPDOOR_ON)       kind = TORCH_KIND_TRAPDOOR_OPEN;
                 else if (b == BLK_PISTON_OFF)        kind = TORCH_KIND_PISTON_OFF;
                 else if (b == BLK_PISTON_ON)         kind = TORCH_KIND_PISTON_ON;
+                else if (b == BLK_STICKY_PISTON_OFF) kind = TORCH_KIND_PISTON_OFF;
+                else if (b == BLK_STICKY_PISTON_ON)  kind = TORCH_KIND_PISTON_ON;
                 else if (b == BLK_PISTON_ARM)        kind = TORCH_KIND_PISTON_ARM;
                 else if (b == BLK_LEVER_OFF)         kind = TORCH_KIND_LEVER_OFF;
                 else if (b == BLK_LEVER_ON)          kind = TORCH_KIND_LEVER_ON;
@@ -222,6 +224,9 @@ void craft_torches_rebuild(void) {
                             nb == BLK_DOOR_OFF || nb == BLK_DOOR_ON ||
                             nb == BLK_TRAPDOOR_OFF || nb == BLK_TRAPDOOR_ON ||
                             nb == BLK_PISTON_OFF || nb == BLK_PISTON_ON ||
+                            nb == BLK_STICKY_PISTON_OFF || nb == BLK_STICKY_PISTON_ON ||
+                            nb == BLK_DISPENSER || nb == BLK_DISPENSER_ON ||
+                            nb == BLK_TARGET || nb == BLK_TARGET_ON ||
                             nb == BLK_TNT || nb == BLK_TNT_FUSED ||
                             nb == BLK_PRESSURE_PAD ||
                             nb == BLK_REDSTONE_BLOCK) {

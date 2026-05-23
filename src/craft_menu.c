@@ -196,22 +196,34 @@ static int     s_inv_scroll;          /* topmost row index */
 static void inv_rebuild_visible(const CraftPlayer *p) {
     s_inv_visible_count = 0;
     for (int b = 1; b < BLK_COUNT; b++) {
-        /* Hide ON-state variants — they're set by redstone, never
-         * by the player, so the inventory only needs one entry per
-         * pair (lever, wire, door, trapdoor, piston, TNT). The
-         * mining-drop table already converts ON → OFF on break. */
+        /* Hide ON-state variants and other non-canonical forms —
+         * they're set by redstone / the water sim, never placed by
+         * the player, so the inventory shows one entry per logical
+         * block. The mining-drop table already converts ON → OFF on
+         * break. */
         if (b == BLK_LEVER_ON           ||
             b == BLK_REDSTONE_WIRE_ON   ||
             b == BLK_DOOR_ON            ||
             b == BLK_TRAPDOOR_ON        ||
             b == BLK_PISTON_ON          ||
             b == BLK_PISTON_ARM         ||
+            b == BLK_STICKY_PISTON_ON   ||
             b == BLK_TNT_FUSED          ||
+            b == BLK_OBSERVER_ON        ||
+            b == BLK_NOTE_BLOCK_ON      ||
+            b == BLK_LAMP_ON            ||
+            b == BLK_NOT_GATE_ON        ||
+            b == BLK_DELAY_ON           ||
+            b == BLK_DISPENSER_ON       ||
+            b == BLK_TARGET_ON          ||
             b == BLK_REDSTONE_WIRE) {
             /* BLK_REDSTONE_WIRE also hidden because the inventory
              * item is BLK_REDSTONE dust — wire is the placed form. */
             continue;
         }
+        /* Flowing-water levels L1..L7 are sim state, not items —
+         * only the canonical L0 ("water") appears. */
+        if (craft_is_water_id((uint8_t)b) && b != BLK_WATER_L0) continue;
         bool owned = (p->mode == CRAFT_MODE_CREATIVE) || (p->inventory[b] > 0);
         if (!owned) continue;
         s_inv_visible[s_inv_visible_count++] = (BlockId)b;
@@ -589,6 +601,29 @@ static const CraftRecipe RECIPES[] = {
     { { BLK_AIR,   BLK_STICK, BLK_STICK,
         BLK_STICK, BLK_AIR,   BLK_STICK,
         BLK_AIR,   BLK_STICK, BLK_STICK }, BLK_BOW, 1, "Bow" },
+
+    /* --- Slime block (4 slimeballs, 2×2 — cheaper than MC's 9 so it's
+     * attainable from a couple of slime kills). */
+    { { BLK_SLIMEBALL, BLK_SLIMEBALL, BLK_AIR,
+        BLK_SLIMEBALL, BLK_SLIMEBALL, BLK_AIR,
+        BLK_AIR,       BLK_AIR,       BLK_AIR }, BLK_SLIME_BLOCK, 1, "Slime block" },
+
+    /* --- Sticky piston (a piston with a slimeball on its head, exactly
+     * like vanilla). */
+    { { BLK_AIR, BLK_SLIMEBALL,  BLK_AIR,
+        BLK_AIR, BLK_PISTON_OFF, BLK_AIR,
+        BLK_AIR, BLK_AIR,        BLK_AIR }, BLK_STICKY_PISTON_OFF, 1, "Sticky piston" },
+
+    /* --- Dispenser (cobble shell + bow + redstone — vanilla layout). */
+    { { BLK_COBBLE, BLK_COBBLE,   BLK_COBBLE,
+        BLK_COBBLE, BLK_BOW,      BLK_COBBLE,
+        BLK_COBBLE, BLK_REDSTONE, BLK_COBBLE }, BLK_DISPENSER, 1, "Dispenser" },
+
+    /* --- Target (4 redstone in a plus around sand — sand subs for
+     * vanilla's hay bale, which we don't have). */
+    { { BLK_AIR,      BLK_REDSTONE, BLK_AIR,
+        BLK_REDSTONE, BLK_SAND,     BLK_REDSTONE,
+        BLK_AIR,      BLK_REDSTONE, BLK_AIR }, BLK_TARGET, 1, "Target" },
 
     /* --- Arrow (iron tip + stick shaft; gives 4 per craft like MC).
      * MC uses flint+stick+feather → 4 arrows; we sub iron for flint

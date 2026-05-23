@@ -349,6 +349,7 @@ static inline bool light_transparent(BlockId b) {
     if (b == BLK_TRAPDOOR_OFF  || b == BLK_TRAPDOOR_ON) return true;
     if (b == BLK_LEVER_OFF     || b == BLK_LEVER_ON) return true;
     if (b == BLK_PISTON_OFF    || b == BLK_PISTON_ON ||
+        b == BLK_STICKY_PISTON_OFF || b == BLK_STICKY_PISTON_ON ||
         b == BLK_PISTON_ARM) return true;
     return false;
 }
@@ -428,6 +429,7 @@ static inline bool blocks_sky(BlockId b) {
     if (b == BLK_TRAPDOOR_OFF  || b == BLK_TRAPDOOR_ON) return false;
     if (b == BLK_LEVER_OFF     || b == BLK_LEVER_ON) return false;
     if (b == BLK_PISTON_OFF    || b == BLK_PISTON_ON ||
+        b == BLK_STICKY_PISTON_OFF || b == BLK_STICKY_PISTON_ON ||
         b == BLK_PISTON_ARM) return false;
     return true;
 }
@@ -598,6 +600,8 @@ void craft_world_set(int wx, int wy, int wz, BlockId blk) {
                           (b) == BLK_TRAPDOOR_ON      ||     \
                           (b) == BLK_PISTON_OFF       ||     \
                           (b) == BLK_PISTON_ON        ||     \
+                          (b) == BLK_STICKY_PISTON_OFF ||    \
+                          (b) == BLK_STICKY_PISTON_ON ||     \
                           (b) == BLK_TNT              ||     \
                           (b) == BLK_TNT_FUSED        ||     \
                           (b) == BLK_REDSTONE_BLOCK)

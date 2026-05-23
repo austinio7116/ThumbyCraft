@@ -583,14 +583,28 @@ void craft_player_tick(CraftPlayer *p, const CraftInput *in, float dt) {
             if (p->cam.pos.y > p->fall_peak_y) p->fall_peak_y = p->cam.pos.y;
         } else {
             if (!was_on_ground) {
-                /* Just landed. 1 HP per block fallen beyond a
-                 * 10-block grace (generous — the 128-pixel screen
-                 * makes vertical drops feel taller than they are).
-                 * Clamped to [0, 20]. */
                 float drop = p->fall_peak_y - p->cam.pos.y;
-                int dmg = (int)(drop - 10.0f + 0.5f);
-                if (dmg > 20) dmg = 20;
-                if (dmg > 0) craft_player_take_damage(p, dmg);
+                /* Slime block underfoot — cancel fall damage and
+                 * rebound with ~60% of the impact speed (vanilla-ish),
+                 * with a gentle floor so even a small step bounces. */
+                int fbx = (int)floorf(p->cam.pos.x);
+                int fby = (int)floorf(p->cam.pos.y - PLAYER_EYE - 0.1f);
+                int fbz = (int)floorf(p->cam.pos.z);
+                if (craft_world_get(fbx, fby, fbz) == BLK_SLIME_BLOCK &&
+                    drop > 0.4f) {
+                    float impact = sqrtf(2.0f * 22.0f * drop);   /* = -GRAVITY */
+                    float bounce = impact * 0.6f;
+                    if (bounce > 16.0f) bounce = 16.0f;
+                    p->vel.y     = bounce;
+                    p->on_ground = false;
+                } else {
+                    /* 1 HP per block fallen beyond a 10-block grace
+                     * (generous — the 128-pixel screen makes vertical
+                     * drops feel taller). Clamped to [0, 20]. */
+                    int dmg = (int)(drop - 10.0f + 0.5f);
+                    if (dmg > 20) dmg = 20;
+                    if (dmg > 0) craft_player_take_damage(p, dmg);
+                }
             }
             p->fall_peak_y = p->cam.pos.y;
         }
@@ -983,6 +997,32 @@ skip_attack: ;
                     craft_audio_place(BLK_TRAPDOOR_OFF);
                     goto place_done;
                 }
+                /* Note block — B cycles the pitch through the 2-octave
+                 * range (0..23) and previews it. The pitch lives in
+                 * the orient hash slot (note blocks have no facing) so
+                 * it persists across saves and the redstone tick reads
+                 * it back on the rising edge. */
+                if (hit_blk == BLK_NOTE_BLOCK || hit_blk == BLK_NOTE_BLOCK_ON) {
+                    int pitch = craft_torches_lookup_orient(h.bx, h.by, h.bz);
+                    if (pitch < 0 || pitch > 23) pitch = 12;
+                    pitch = (pitch + 1) % 24;
+                    craft_torches_record_orient(h.bx, h.by, h.bz, pitch);
+                    craft_audio_note(pitch);
+                    goto place_done;
+                }
+                /* Repeater (DELAY) — B cycles the delay 1..4 ticks.
+                 * The orient byte packs face in bits 0-2 and the delay
+                 * setting in bits 3-4, so cycling preserves facing. */
+                if (hit_blk == BLK_DELAY || hit_blk == BLK_DELAY_ON) {
+                    int o = craft_torches_lookup_orient(h.bx, h.by, h.bz);
+                    int face = o & 0x07;
+                    int setting = (o >> 3) & 0x03;
+                    setting = (setting + 1) & 0x03;
+                    craft_torches_record_orient(h.bx, h.by, h.bz,
+                                                face | (setting << 3));
+                    craft_audio_place(BLK_DELAY);
+                    goto place_done;
+                }
             }
             /* Ladder-in-own-cell shortcut.
              *
@@ -1087,16 +1127,19 @@ skip_attack: ;
                             place_blk == BLK_DOOR_OFF ||
                             place_blk == BLK_TRAPDOOR_OFF ||
                             place_blk == BLK_PISTON_OFF ||
+                            place_blk == BLK_STICKY_PISTON_OFF ||
                             place_blk == BLK_LEVER_OFF ||
                             place_blk == BLK_NOT_GATE ||
                             place_blk == BLK_DELAY ||
-                            place_blk == BLK_OBSERVER) {
+                            place_blk == BLK_OBSERVER ||
+                            place_blk == BLK_DISPENSER) {
                             int orient_face = h.face;
                             if (place_blk == BLK_DOOR_OFF ||
                                 place_blk == BLK_TRAPDOOR_OFF ||
                                 place_blk == BLK_NOT_GATE ||
                                 place_blk == BLK_DELAY ||
-                                place_blk == BLK_OBSERVER) {
+                                place_blk == BLK_OBSERVER ||
+                                place_blk == BLK_DISPENSER) {
                                 /* Snap player yaw to a cardinal so the
                                  * gate / observer "faces" away from the
                                  * player when placed. Same trick as
@@ -1123,6 +1166,13 @@ skip_attack: ;
                                     h.fx, h.fy + 1, h.fz, orient_face);
                             }
                             craft_torches_rebuild();
+                        }
+                        /* Note block — seed a default mid-range pitch
+                         * (12) into the orient slot so a freshly
+                         * placed block sounds reasonable before the
+                         * player has cycled it. */
+                        if (place_blk == BLK_NOTE_BLOCK) {
+                            craft_torches_record_orient(h.fx, h.fy, h.fz, 12);
                         }
                         /* Doors are two cells tall — also place the
                          * top half if the cell above is free. */

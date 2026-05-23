@@ -51,6 +51,10 @@ const uint16_t *craft_block_texture(BlockId blk, Face face) {
     else if (blk == BLK_LAMP_ON)            tex_blk = BLK_LAMP;
     else if (blk == BLK_NOT_GATE_ON)        tex_blk = BLK_NOT_GATE;
     else if (blk == BLK_DELAY_ON)           tex_blk = BLK_DELAY;
+    else if (blk == BLK_DISPENSER_ON)       tex_blk = BLK_DISPENSER;
+    else if (blk == BLK_TARGET_ON)          tex_blk = BLK_TARGET;
+    else if (blk == BLK_STICKY_PISTON_OFF)  tex_blk = BLK_PISTON_OFF;
+    else if (blk == BLK_STICKY_PISTON_ON)   tex_blk = BLK_PISTON_ON;
     int s = slot_for(tex_blk, face);
 #ifdef CRAFT_TEXTURES_BAKED
     if (tex_blk == BLK_WATER_L0) {
@@ -123,6 +127,8 @@ const char *craft_block_name(BlockId blk) {
         case BLK_PISTON_OFF:
         case BLK_PISTON_ON:     return "piston";
         case BLK_PISTON_ARM:    return "piston arm";
+        case BLK_STICKY_PISTON_OFF:
+        case BLK_STICKY_PISTON_ON: return "sticky piston";
         case BLK_TNT:           return "TNT";
         case BLK_TNT_FUSED:     return "TNT!";
         case BLK_OBSERVER:
@@ -135,6 +141,12 @@ const char *craft_block_name(BlockId blk) {
         case BLK_NOT_GATE_ON:   return "NOT gate";
         case BLK_DELAY:
         case BLK_DELAY_ON:      return "delay";
+        case BLK_DISPENSER:
+        case BLK_DISPENSER_ON:  return "dispenser";
+        case BLK_TARGET:
+        case BLK_TARGET_ON:     return "target";
+        case BLK_SLIME_BLOCK:   return "slime block";
+        case BLK_SLIMEBALL:     return "slimeball";
         case BLK_WATER_L1:
         case BLK_WATER_L2:
         case BLK_WATER_L3:
@@ -1253,6 +1265,69 @@ void craft_blocks_build_textures(void) {
                side, sizeof(uint16_t) * CRAFT_TEX_PIXELS);
         memcpy(&craft_textures[(BLK_DELAY * 3 + 2) * CRAFT_TEX_PIXELS],
                side, sizeof(uint16_t) * CRAFT_TEX_PIXELS);
+    }
+
+    /* DISPENSER — cobble body with a dark circular muzzle on every
+     * face (close enough to read as "the hole shoots that way"). */
+    for (int f = 0; f < 3; f++) {
+        uint16_t *t = &craft_textures[(BLK_DISPENSER * 3 + f) * CRAFT_TEX_PIXELS];
+        cobble_pattern(t, 0xD15B + f);
+        /* Dark muzzle disc centred at (8,8), radius ~4. */
+        for (int y = 0; y < CRAFT_TEX_SIZE; y++)
+            for (int x = 0; x < CRAFT_TEX_SIZE; x++) {
+                int dx = x - 8, dy = y - 8;
+                if (dx*dx + dy*dy <= 16)
+                    t[y * CRAFT_TEX_SIZE + x] = rgb565(25, 25, 28);
+            }
+    }
+
+    /* TARGET — concentric red/white rings, dartboard style. */
+    for (int f = 0; f < 3; f++) {
+        uint16_t *t = &craft_textures[(BLK_TARGET * 3 + f) * CRAFT_TEX_PIXELS];
+        for (int y = 0; y < CRAFT_TEX_SIZE; y++)
+            for (int x = 0; x < CRAFT_TEX_SIZE; x++) {
+                int dx = x - 8, dy = y - 8;
+                int r2 = dx*dx + dy*dy;
+                uint16_t c;
+                if      (r2 <= 4)   c = rgb565(220, 60, 50);
+                else if (r2 <= 16)  c = rgb565(235, 230, 215);
+                else if (r2 <= 36)  c = rgb565(220, 60, 50);
+                else                c = rgb565(235, 230, 215);
+                t[y * CRAFT_TEX_SIZE + x] = c;
+            }
+    }
+
+    /* SLIME BLOCK — translucent-looking green with a darker inner
+     * grid, a lighter speckle for the gel sheen. */
+    for (int f = 0; f < 3; f++) {
+        uint16_t *t = &craft_textures[(BLK_SLIME_BLOCK * 3 + f) * CRAFT_TEX_PIXELS];
+        speckle(t, 0x511E0000u + (uint32_t)f, 110, 200, 110, 30);
+        uint16_t grid = rgb565(70, 150, 70);
+        for (int i = 0; i < CRAFT_TEX_SIZE; i++) {
+            t[2 * CRAFT_TEX_SIZE + i] = grid;
+            t[13 * CRAFT_TEX_SIZE + i] = grid;
+            t[i * CRAFT_TEX_SIZE + 2] = grid;
+            t[i * CRAFT_TEX_SIZE + 13] = grid;
+        }
+    }
+
+    /* SLIMEBALL — item icon: a small green blob centred on a
+     * transparent (magenta-keyed) field so the hotbar shows a drop. */
+    {
+        uint16_t *t = &craft_textures[(BLK_SLIMEBALL * 3 + 1) * CRAFT_TEX_PIXELS];
+        fill_solid(t, 0xF81F);   /* magenta = transparent */
+        for (int y = 0; y < CRAFT_TEX_SIZE; y++)
+            for (int x = 0; x < CRAFT_TEX_SIZE; x++) {
+                int dx = x - 8, dy = y - 8;
+                if (dx*dx + dy*dy <= 20)
+                    t[y * CRAFT_TEX_SIZE + x] = rgb565(120, 210, 120);
+                if (dx*dx + dy*dy <= 4)
+                    t[y * CRAFT_TEX_SIZE + x] = rgb565(170, 240, 170);
+            }
+        memcpy(&craft_textures[(BLK_SLIMEBALL * 3 + 0) * CRAFT_TEX_PIXELS],
+               t, sizeof(uint16_t) * CRAFT_TEX_PIXELS);
+        memcpy(&craft_textures[(BLK_SLIMEBALL * 3 + 2) * CRAFT_TEX_PIXELS],
+               t, sizeof(uint16_t) * CRAFT_TEX_PIXELS);
     }
 }
 #endif /* CRAFT_TEXTURES_BAKED */
