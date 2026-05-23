@@ -252,6 +252,7 @@ typedef enum {
     TREE_OAK = 0,        /* Standard Minecraft small oak — 5-tall trunk */
     TREE_OAK_LARGE,      /* Minecraft big oak — 8-tall trunk with branches */
     TREE_PINE,           /* Tall conifer — pointed tip, wide layered base */
+    TREE_SWAMP_GIANT,    /* Swamp signature — 2×2 trunk, broad drooping canopy */
 } TreeType;
 
 /* Pick a tree shape per position deterministically. Mountain biome
@@ -432,11 +433,51 @@ static BlockId tree_block_pine(int dx, int dz, int y, int trunk_base) {
     return BLK_AIR;
 }
 
+/* GIANT SWAMP TREE — the swamp biome's signature. A 2×2 trunk ~11
+ * cells tall topped by a broad, flat, multi-tier canopy that droops
+ * at the rim into hanging leaf "vines". Canopy reach must match
+ * tree_radius(TREE_SWAMP_GIANT) = 7.
+ *
+ * The trunk occupies the 2×2 footprint dx,dz ∈ {0,1}; the canopy is
+ * measured from the trunk centre (0.5, 0.5) using squared radius so
+ * there's no sqrt in the hot path. */
+static BlockId tree_block_swamp_giant(int variant, int dx, int dz,
+                                      int y, int trunk_base) {
+    (void)variant;
+    int trunk_y = trunk_base + 1;
+    int top = trunk_y + 10;            /* 11-tall 2×2 trunk */
+    bool in_trunk_xz = (dx == 0 || dx == 1) && (dz == 0 || dz == 1);
+    if (in_trunk_xz && y >= trunk_y && y <= top) return BLK_WOOD;
+
+    /* Distance² from the trunk centre at (0.5, 0.5). */
+    float cx = (float)dx - 0.5f, cz = (float)dz - 0.5f;
+    float rad2 = cx * cx + cz * cz;
+    int ady = y - top;
+
+    /* Three broad, flattish crown layers. Widest just below the top,
+     * tapering to a smaller cap. */
+    if (ady >= -1 && ady <= 1) {
+        float maxr = (ady == 1) ? 3.0f : (ady == 0 ? 5.5f : 6.7f);
+        if (rad2 <= maxr * maxr) {
+            if (!(in_trunk_xz && ady <= 0)) return BLK_LEAVES;
+        }
+    }
+    /* Drooping rim — sparse leaf columns hanging 2-4 cells below the
+     * widest layer's perimeter, the swampy "vine" look. */
+    if (ady >= -4 && ady < -1) {
+        if (rad2 >= 5.0f * 5.0f && rad2 <= 6.7f * 6.7f) {
+            if (((dx * 7 + dz * 13) & 3) == 0) return BLK_LEAVES;
+        }
+    }
+    return BLK_AIR;
+}
+
 static BlockId tree_block_at(TreeType t, int variant, int dx, int dz,
                              int y, int trunk_base) {
     switch (t) {
         case TREE_OAK_LARGE: return tree_block_oak_large(variant, dx, dz, y, trunk_base);
         case TREE_PINE:      return tree_block_pine(dx, dz, y, trunk_base);
+        case TREE_SWAMP_GIANT: return tree_block_swamp_giant(variant, dx, dz, y, trunk_base);
         case TREE_OAK:
         default:             return tree_block_oak(dx, dz, y, trunk_base);
     }
@@ -1098,47 +1139,123 @@ void craft_gen_column(int wx, int wz, uint32_t seed,
         out[y] = (y <= wl) ? BLK_WATER : BLK_AIR;
     }
 
-    /* Tree pass — scan 7×7 neighbour columns. tree_at + height_at are
-     * cached implicitly via height_at being deterministic + cheap.
-     * Only neighbours that actually have a tree contribute. */
-    for (int dz = -3; dz <= 3; dz++) {
-        for (int dx = -3; dx <= 3; dx++) {
-            int tx = wx + dx, tz = wz + dz;
-            if (!tree_at(tx, tz, seed)) continue;
-            int th = height_at(tx, tz, seed);
-            TreeType tt = tree_type_at(tx, tz, seed);
-            int tv = tree_variant_at(tx, tz, seed);
-            for (int y = th + 1; y < CRAFT_WORLD_Y; y++) {
-                BlockId b = tree_block_at(tt, tv, -dx, -dz, y, th);
-                if (b != BLK_AIR && out[y] == BLK_AIR) out[y] = b;
+    /* Trees and huts are NOT stamped per-column any more — they're
+     * applied as whole units by craft_gen_stamp_features() after the
+     * window's terrain is laid down. That makes a tree/building appear
+     * complete the moment its trunk/origin column is inside the loaded
+     * window, instead of streaming canopy leaves into edge columns
+     * before the trunk is in view. */
+}
+
+/* Maximum canopy reach (in cells from the trunk) per tree type, so
+ * the stamp pass knows how far out to write. Keep in sync with the
+ * tree_block_* functions. */
+static int tree_radius(TreeType t) {
+    switch (t) {
+        case TREE_SWAMP_GIANT: return 7;   /* wide spreading canopy */
+        case TREE_OAK_LARGE:   return 3;   /* branch tip + leaf ring */
+        case TREE_PINE:        return 2;
+        case TREE_OAK:
+        default:               return 2;
+    }
+}
+
+/* Stamp all trees and buildings whose trunk / origin column lies in
+ * the current resident window, writing the entire feature in one shot
+ * (cross-column) directly into craft_world_blocks. Run once after a
+ * window load and after every window shift.
+ *
+ *  - Trees fill AIR cells only and never overwrite player edits
+ *    (mod-store hits are skipped), so a chopped tree stays chopped.
+ *  - Huts run AFTER trees and overwrite, so walls + interior clear any
+ *    tree blocks in the footprint (matching the old per-column order);
+ *    they too skip modded cells.
+ *
+ * A feature whose trunk/origin is OUTSIDE the window contributes
+ * nothing — its canopy will not bleed into the window edge. It pops in
+ * as a complete unit once the player has walked far enough for its
+ * trunk column to load. */
+/* Core stamp over a TRUNK/ORIGIN local-coord rectangle [tlx0,tlx1) ×
+ * [tlz0,tlz1). Canopy/footprint writes still spill outward from the
+ * trunk and are clamped to the full window, so passing a sub-rect
+ * bounded by the new strip + a CRAFT_GEN_MAX_TREE_RADIUS margin is
+ * enough to fill freshly-exposed columns after a shift. */
+static void stamp_region(uint32_t seed, int tlx0, int tlx1,
+                         int tlz0, int tlz1) {
+    int ox = craft_world_origin_x;
+    int oz = craft_world_origin_z;
+
+    /* --- Trees --- */
+    for (int lz = tlz0; lz < tlz1; lz++) {
+        for (int lx = tlx0; lx < tlx1; lx++) {
+            int wx = lx + ox, wz = lz + oz;
+            if (!tree_at(wx, wz, seed)) continue;
+            int th        = height_at(wx, wz, seed);
+            TreeType tt   = tree_type_at(wx, wz, seed);
+            int tv        = tree_variant_at(wx, wz, seed);
+            int R         = tree_radius(tt);
+            for (int dz = -R; dz <= R; dz++) {
+                for (int dx = -R; dx <= R; dx++) {
+                    int cwx = wx + dx, cwz = wz + dz;
+                    int clx = cwx - ox, clz = cwz - oz;
+                    if ((unsigned)clx >= CRAFT_WORLD_X) continue;
+                    if ((unsigned)clz >= CRAFT_WORLD_Z) continue;
+                    for (int y = th + 1; y < CRAFT_WORLD_Y; y++) {
+                        BlockId b = tree_block_at(tt, tv, dx, dz, y, th);
+                        if (b == BLK_AIR) continue;
+                        int idx = (y * CRAFT_WORLD_Z + clz) * CRAFT_WORLD_X + clx;
+                        if (craft_world_blocks[idx] != BLK_AIR) continue;
+                        if (craft_world_mod_get(cwx, y, cwz) >= 0) continue;
+                        craft_world_blocks[idx] = (uint8_t)b;
+                    }
+                }
             }
         }
     }
 
-    /* Hut pass — runs AFTER trees so walls/interior overwrite any tree
-     * blocks that landed in the footprint. Scan up to 7×7 candidate
-     * origins (max bounding box); per-type W×H gates which actually
-     * cover this column. */
-    for (int dz = -(HUT_H - 1); dz <= 0; dz++) {
-        for (int dx = -(HUT_W - 1); dx <= 0; dx++) {
-            int hx = wx + dx, hz = wz + dz;
+    /* --- Huts --- */
+    for (int lz = tlz0; lz < tlz1; lz++) {
+        for (int lx = tlx0; lx < tlx1; lx++) {
+            int hx = lx + ox, hz = lz + oz;
             if (!hut_origin_at(hx, hz, seed)) continue;
             int type = hut_type(hx, hz, seed);
             int W = hut_w(type), H = hut_h(type);
-            int lx = -dx, lz = -dz;
-            if (lx >= W || lz >= H) continue;
             int gy   = hut_floor_y(hx, hz, seed);
             int dir  = hut_door_dir(hx, hz, seed);
             int top  = hut_top(type);
-            for (int dy = 1; dy <= top; dy++) {
-                int y = gy + dy;
-                if (y < 0 || y >= CRAFT_WORLD_Y) continue;
-                /* Stamp unconditionally — interior AIR clears any tree
-                 * block sitting where the building wants empty space. */
-                out[y] = (uint8_t)hut_block_local(lx, lz, dy, dir, type);
+            for (int hlz = 0; hlz < H; hlz++) {
+                for (int hlx = 0; hlx < W; hlx++) {
+                    int cwx = hx + hlx, cwz = hz + hlz;
+                    int clx = cwx - ox, clz = cwz - oz;
+                    if ((unsigned)clx >= CRAFT_WORLD_X) continue;
+                    if ((unsigned)clz >= CRAFT_WORLD_Z) continue;
+                    for (int dy = 1; dy <= top; dy++) {
+                        int y = gy + dy;
+                        if (y < 0 || y >= CRAFT_WORLD_Y) continue;
+                        if (craft_world_mod_get(cwx, y, cwz) >= 0) continue;
+                        BlockId hb = (BlockId)hut_block_local(hlx, hlz, dy, dir, type);
+                        int idx = (y * CRAFT_WORLD_Z + clz) * CRAFT_WORLD_X + clx;
+                        craft_world_blocks[idx] = (uint8_t)hb;
+                    }
+                }
             }
         }
     }
+}
+
+void craft_gen_stamp_features(uint32_t seed) {
+    stamp_region(seed, 0, CRAFT_WORLD_X, 0, CRAFT_WORLD_Z);
+}
+
+void craft_gen_stamp_features_region(uint32_t seed,
+                                     int tlx0, int tlx1,
+                                     int tlz0, int tlz1) {
+    if (tlx0 < 0) tlx0 = 0;
+    if (tlz0 < 0) tlz0 = 0;
+    if (tlx1 > CRAFT_WORLD_X) tlx1 = CRAFT_WORLD_X;
+    if (tlz1 > CRAFT_WORLD_Z) tlz1 = CRAFT_WORLD_Z;
+    if (tlx0 >= tlx1 || tlz0 >= tlz1) return;
+    stamp_region(seed, tlx0, tlx1, tlz0, tlz1);
 }
 
 void craft_gen_world(uint32_t seed) {

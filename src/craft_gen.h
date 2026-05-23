@@ -36,6 +36,29 @@ BlockId craft_gen_block_at(int x, int y, int z, uint32_t seed);
 void craft_gen_column(int wx, int wz, uint32_t seed,
                       uint8_t out[/* CRAFT_WORLD_Y */]);
 
+/* Stamp trees + buildings whose trunk/origin column is inside the
+ * current resident window directly into craft_world_blocks, as whole
+ * units (cross-column). Run after craft_gen_column has laid the
+ * window's terrain (window load) and after every window shift. Fills
+ * AIR for trees / overwrites for huts, and never clobbers player
+ * mod-store edits. */
+void craft_gen_stamp_features(uint32_t seed);
+
+/* Largest distance (in cells) a feature's blocks can sit from its
+ * trunk/origin column — the giant swamp tree's canopy. Callers that
+ * stamp only a sub-region (e.g. a freshly shifted strip) must widen
+ * the TRUNK search by this margin so a trunk just outside the strip
+ * whose canopy reaches in still gets stamped. */
+#define CRAFT_GEN_MAX_TREE_RADIUS 7
+
+/* Stamp features whose trunk/origin column is inside the local-coord
+ * rectangle [tlx0,tlx1) × [tlz0,tlz1). Bounds are clamped to the
+ * window. Use after a shift with the new strip widened by
+ * CRAFT_GEN_MAX_TREE_RADIUS. */
+void craft_gen_stamp_features_region(uint32_t seed,
+                                     int tlx0, int tlx1,
+                                     int tlz0, int tlz1);
+
 /* Drop the column-height cache. The generator memoises height_at into
  * a window-aligned table to amortise the 7×7-neighbour tree scan;
  * call after every window shift (origin change) so the next column

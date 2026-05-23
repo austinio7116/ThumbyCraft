@@ -710,6 +710,10 @@ void craft_world_load_around(int player_wx, int player_wz, uint32_t seed) {
      * applied. */
     craft_world_chunks_restore_window();
     window_load(seed);
+    /* Stamp trees + huts as whole units now the terrain is down and
+     * mods are applied — features only appear where their trunk/origin
+     * column is inside the window. */
+    craft_gen_stamp_features(seed);
     compute_skyheight_all();
     craft_torches_rebuild();
     craft_redstone_rescan();
@@ -839,6 +843,10 @@ void craft_world_maybe_shift(int player_wx, int player_wz, uint32_t seed) {
         craft_gen_invalidate_height_cache();
         craft_world_chunks_restore_window();
         window_load(seed);
+        craft_gen_stamp_features(seed);
+        compute_skyheight_all();
+        craft_torches_rebuild();
+        craft_world_rebuild_lightmap();
         return;
     }
 
@@ -865,6 +873,25 @@ void craft_world_maybe_shift(int player_wx, int player_wz, uint32_t seed) {
         if ((unsigned)e->wy >= CRAFT_WORLD_Y) continue;
         int idx = (e->wy * CRAFT_WORLD_Z + lzi) * CRAFT_WORLD_X + lxi;
         craft_world_blocks[idx] = e->blk;
+    }
+
+    /* Re-stamp features ONLY for the freshly-exposed strips, widened
+     * by the max canopy radius so a trunk sitting just inside the
+     * overlap whose canopy reaches the new strip still gets drawn.
+     * Bounds the per-shift cost to strip-width + margin instead of
+     * the whole window. Canopy that overhangs into the overlap is
+     * idempotent (AIR-only writes / mod-skip), and the X/Z corner is
+     * harmlessly stamped twice. */
+    const int R = CRAFT_GEN_MAX_TREE_RADIUS;
+    if (dx != 0) {
+        int s0 = (dx > 0) ? (CRAFT_WORLD_X - dx) : 0;
+        int s1 = (dx > 0) ? CRAFT_WORLD_X : -dx;
+        craft_gen_stamp_features_region(seed, s0 - R, s1 + R, 0, CRAFT_WORLD_Z);
+    }
+    if (dz != 0) {
+        int s0 = (dz > 0) ? (CRAFT_WORLD_Z - dz) : 0;
+        int s1 = (dz > 0) ? CRAFT_WORLD_Z : -dz;
+        craft_gen_stamp_features_region(seed, 0, CRAFT_WORLD_X, s0 - R, s1 + R);
     }
 
     /* Sky-height, lightmap, and torch list are all local-indexed —
