@@ -57,7 +57,6 @@ const uint16_t *craft_block_texture(BlockId blk, Face face) {
     if (craft_is_water_id((uint8_t)blk))    tex_blk = BLK_WATER_L0;
     else if (blk == BLK_OBSERVER_ON)        tex_blk = BLK_OBSERVER;
     else if (blk == BLK_NOTE_BLOCK_ON)      tex_blk = BLK_NOTE_BLOCK;
-    else if (blk == BLK_LAMP_ON)            tex_blk = BLK_LAMP;
     else if (blk == BLK_NOT_GATE_ON)        tex_blk = BLK_NOT_GATE;
     else if (blk == BLK_DELAY_ON)           tex_blk = BLK_DELAY;
     else if (blk == BLK_DISPENSER_ON)       tex_blk = BLK_DISPENSER;
@@ -342,6 +341,59 @@ static void bake_lava_frame(uint16_t *out, int variant) {
                 rr = 28 + (int)(warm * 26.0f) + crust / 2 + j;  /* ~28..70 */
                 gg = 6  + (int)(warm * 8.0f)  + crust / 3;      /* ~6..20 */
                 bb = 3;
+            }
+            if (rr < 0) rr = 0; if (rr > 255) rr = 255;
+            if (gg < 0) gg = 0; if (gg > 255) gg = 255;
+            if (bb < 0) bb = 0; if (bb > 255) bb = 255;
+            out[y * CRAFT_TEX_SIZE + x] = rgb565(rr, gg, bb);
+        }
+    }
+}
+
+/* Frozen ice tile — the same domain-warped Voronoi as lava, but static
+ * and blue: mid-blue cracked plates split by bright frosty white-blue
+ * seams, with a low-frequency shade field so no two plates look alike.
+ * Periodic over 16px (toroidal seeds + period-16 warp), so it tiles
+ * seamlessly and the renderer's per-cell offset/flip works on it too. */
+static void bake_ice_tile(uint16_t *out) {
+    enum { ICE_SEEDS = 13 };
+    float sx[ICE_SEEDS], sy[ICE_SEEDS];
+    uint32_t s = 0x1CE50Fu;
+    for (int i = 0; i < ICE_SEEDS; i++) {
+        sx[i] = (float)(xs32(&s) & 0xFF) * (16.0f / 256.0f);
+        sy[i] = (float)(xs32(&s) & 0xFF) * (16.0f / 256.0f);
+    }
+    const float F = 6.2831853f / 16.0f;
+    for (int y = 0; y < CRAFT_TEX_SIZE; y++) {
+        for (int x = 0; x < CRAFT_TEX_SIZE; x++) {
+            float wx = x + 3.0f * sinf(F * 2.0f * y)
+                         + 1.6f * sinf(F * 3.0f * y);
+            float wy = y + 3.0f * cosf(F * 2.0f * x)
+                         + 1.6f * cosf(F * 3.0f * x);
+            float d1 = 1e9f, d2 = 1e9f;
+            for (int i = 0; i < ICE_SEEDS; i++) {
+                float dx = wx - sx[i], dy = wy - sy[i];
+                dx -= 16.0f * floorf(dx / 16.0f + 0.5f);
+                dy -= 16.0f * floorf(dy / 16.0f + 0.5f);
+                float dd = dx * dx + dy * dy;
+                if (dd < d1)      { d2 = d1; d1 = dd; }
+                else if (dd < d2) { d2 = dd; }
+            }
+            float edge = d2 - d1;
+            float cool = 0.5f + 0.5f * sinf(F * (x + y));   /* low-freq shade */
+            uint32_t n = (uint32_t)(x * 73856093) ^ (uint32_t)(y * 19349663);
+            int j = (int)(n & 7);
+            int rr, gg, bb;
+            if (edge < 16.0f) {                 /* bright frosty crack seam */
+                int hot = (int)(16.0f - edge);  /* 0..16, brightest at seam */
+                rr = 150 + hot * 6;             /* → ~246, near-white */
+                gg = 198 + hot * 3;             /* → ~246 */
+                bb = 235 + hot;                 /* → ~251 */
+            } else {                            /* mid-blue ice plate */
+                int frost = d1 > 30.0f ? 30 : (int)d1;   /* paler toward centre */
+                rr = 58 + (int)(cool * 34.0f) + frost / 2 + j;   /* ~58..110 */
+                gg = 124 + (int)(cool * 34.0f) + frost / 2 + j;  /* ~124..175 */
+                bb = 198 + (int)(cool * 26.0f) + frost / 4;      /* ~198..230 */
             }
             if (rr < 0) rr = 0; if (rr > 255) rr = 255;
             if (gg < 0) gg = 0; if (gg > 255) gg = 255;
@@ -1362,6 +1414,27 @@ void craft_blocks_build_textures(void) {
                side, sizeof(uint16_t) * CRAFT_TEX_PIXELS);
     }
 
+    /* LAMP_ON — lit: bright warm glow with a brighter cross. Distinct
+     * from the dark off tile so the lamp visibly lights up; it's also
+     * a light source (see craft_world_rebuild_lightmap). */
+    {
+        uint16_t *side = &craft_textures[(BLK_LAMP_ON * 3 + 1) * CRAFT_TEX_PIXELS];
+        speckle(side, 0x1A3E, 255, 224, 150, 16);
+        uint16_t accent = rgb565(255, 250, 215);
+        for (int x = 1; x < 15; x++) {
+            side[3 * CRAFT_TEX_SIZE + x]  = accent;
+            side[12 * CRAFT_TEX_SIZE + x] = accent;
+        }
+        for (int y = 1; y < 15; y++) {
+            side[y * CRAFT_TEX_SIZE + 3]  = accent;
+            side[y * CRAFT_TEX_SIZE + 12] = accent;
+        }
+        memcpy(&craft_textures[(BLK_LAMP_ON * 3 + 0) * CRAFT_TEX_PIXELS],
+               side, sizeof(uint16_t) * CRAFT_TEX_PIXELS);
+        memcpy(&craft_textures[(BLK_LAMP_ON * 3 + 2) * CRAFT_TEX_PIXELS],
+               side, sizeof(uint16_t) * CRAFT_TEX_PIXELS);
+    }
+
     /* NOT GATE — stone-coloured with a centred white "¬" glyph and a
      * direction arrow ridge. Output state is rendered as-is for now;
      * sweeping a state-aware texture variant in is a follow-up. */
@@ -1505,50 +1578,13 @@ void craft_blocks_build_textures(void) {
                sizeof(uint16_t) * CRAFT_TEX_PIXELS);   /* stone bottom */
     }
 
-    /* ICE — frozen sheet: pale icy-blue Voronoi plates separated by fine
-     * darker fissures (cracked ice). Static (not animated). Seeds wrap
-     * toroidally so the crack network tiles seamlessly across a frozen
-     * lake, and each plate gets a slight shade offset so the sheet reads
-     * as many fused panes rather than flat blue. */
+    /* ICE — frozen sheet: warped-Voronoi cracked plates like the lava
+     * tile but static and blue (mid-blue plates, bright frosty seams).
+     * Per-cell offset/flip in the renderer keeps a lake from looking
+     * tiled. Same tile on all faces. */
     {
-        enum { ICE_SEEDS = 10 };
-        int isx[ICE_SEEDS], isy[ICE_SEEDS], itint[ICE_SEEDS];
-        uint32_t s = 0x1CE50Fu;
-        for (int i = 0; i < ICE_SEEDS; i++) {
-            isx[i]   = (int)(xs32(&s) & 15);
-            isy[i]   = (int)(xs32(&s) & 15);
-            itint[i] = (int)(xs32(&s) % 24) - 12;   /* per-plate shade -12..+11 */
-        }
         uint16_t *t0 = &craft_textures[(BLK_ICE * 3 + 0) * CRAFT_TEX_PIXELS];
-        for (int y = 0; y < CRAFT_TEX_SIZE; y++) {
-            for (int x = 0; x < CRAFT_TEX_SIZE; x++) {
-                int d1 = 9999, d2 = 9999, ni = 0;
-                for (int i = 0; i < ICE_SEEDS; i++) {
-                    int dx = x - isx[i], dy = y - isy[i];
-                    if      (dx >  8) dx -= 16; else if (dx < -8) dx += 16;
-                    if      (dy >  8) dy -= 16; else if (dy < -8) dy += 16;
-                    int dd = dx * dx + dy * dy;
-                    if (dd < d1)      { d2 = d1; d1 = dd; ni = i; }
-                    else if (dd < d2) { d2 = dd; }
-                }
-                int edge = d2 - d1;            /* small → on a plate seam */
-                uint32_t n = (uint32_t)(x * 73856093) ^ (uint32_t)(y * 19349663);
-                int j = (int)(n & 3);          /* faint per-pixel break-up */
-                int rr, gg, bb;
-                if (edge < 6) {                /* darker fissure hairline */
-                    rr = 120; gg = 150; bb = 195;
-                } else {                       /* icy plate, per-plate shade */
-                    int tnt = itint[ni];
-                    rr = 178 + tnt + j;
-                    gg = 208 + tnt + j;
-                    bb = 236 + tnt / 2;
-                }
-                if (rr < 0) rr = 0; if (rr > 255) rr = 255;
-                if (gg < 0) gg = 0; if (gg > 255) gg = 255;
-                if (bb < 0) bb = 0; if (bb > 255) bb = 255;
-                t0[y * CRAFT_TEX_SIZE + x] = rgb565(rr, gg, bb);
-            }
-        }
+        bake_ice_tile(t0);
         memcpy(&craft_textures[(BLK_ICE * 3 + 1) * CRAFT_TEX_PIXELS], t0,
                sizeof(uint16_t) * CRAFT_TEX_PIXELS);
         memcpy(&craft_textures[(BLK_ICE * 3 + 2) * CRAFT_TEX_PIXELS], t0,

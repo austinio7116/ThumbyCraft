@@ -42,6 +42,22 @@ drifting clouds  ·  flash-backed worlds  ·  280 MHz dual-core M33 tile-stealin
 
 ---
 
+## What's new
+
+**1.15.1 (fixes):**
+
+- Fixed a big framerate drop caused by redstone blocks (observers,
+  dispensers, repeaters, lamps, note blocks) — the sim no longer scans
+  the whole world every tick.
+- Redstone, torches and doors no longer vanish in built-up or
+  vine-heavy areas; decorative vines now give way to functional blocks.
+- Dispenser/temple arrow traps now damage the player (arrows hit any
+  target — player or mob).
+- Redstone lamps light up and cast light when powered.
+- Repeaters show a sliding marker for their delay setting (1–4).
+- Note blocks play a cleaner, longer tone; ice redrawn (cracked blue);
+  lily pads removed.
+
 ## What's new in 1.15
 
 The biggest content drop since launch — a full climate-biome overworld

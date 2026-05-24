@@ -164,6 +164,11 @@ void craft_torches_rebuild(void) {
 
     int ox = craft_world_origin_x;
     int oz = craft_world_origin_z;
+    /* Two priority passes: functional sprites (redstone, doors,
+     * pistons, ladders, torches) first; decorative vines/lily pads
+     * last — so when the list fills, the dropped overflow is
+     * decoration, never the player's circuits. */
+    for (int pass = 0; pass < 2; pass++) {
     for (int lz = 0; lz < CRAFT_WORLD_Z; lz++) {
         for (int lx = 0; lx < CRAFT_WORLD_X; lx++) {
             for (int wy = 0; wy < CRAFT_WORLD_Y; wy++) {
@@ -189,6 +194,10 @@ void craft_torches_rebuild(void) {
                 else if (b == BLK_LEVER_OFF)         kind = TORCH_KIND_LEVER_OFF;
                 else if (b == BLK_LEVER_ON)          kind = TORCH_KIND_LEVER_ON;
                 else continue;
+                /* pass 0 = functional only; pass 1 = decorative only. */
+                bool decorative = (kind == TORCH_KIND_VINE ||
+                                   kind == TORCH_KIND_LILY_PAD);
+                if ((pass == 0) == decorative) continue;
                 if (s_torch_count >= CRAFT_MAX_TORCHES) goto done;
                 CraftTorch *t = &craft_torches[s_torch_count++];
                 t->alive  = true;
@@ -240,6 +249,7 @@ void craft_torches_rebuild(void) {
                 }
             }
         }
+    }
     }
 done:
     return;

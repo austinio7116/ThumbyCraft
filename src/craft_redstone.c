@@ -97,66 +97,121 @@ static void meta_set(int wx, int wy, int wz, uint8_t val) {
     e->val = val;
 }
 
+/* --- Redstone cell registry --------------------------------------
+ *
+ * The tick used to scan the entire 64^3 window FIVE times per tick
+ * (observer / gate-seed / source / driven / sink passes). Any
+ * always-evaluated block (observer, gate, lamp, note block) keeps the
+ * fast-path from firing, so that 5x full scan ran at 5 Hz and showed
+ * up as a steady framerate hit — the old code was only cheap with
+ * levers/wire/pistons because those go fully idle when unpowered.
+ *
+ * Instead we keep a flat list of every redstone-interacting cell in
+ * the window and iterate THAT. Cost now scales with how much redstone
+ * you've placed, not world size. The list is rebuilt by a full scan
+ * only on window load/shift (craft_redstone_rescan) and on the first
+ * tick after a redstone block is placed/removed (s_rs_dirty). Each
+ * phase re-reads the block at every listed cell and type-checks it, so
+ * a stale entry (cell since changed) is simply skipped — harmless. */
+#define RS_MAX 1024
+static uint8_t s_rs_lx[RS_MAX], s_rs_wy[RS_MAX], s_rs_lz[RS_MAX];
+static int     s_rs_n;
+static bool    s_rs_dirty;
+static bool    s_in_tick;
+
+/* A cell belongs in the registry if it is any redstone-interacting
+ * block — sources, wire, gates, sinks, observers, and driven blocks. */
+static inline bool rs_relevant(BlockId b) {
+    switch (b) {
+        case BLK_REDSTONE_WIRE:     case BLK_REDSTONE_WIRE_ON:
+        case BLK_LEVER_OFF:         case BLK_LEVER_ON:
+        case BLK_REDSTONE_BLOCK:
+        case BLK_NOT_GATE:          case BLK_NOT_GATE_ON:
+        case BLK_DELAY:             case BLK_DELAY_ON:
+        case BLK_LAMP:              case BLK_LAMP_ON:
+        case BLK_NOTE_BLOCK:        case BLK_NOTE_BLOCK_ON:
+        case BLK_OBSERVER:          case BLK_OBSERVER_ON:
+        case BLK_DISPENSER:         case BLK_DISPENSER_ON:
+        case BLK_TARGET:            case BLK_TARGET_ON:
+        case BLK_PISTON_OFF:        case BLK_PISTON_ON:
+        case BLK_STICKY_PISTON_OFF: case BLK_STICKY_PISTON_ON:
+        case BLK_DOOR_OFF:          case BLK_DOOR_ON:
+        case BLK_TRAPDOOR_OFF:      case BLK_TRAPDOOR_ON:
+        case BLK_TNT:               case BLK_TNT_FUSED:
+            return true;
+        default:
+            return false;
+    }
+}
+
+/* True if a cell counts toward s_active — the "something is live"
+ * fast-path gate. Sources + always-evaluated gates/sinks/observers;
+ * the purely reactive DISPENSER/TARGET only count in their _ON state
+ * (so an idle one doesn't keep the sim awake). */
+static inline bool rs_active_block(BlockId b) {
+    return b == BLK_LEVER_ON || b == BLK_REDSTONE_WIRE_ON ||
+           b == BLK_REDSTONE_BLOCK ||
+           b == BLK_NOT_GATE   || b == BLK_NOT_GATE_ON   ||
+           b == BLK_DELAY      || b == BLK_DELAY_ON      ||
+           b == BLK_LAMP       || b == BLK_LAMP_ON       ||
+           b == BLK_NOTE_BLOCK || b == BLK_NOTE_BLOCK_ON ||
+           b == BLK_OBSERVER   || b == BLK_OBSERVER_ON   ||
+           b == BLK_DISPENSER_ON || b == BLK_TARGET_ON;
+}
+
+/* One full-window scan: rebuild the cell registry and recompute
+ * s_active together. Runs on load/shift and when the list is dirty. */
+static void rs_full_scan(void) {
+    s_rs_n = 0;
+    int active = 0;
+    for (int wy = 0; wy < CRAFT_WORLD_Y; wy++) {
+        for (int lz = 0; lz < CRAFT_WORLD_Z; lz++) {
+            for (int lx = 0; lx < CRAFT_WORLD_X; lx++) {
+                BlockId b = (BlockId)craft_world_blocks[
+                    (wy * CRAFT_WORLD_Z + lz) * CRAFT_WORLD_X + lx];
+                if (rs_active_block(b)) active++;
+                if (!rs_relevant(b)) continue;
+                if (s_rs_n < RS_MAX) {
+                    s_rs_lx[s_rs_n] = (uint8_t)lx;
+                    s_rs_wy[s_rs_n] = (uint8_t)wy;
+                    s_rs_lz[s_rs_n] = (uint8_t)lz;
+                    s_rs_n++;
+                }
+            }
+        }
+    }
+    s_active   = active;
+    s_rs_dirty = false;
+}
+
 void craft_redstone_init(void) {
     s_accum       = 0.0f;
     s_activated_n = 0;
     s_active      = 0;
+    s_rs_n        = 0;
+    s_rs_dirty    = false;
+    s_in_tick     = false;
     memset(s_meta, 0, sizeof s_meta);
 }
 
 void craft_redstone_rescan(void) {
-    int n = 0;
-    for (int i = 0; i < CRAFT_WORLD_VOXELS; i++) {
-        BlockId b = (BlockId)craft_world_blocks[i];
-        if (b == BLK_LEVER_ON || b == BLK_REDSTONE_WIRE_ON ||
-            b == BLK_REDSTONE_BLOCK ||
-            b == BLK_NOT_GATE || b == BLK_NOT_GATE_ON ||
-            b == BLK_DELAY    || b == BLK_DELAY_ON    ||
-            b == BLK_LAMP     || b == BLK_LAMP_ON     ||
-            b == BLK_NOTE_BLOCK || b == BLK_NOTE_BLOCK_ON ||
-            b == BLK_OBSERVER || b == BLK_OBSERVER_ON ||
-            b == BLK_DISPENSER_ON ||
-            b == BLK_TARGET_ON) n++;
-    }
-    s_active = n;
+    rs_full_scan();
 }
 
 void craft_redstone_note_change(BlockId prev, BlockId blk) {
-    int delta = 0;
-    /* Sources count toward s_active so the tick can early-exit when
-     * the window has no powered cells. Solid redstone blocks act as
-     * permanent ON sources (vanilla rule). Gates that emit (NOT/DELAY)
-     * and the polling OBSERVER also count.
-     *
-     * DISPENSER and TARGET are PURELY REACTIVE: a dispenser fires only
-     * when an adjacent power source energises it, and a target emits
-     * only when an arrow hits it (which sets the _ON state). The thing
-     * that drives them — the wire/lever/pad, or the arrow-set TARGET_ON
-     * — is already counted, so their idle OFF state must NOT count.
-     * Counting it kept s_active>0 for every dispenser in the world,
-     * defeating the fast path and running the full 64³ scan every tick
-     * (a dispenser "just existing" tanked the framerate). Only the _ON
-     * states count, so a fired dispenser / hit target still reverts. */
-    if (prev == BLK_LEVER_ON || prev == BLK_REDSTONE_WIRE_ON ||
-        prev == BLK_REDSTONE_BLOCK ||
-        prev == BLK_NOT_GATE || prev == BLK_NOT_GATE_ON ||
-        prev == BLK_DELAY    || prev == BLK_DELAY_ON    ||
-        prev == BLK_LAMP     || prev == BLK_LAMP_ON     ||
-        prev == BLK_NOTE_BLOCK || prev == BLK_NOTE_BLOCK_ON ||
-        prev == BLK_OBSERVER || prev == BLK_OBSERVER_ON ||
-        prev == BLK_DISPENSER_ON ||
-        prev == BLK_TARGET_ON) delta--;
-    if (blk  == BLK_LEVER_ON || blk  == BLK_REDSTONE_WIRE_ON ||
-        blk  == BLK_REDSTONE_BLOCK ||
-        blk  == BLK_NOT_GATE || blk  == BLK_NOT_GATE_ON ||
-        blk  == BLK_DELAY    || blk  == BLK_DELAY_ON    ||
-        blk  == BLK_LAMP     || blk  == BLK_LAMP_ON     ||
-        blk  == BLK_NOTE_BLOCK || blk  == BLK_NOTE_BLOCK_ON ||
-        blk  == BLK_OBSERVER || blk  == BLK_OBSERVER_ON ||
-        blk  == BLK_DISPENSER_ON ||
-        blk  == BLK_TARGET_ON) delta++;
-    s_active += delta;
+    /* Keep s_active (the fast-path "something is live" counter) in sync.
+     * DISPENSER / TARGET are purely reactive, so only their _ON states
+     * count — see rs_active_block. */
+    if (rs_active_block(prev)) s_active--;
+    if (rs_active_block(blk))  s_active++;
     if (s_active < 0) s_active = 0;   /* clamp against drift */
+
+    /* Registry membership changed (a redstone block was placed or
+     * removed) → flag a one-shot rebuild on the next tick. Pure state
+     * toggles (both sides relevant) and the tick's own writes
+     * (s_in_tick) leave the cell list unchanged, so they don't dirty. */
+    if (!s_in_tick && rs_relevant(prev) != rs_relevant(blk))
+        s_rs_dirty = true;
 }
 
 /* --- Pressure pad latch + TNT fuse list -------------------------- *
@@ -292,11 +347,30 @@ void craft_redstone_tick(float dt) {
     int ox = craft_world_origin_x;
     int oz = craft_world_origin_z;
 
+    /* Guard note_change against re-dirtying the list from our own
+     * writes, and rebuild the cell registry once if a redstone block
+     * was placed/removed since the last tick. Every phase below then
+     * iterates s_rs (the redstone cells) instead of the full window. */
+    s_in_tick = true;
+    if (s_rs_dirty) rs_full_scan();
+
     /* Phase 1 — collect lever_on positions and seed BFS. Also reset
      * any existing wire_on cells to wire (we'll re-mark below). */
     s_visited_n = 0;
     int frontier_n = 0;
     bool state_changed = false;
+
+    /* Snapshot the lit-wire set. A wire that stays powered is reset to
+     * WIRE then re-set to WIRE_ON every tick with no net change — only a
+     * genuine change to which wires are lit should trigger the (full-
+     * window) torch-list rebuild, otherwise a single lit wire rebuilds
+     * every tick and tanks the framerate. */
+    uint32_t wire_sum_before = 0;
+    for (int ri = 0; ri < s_rs_n; ri++) {
+        int wi = (s_rs_wy[ri] * CRAFT_WORLD_Z + s_rs_lz[ri]) * CRAFT_WORLD_X + s_rs_lx[ri];
+        if (craft_world_blocks[wi] == BLK_REDSTONE_WIRE_ON)
+            wire_sum_before ^= (uint32_t)wi * 2654435761u;
+    }
 
     /* Phase 0.4 — observer edge detection. An OBSERVER watches the
      * block one cell along its orient face; when that block's id
@@ -305,9 +379,8 @@ void craft_redstone_tick(float dt) {
      *   - If already OBSERVER_ON, the pulse just ended → revert.
      *   - Else compare the watched block to the cached last-seen
      *     value; on mismatch latch the new value and go ON. */
-    for (int wy = 0; wy < CRAFT_WORLD_Y; wy++) {
-        for (int lz = 0; lz < CRAFT_WORLD_Z; lz++) {
-            for (int lx = 0; lx < CRAFT_WORLD_X; lx++) {
+    for (int ri = 0; ri < s_rs_n; ri++) {
+        int lx = s_rs_lx[ri], wy = s_rs_wy[ri], lz = s_rs_lz[ri];
                 int idx = (wy * CRAFT_WORLD_Z + lz) * CRAFT_WORLD_X + lx;
                 BlockId b = (BlockId)craft_world_blocks[idx];
                 if (b == BLK_OBSERVER_ON) {
@@ -344,8 +417,6 @@ void craft_redstone_tick(float dt) {
                      * so a freshly placed observer doesn't fire. */
                     meta_set(lx + ox, wy, lz + oz, watched);
                 }
-            }
-        }
     }
 
     /* Phase 0.5 — gate seeding. NOT_GATE / DELAY emit from their
@@ -353,9 +424,8 @@ void craft_redstone_tick(float dt) {
      * (opposite orient). Their OFF variants don't. The NOT/DELAY
      * state transition happens in the post-BFS pass below — that
      * gives gates the one-tick lag wired into vanilla redstone. */
-    for (int wy = 0; wy < CRAFT_WORLD_Y; wy++) {
-        for (int lz = 0; lz < CRAFT_WORLD_Z; lz++) {
-            for (int lx = 0; lx < CRAFT_WORLD_X; lx++) {
+    for (int ri = 0; ri < s_rs_n; ri++) {
+        int lx = s_rs_lx[ri], wy = s_rs_wy[ri], lz = s_rs_lz[ri];
                 int idx = (wy * CRAFT_WORLD_Z + lz) * CRAFT_WORLD_X + lx;
                 BlockId b = (BlockId)craft_world_blocks[idx];
                 if (b != BLK_NOT_GATE_ON && b != BLK_DELAY_ON &&
@@ -387,13 +457,10 @@ void craft_redstone_tick(float dt) {
                         };
                     }
                 }
-            }
-        }
     }
 
-    for (int wy = 0; wy < CRAFT_WORLD_Y; wy++) {
-        for (int lz = 0; lz < CRAFT_WORLD_Z; lz++) {
-            for (int lx = 0; lx < CRAFT_WORLD_X; lx++) {
+    for (int ri = 0; ri < s_rs_n; ri++) {
+        int lx = s_rs_lx[ri], wy = s_rs_wy[ri], lz = s_rs_lz[ri];
                 /* Direct backing-array read avoids craft_world_get's
                  * bounds checks. The whole window-scan otherwise eats
                  * ~14 ms of CPU per tick at 280 MHz, which would land
@@ -433,14 +500,14 @@ void craft_redstone_tick(float dt) {
                         }
                     }
                 } else if (b == BLK_REDSTONE_WIRE_ON) {
-                    /* Reset to unpowered; BFS may re-power below. */
+                    /* Reset to unpowered; BFS may re-power below. This
+                     * reset+repower churns every tick a wire stays lit,
+                     * so it deliberately does NOT set state_changed — the
+                     * wire-set checksum decides if a real change happened. */
                     craft_world_set_byte(lx + ox, wy, lz + oz,
                                          (uint8_t)BLK_REDSTONE_WIRE);
                     s_active--;
-                    state_changed = true;
                 }
-            }
-        }
     }
 
     /* Pressure pads as sources — each pressed pad (player or any mob)
@@ -481,7 +548,6 @@ void craft_redstone_tick(float dt) {
         craft_world_set_byte(c.lx + ox, c.wy, c.lz + oz,
                              (uint8_t)BLK_REDSTONE_WIRE_ON);
         s_active++;
-        state_changed = true;
         static const int dx[6] = { 1,-1, 0, 0, 0, 0 };
         static const int dy[6] = { 0, 0, 1,-1, 0, 0 };
         static const int dz[6] = { 0, 0, 0, 0, 1,-1 };
@@ -512,15 +578,12 @@ void craft_redstone_tick(float dt) {
         }
     }
 
-    /* Phase 3 — drive trapdoors / doors / pistons / TNT based on
-     * adjacent power. We scan the window once more (~3 ms direct
-     * byte reads at 280 MHz) instead of maintaining a parallel
-     * list. For each candidate block, check 6-neighbour cells for
-     * a power source (LEVER_ON / WIRE_ON / the active pressure
-     * pad cell). */
-    for (int wy = 0; wy < CRAFT_WORLD_Y; wy++) {
-        for (int lz = 0; lz < CRAFT_WORLD_Z; lz++) {
-            for (int lx = 0; lx < CRAFT_WORLD_X; lx++) {
+    /* Phase 3 — drive trapdoors / doors / pistons / dispensers / TNT
+     * from adjacent power. For each candidate block, check its
+     * 6-neighbour cells for a power source (LEVER_ON / WIRE_ON / the
+     * active pressure-pad cell). */
+    for (int ri = 0; ri < s_rs_n; ri++) {
+        int lx = s_rs_lx[ri], wy = s_rs_wy[ri], lz = s_rs_lz[ri];
                 int idx = (wy * CRAFT_WORLD_Z + lz) * CRAFT_WORLD_X + lx;
                 BlockId b = (BlockId)craft_world_blocks[idx];
                 bool is_driven =
@@ -640,12 +703,12 @@ void craft_redstone_tick(float dt) {
                         fuse_add(wx, wy, wz);
                     }
                     else if (b == BLK_DISPENSER) {
-                        /* Rising edge — fire one arrow along the orient
-                         * face, then latch to DISPENSER_ON so a held
-                         * signal only fires once. The arrow is flagged
-                         * from_player so it damages mobs (turret use).
-                         * Ammo is intentionally infinite in v1 — no
-                         * per-block inventory plumbing yet. */
+                        /* Rising edge — fire one arrow straight along the
+                         * orient face, then latch to DISPENSER_ON so a
+                         * held signal only fires once. The arrow damages
+                         * whatever it hits (player or mob). Ammo is
+                         * intentionally infinite in v1 — no per-block
+                         * inventory plumbing yet. */
                         int face = craft_torches_lookup_orient(wx, wy, wz) & 0x07;
                         float fdx = 0, fdy = 0, fdz = 0;
                         switch (face) {
@@ -660,7 +723,7 @@ void craft_redstone_tick(float dt) {
                                       wy + 0.5f + fdy * 0.6f,
                                       wz + 0.5f + fdz * 0.6f };
                         Vec3 avel = { fdx * 14.0f, fdy * 14.0f, fdz * 14.0f };
-                        craft_arrows_spawn(apos, avel, true);
+                        craft_arrows_spawn(apos, avel);
                         craft_audio_place(BLK_ARROW);
                         craft_world_set(wx, wy, wz, BLK_DISPENSER_ON);
                     }
@@ -709,8 +772,6 @@ void craft_redstone_tick(float dt) {
                                                : BLK_PISTON_OFF);
                     }
                 }
-            }
-        }
     }
 
     /* Phase 4 — passive sinks (LAMP, NOTE_BLOCK). After BFS has
@@ -721,9 +782,8 @@ void craft_redstone_tick(float dt) {
         static const int dx6[6] = { 1,-1, 0, 0, 0, 0 };
         static const int dy6[6] = { 0, 0, 1,-1, 0, 0 };
         static const int dz6[6] = { 0, 0, 0, 0, 1,-1 };
-        for (int wy = 0; wy < CRAFT_WORLD_Y; wy++) {
-            for (int lz = 0; lz < CRAFT_WORLD_Z; lz++) {
-                for (int lx = 0; lx < CRAFT_WORLD_X; lx++) {
+        for (int ri = 0; ri < s_rs_n; ri++) {
+            int lx = s_rs_lx[ri], wy = s_rs_wy[ri], lz = s_rs_lz[ri];
                     int idx = (wy * CRAFT_WORLD_Z + lz) * CRAFT_WORLD_X + lx;
                     BlockId b = (BlockId)craft_world_blocks[idx];
                     bool is_lamp = (b == BLK_LAMP || b == BLK_LAMP_ON);
@@ -843,8 +903,6 @@ void craft_redstone_tick(float dt) {
                         craft_world_set(lx + ox, wy, lz + oz, next);
                         state_changed = true;
                     }
-                }
-            }
         }
     }
 
@@ -852,22 +910,33 @@ void craft_redstone_tick(float dt) {
      * whole tick (phase 0.5 seeded its wires, the BFS propagated);
      * revert it to TARGET now so the pulse is exactly one tick long.
      * A fresh arrow hit next frame re-arms it. */
-    for (int wy = 0; wy < CRAFT_WORLD_Y; wy++) {
-        for (int lz = 0; lz < CRAFT_WORLD_Z; lz++) {
-            for (int lx = 0; lx < CRAFT_WORLD_X; lx++) {
+    for (int ri = 0; ri < s_rs_n; ri++) {
+        int lx = s_rs_lx[ri], wy = s_rs_wy[ri], lz = s_rs_lz[ri];
                 int idx = (wy * CRAFT_WORLD_Z + lz) * CRAFT_WORLD_X + lx;
                 if (craft_world_blocks[idx] == BLK_TARGET_ON) {
                     craft_world_set(lx + ox, wy, lz + oz, BLK_TARGET);
                     state_changed = true;
                 }
-            }
-        }
     }
 
-    /* Batched torch-list rebuild — covers all the wire-state writes
-     * above with one window scan instead of N (one per craft_world_set
-     * call) that would happen if we used the player-place path. */
-    if (state_changed) craft_torches_rebuild();
+    s_in_tick = false;
+
+    /* Re-checksum the lit-wire set; compare to the snapshot taken at the
+     * top of the tick. */
+    uint32_t wire_sum_after = 0;
+    for (int ri = 0; ri < s_rs_n; ri++) {
+        int wi = (s_rs_wy[ri] * CRAFT_WORLD_Z + s_rs_lz[ri]) * CRAFT_WORLD_X + s_rs_lx[ri];
+        if (craft_world_blocks[wi] == BLK_REDSTONE_WIRE_ON)
+            wire_sum_after ^= (uint32_t)wi * 2654435761u;
+    }
+
+    /* Rebuild the sprite list only on a REAL change: a wire actually
+     * switched on/off (checksum differs), or a non-wire sprite-bearing
+     * change happened (state_changed — observers/gates only set this on
+     * an actual transition, never every tick). A steadily-powered wire
+     * matches neither, so it no longer forces a full rebuild per tick. */
+    if (state_changed || wire_sum_before != wire_sum_after)
+        craft_torches_rebuild();
 
     /* Remember this tick's pad count so the next tick still runs once
      * after the last pad releases — that settle tick reverts pad-driven

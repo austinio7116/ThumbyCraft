@@ -763,7 +763,14 @@ static void skeleton_ai(CraftMob *m, CraftPlayer *p, float dt) {
             if (dl > 0.001f) {
                 float inv = SKEL_ARROW_SPEED / dl;
                 Vec3 vel = v3(dir.x * inv, dir.y * inv, dir.z * inv);
-                craft_arrows_spawn(from, vel, false);
+                /* Launch ~0.9 blocks ahead so the arrow clears the
+                 * skeleton's own body — arrows now hit any mob, so a
+                 * spawn inside the shooter would self-hit. */
+                float k = 0.9f / SKEL_ARROW_SPEED;
+                Vec3 spawn = v3(from.x + vel.x * k,
+                                from.y + vel.y * k,
+                                from.z + vel.z * k);
+                craft_arrows_spawn(spawn, vel);
             }
         }
     }
@@ -1249,11 +1256,10 @@ void craft_mobs_clear_all(void) {
     s_day_night_t = 0.0f;
 }
 
-void craft_arrows_spawn(Vec3 pos, Vec3 vel, bool from_player) {
+void craft_arrows_spawn(Vec3 pos, Vec3 vel) {
     for (int i = 0; i < CRAFT_MAX_ARROWS; i++) {
         if (craft_arrows[i].alive) continue;
         craft_arrows[i].alive       = true;
-        craft_arrows[i].from_player = from_player;
         craft_arrows[i].pos         = pos;
         craft_arrows[i].vel         = vel;
         craft_arrows[i].lifetime    = 3.0f;
@@ -1299,31 +1305,31 @@ void craft_arrows_tick(float dt, CraftPlayer *p) {
             a->alive = false;
             continue;
         }
-        if (a->from_player) {
-            /* Mob hit — sphere proximity vs mob chest. Damages and
-             * kills (which triggers mob_die_with_loot → drops). No
-             * arrow drop, the arrow embeds in the mob. */
-            int hit_mob = -1;
-            for (int j = 0; j < CRAFT_MAX_MOBS; j++) {
-                CraftMob *m = &craft_mobs[j];
-                if (!m->alive) continue;
-                float dx = a->pos.x - m->pos.x;
-                float dy = a->pos.y - (m->pos.y + 0.8f);
-                float dz = a->pos.z - m->pos.z;
-                if (dx*dx + dz*dz < ARROW_MOB_HIT_R &&
-                    dy > -0.6f && dy < 1.1f) {
-                    hit_mob = j;
-                    break;
-                }
+        /* Arrows are arrows — an arrow in flight damages whatever it
+         * strikes, player or mob, regardless of who fired it. Check
+         * mobs first, then the player. Shooters spawn their arrows
+         * clear of their own body so this never self-hits on launch. */
+        int hit_mob = -1;
+        for (int j = 0; j < CRAFT_MAX_MOBS; j++) {
+            CraftMob *m = &craft_mobs[j];
+            if (!m->alive) continue;
+            float dx = a->pos.x - m->pos.x;
+            float dy = a->pos.y - (m->pos.y + 0.8f);
+            float dz = a->pos.z - m->pos.z;
+            if (dx*dx + dz*dz < ARROW_MOB_HIT_R &&
+                dy > -0.6f && dy < 1.1f) {
+                hit_mob = j;
+                break;
             }
-            if (hit_mob >= 0) {
-                craft_mob_damage(hit_mob, ARROW_DAMAGE, BLK_ARROW);
-                a->alive = false;
-                continue;
-            }
-        } else {
-            /* Player hit (sphere vs player body). No drop — the arrow
-             * embeds in the player. */
+        }
+        if (hit_mob >= 0) {
+            craft_mob_damage(hit_mob, ARROW_DAMAGE, BLK_ARROW);
+            a->alive = false;
+            continue;
+        }
+        /* Player hit (sphere vs player body). No drop — the arrow
+         * embeds in the player. */
+        {
             float dx = a->pos.x - p->cam.pos.x;
             float dy = a->pos.y - (p->cam.pos.y - 0.8f);
             float dz = a->pos.z - p->cam.pos.z;

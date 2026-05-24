@@ -1615,12 +1615,6 @@ void craft_gen_column(int wx, int wz, uint32_t seed,
             for (int c = 1; c <= ch && h + c < CRAFT_WORLD_Y; c++)
                 out[h + c] = BLK_CACTUS;
         }
-    } else if (biome == CBIOME_SWAMP && h < wl) {
-        /* Lily pad — flat sprite on the water surface (cell above the
-         * topmost water cell at wl). */
-        uint32_t lr = hash3(wx, wz, seed ^ 0x11A9AD05u);
-        if ((lr & 0x7) == 0 && wl + 1 < CRAFT_WORLD_Y && out[wl + 1] == BLK_AIR)
-            out[wl + 1] = BLK_LILY_PAD;
     }
 
     /* Trees and huts are NOT stamped per-column any more — they're

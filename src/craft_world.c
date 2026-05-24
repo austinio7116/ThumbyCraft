@@ -463,7 +463,8 @@ void craft_world_rebuild_lightmap(void) {
                 /* Torches, lava and lit portals all emit light. (These
                  * use a full-byte compare — their ids are above the
                  * legacy 6-bit mask that the torch check still relies on.) */
-                if ((b & 0x3F) == BLK_TORCH || b == BLK_LAVA || b == BLK_PORTAL) {
+                if ((b & 0x3F) == BLK_TORCH || b == BLK_LAVA || b == BLK_PORTAL ||
+                    b == BLK_LAMP_ON) {
                     light_flood_from(lx, wy, lz);
                 }
             }
@@ -619,6 +620,9 @@ void craft_world_set(int wx, int wy, int wz, BlockId blk) {
     bool prev_blocks    = !light_transparent(prev);
     bool new_blocks     = !light_transparent(blk);
     bool transp_changed = (prev_blocks != new_blocks);
+    /* A redstone lamp toggling on/off changes emitted light without
+     * changing transparency, so it needs its own rebuild trigger. */
+    bool lamp_change    = (blk == BLK_LAMP_ON || prev == BLK_LAMP_ON);
     if (sprite_change) {
         if (prev == BLK_TORCH && blk != BLK_TORCH) {
             craft_torches_forget_orient(wx, wy, wz);
@@ -630,7 +634,7 @@ void craft_world_set(int wx, int wy, int wz, BlockId blk) {
          * solid both ways), so skip that work. */
         if (torch_change) craft_world_rebuild_lightmap();
         else if (transp_changed) craft_world_rebuild_lightmap();
-    } else if (transp_changed) {
+    } else if (transp_changed || lamp_change) {
         craft_world_rebuild_lightmap();
     }
 }
@@ -924,5 +928,6 @@ void craft_world_maybe_shift(int player_wx, int player_wz, uint32_t seed) {
      * rebuild from the contents of the new window. Few ms total. */
     compute_skyheight_all();
     craft_torches_rebuild();
+    craft_redstone_rescan();   /* registry is local-indexed — rebuild for the new window */
     craft_world_rebuild_lightmap();
 }

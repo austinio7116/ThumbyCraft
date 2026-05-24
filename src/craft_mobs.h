@@ -52,7 +52,6 @@ typedef struct {
 
 typedef struct {
     bool  alive;
-    bool  from_player;    /* true → checks mob hits; false → checks player hit */
     Vec3  pos;
     Vec3  vel;
     float lifetime;       /* sec — counts down to 0 then despawn */
@@ -61,7 +60,10 @@ typedef struct {
 extern CraftArrow craft_arrows[CRAFT_MAX_ARROWS];
 
 void craft_arrows_clear(void);
-void craft_arrows_spawn(Vec3 pos, Vec3 vel, bool from_player);
+/* An arrow damages whatever it strikes — player OR mob; no shooter
+ * distinction ("arrows are arrows"). Spawn it clear of the shooter's
+ * own body so it doesn't immediately self-hit. */
+void craft_arrows_spawn(Vec3 pos, Vec3 vel);
 void craft_arrows_tick(float dt, CraftPlayer *p);
 void craft_arrows_render(const CraftCamera *cam, uint16_t *fb);
 

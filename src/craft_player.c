@@ -822,7 +822,7 @@ void craft_player_tick(CraftPlayer *p, const CraftInput *in, float dt) {
                     fwd.y * ARROW_SPEED + 1.0f,
                     fwd.z * ARROW_SPEED
                 };
-                craft_arrows_spawn(origin, vel, true);
+                craft_arrows_spawn(origin, vel);
                 p->inventory[BLK_ARROW]--;
                 p->broke_block = true;
             }

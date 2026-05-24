@@ -20,7 +20,15 @@
 #include "craft_types.h"
 #include "craft_render.h"
 
-#define CRAFT_MAX_TORCHES 64
+/* Max sprite-cuboid cells drawn per 64^3 window. This list is shared
+ * by torches, redstone wire/levers, ladders, doors, trapdoors, pistons,
+ * AND worldgen vines (jungle) + lily pads (swamp) — so 64 was far too
+ * low: a vine/lily-dense or built-up window would fill the list with
+ * worldgen sprites and silently drop everything past the 64th in scan
+ * order (the player's torches/redstone would vanish). Transient list,
+ * rebuilt from the world each shift — not saved — so this only costs
+ * ~16 bytes each in SRAM. */
+#define CRAFT_MAX_TORCHES 384
 
 typedef enum {
     TORCH_KIND_TORCH = 0,

@@ -20,6 +20,7 @@
 #include "craft_world.h"
 #include "craft_blocks.h"
 #include "craft_tool_models.h"
+#include "craft_torches.h"   /* craft_torches_lookup_orient — repeater delay marker */
 #include <string.h>
 
 #define CRAFT_MAX_STEPS  64
@@ -682,13 +683,14 @@ void craft_render_strip(const CraftCamera *cam, uint16_t *fb,
                     int tv = (int)(h.v * CRAFT_TEX_SIZE);
                     if (tu < 0) tu = 0; else if (tu >= CRAFT_TEX_SIZE) tu = CRAFT_TEX_SIZE - 1;
                     if (tv < 0) tv = 0; else if (tv >= CRAFT_TEX_SIZE) tv = CRAFT_TEX_SIZE - 1;
-                    if (h.blk == BLK_LAVA) {
-                        /* Per-cell offset + D4 transform so a lava lake
-                         * doesn't show the same 16px tile in every cell.
-                         * The tile is toroidally seamless (period 16), so
-                         * an offset just reveals a different patch with no
-                         * within-face seam; flips/swaps add orientations.
-                         * Hash is per world cell so it's stable + animates. */
+                    if (h.blk == BLK_LAVA || h.blk == BLK_ICE) {
+                        /* Per-cell offset + D4 transform so a lava/ice
+                         * lake doesn't show the same 16px tile in every
+                         * cell. The tile is toroidally seamless (period
+                         * 16), so an offset just reveals a different patch
+                         * with no within-face seam; flips/swaps add
+                         * orientations. Hash is per world cell so it's
+                         * stable frame-to-frame. */
                         uint32_t hsh = (uint32_t)(h.fx * 73856093)
                                      ^ (uint32_t)(h.fy * 19349663)
                                      ^ (uint32_t)(h.fz * 83492791);
@@ -702,6 +704,21 @@ void craft_render_strip(const CraftCamera *cam, uint16_t *fb,
                         c = tex[v * CRAFT_TEX_SIZE + u];
                     } else {
                         c = tex[tv * CRAFT_TEX_SIZE + tu];
+                    }
+                    /* Repeater (DELAY) delay-setting indicator — a bright
+                     * marker on the top face that slides toward the far
+                     * edge as the delay grows (1→4), Minecraft-repeater
+                     * style, with a fixed near marker for reference. The
+                     * orient lookup is gated by the tu column so it only
+                     * runs for the few marker pixels. */
+                    if ((h.blk == BLK_DELAY || h.blk == BLK_DELAY_ON) &&
+                        h.face == FACE_PY && tu >= 6 && tu <= 9) {
+                        int setting = (craft_torches_lookup_orient(h.fx, h.fy, h.fz) >> 3) & 0x03;
+                        int slide_v = 4 + setting * 3;   /* rows 4 / 7 / 10 / 13 */
+                        if ((tv >= 1 && tv <= 2) || (tv >= slide_v && tv <= slide_v + 1))
+                            c = (h.blk == BLK_DELAY_ON)
+                                  ? (uint16_t)((31u << 11) | (20u << 5) | 10u)  /* lit red */
+                                  : (uint16_t)((18u << 11) | (7u  << 5) | 3u);  /* dim red */
                     }
                 }
                 /* Biome tint — grass tops and all leaf faces blend

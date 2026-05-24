@@ -305,7 +305,8 @@ void craft_audio_step(void) { trigger_sfx(140.0f, W_NOISE, 0.20f, 90.0f); }
 void craft_audio_jump(void) { trigger_sfx(380.0f, W_TRI, 0.35f, 140.0f); }
 
 /* Note-block tone — pitch_idx is a semitone offset on a 24-note range
- * (F#3..F#5). Triangle wave for a clean musical feel, short decay. */
+ * (F#3..F#5). Pure sine with a long exponential fade so it rings out
+ * like a soft bell/marimba rather than a short buzz. */
 void craft_audio_note(int pitch_idx) {
     if (pitch_idx < 0)  pitch_idx = 0;
     if (pitch_idx > 23) pitch_idx = 23;
@@ -316,7 +317,7 @@ void craft_audio_note(int pitch_idx) {
         369.99f, 392.00f, 415.30f, 440.00f, 466.16f, 493.88f,
         523.25f, 554.37f, 587.33f, 622.25f, 659.26f, 698.46f,
     };
-    trigger_sfx(kSemitone[pitch_idx], W_TRI, 0.35f, 350.0f);
+    trigger_sfx(kSemitone[pitch_idx], W_SINE, 0.42f, 1100.0f);
 }
 
 /* TNT fuse ignition — short rising hiss + brief tone. */
