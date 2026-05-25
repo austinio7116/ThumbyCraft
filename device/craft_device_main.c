@@ -41,6 +41,7 @@ static FATFS   g_fs;
 static uint8_t g_fs_work[FF_MAX_SS] __attribute__((aligned(4)));
 #endif
 #include "craft_audio.h"
+#include "craft_world.h"
 #include "craft_player.h"
 #include "craft_font.h"
 #include "craft_save.h"
@@ -57,6 +58,22 @@ static uint8_t g_fs_work[FF_MAX_SS] __attribute__((aligned(4)));
  * top of each new frame before touching it again. Saves the 32 KB
  * of a second buffer. */
 static uint16_t g_fb[CRAFT_FB_W * CRAFT_FB_H];
+
+/* --- Audio top-up -------------------------------------------------
+ * Render whatever the PWM ring has room for and push it. Called once
+ * per frame, AND registered as the world's shift yield callback so the
+ * ring keeps flowing across the tens-of-ms chunk-load burst instead of
+ * draining to a click. */
+static void audio_pump(void) {
+    static int16_t mix_buf[512];
+    int room = craft_audio_pwm_room();
+    while (room > 0) {
+        int chunk = room > 512 ? 512 : room;
+        craft_audio_render(mix_buf, chunk);
+        craft_audio_pwm_push(mix_buf, chunk);
+        room -= chunk;
+    }
+}
 
 /* --- Splash ------------------------------------------------------- */
 static void fb_fill(uint16_t c) {
@@ -185,6 +202,8 @@ int main(void) {
     craft_lcd_init();
     craft_buttons_init();
     craft_audio_pwm_init();
+    /* Keep audio flowing through the multi-ms chunk-load shift. */
+    craft_world_set_yield_cb(audio_pump);
 
 #ifdef THUMBYONE_SLOT_MODE
     thumbyone_slot_init_brightness_and_led(true);
@@ -277,18 +296,11 @@ int main(void) {
     int fps_value = 0, fps_frames = 0;
     absolute_time_t fps_window = prev;
 
-    /* Pre-render audio buffer the IRQ pulls from. */
-    static int16_t mix_buf[512];
-
     for (;;) {
-        /* Audio top-up — feed the ring every frame. */
-        int room = craft_audio_pwm_room();
-        while (room > 0) {
-            int chunk = room > 512 ? 512 : room;
-            craft_audio_render(mix_buf, chunk);
-            craft_audio_pwm_push(mix_buf, chunk);
-            room -= chunk;
-        }
+        /* Audio top-up — feed the ring every frame. (Also called mid-
+         * shift via the registered yield callback so a chunk-load burst
+         * can't drain the ring.) */
+        audio_pump();
 
         absolute_time_t now = get_absolute_time();
         float dt = absolute_time_diff_us(prev, now) * 1e-6f;

@@ -84,6 +84,14 @@ void craft_world_rebuild_lightmap(void);
 void craft_world_begin_batch(void);
 bool craft_world_end_batch(void);
 
+/* Cooperative yield hook. craft_world_maybe_shift can spend tens of ms
+ * regenerating a strip + rebuilding sky/light; on device that single
+ * long frame would drain the audio ring and click. Register a callback
+ * here (e.g. an audio-ring top-up) and the shift calls it between
+ * heavy stages and periodically inside the regen loop, so audio keeps
+ * flowing across the hitch. No-op if unset (host build). */
+void craft_world_set_yield_cb(void (*cb)(void));
+
 /* Initialise the world to an empty buffer at origin (0, 0). */
 void craft_world_init(void);
 

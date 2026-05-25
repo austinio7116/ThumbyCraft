@@ -55,6 +55,11 @@ static bool s_defer_rebuild  = false;
 static bool s_pending_torch  = false;
 static bool s_pending_light  = false;
 
+/* Cooperative yield hook — see craft_world_set_yield_cb. */
+static void (*s_yield_cb)(void) = NULL;
+static inline void yield_now(void) { if (s_yield_cb) s_yield_cb(); }
+void craft_world_set_yield_cb(void (*cb)(void)) { s_yield_cb = cb; }
+
 /* --- Dirty-chunk queue ------------------------------------------ *
  * Every block edit marks its chunk dirty. Persist paths consult
  * this list instead of scanning the whole window, so unmodified
@@ -459,6 +464,7 @@ static void compute_skyheight_all(void) {
     }
 }
 
+
 void craft_world_rebuild_lightmap(void) {
     memset(craft_world_lightmap, 0, sizeof craft_world_lightmap);
     for (int lz = 0; lz < CRAFT_WORLD_Z; lz++) {
@@ -823,6 +829,7 @@ static void shift_x(int dx, uint32_t seed) {
             int wz = lz + craft_world_origin_z;
             regen_one_column(lx, lz, wx, wz, seed);
         }
+        yield_now();   /* pump audio between regen columns */
     }
 }
 
@@ -867,6 +874,7 @@ static void shift_z(int dz, uint32_t seed) {
             int wx = lx + craft_world_origin_x;
             regen_one_column(lx, lz, wx, wz, seed);
         }
+        yield_now();   /* pump audio between regen columns */
     }
 }
 
@@ -937,6 +945,8 @@ void craft_world_maybe_shift(int player_wx, int player_wz, uint32_t seed) {
         craft_world_blocks[idx] = e->blk;
     }
 
+    yield_now();   /* pump audio after the regen + mod restore */
+
     /* Re-stamp features ONLY for the freshly-exposed strips, widened
      * by the max canopy radius so a trunk sitting just inside the
      * overlap whose canopy reaches the new strip still gets drawn.
@@ -955,9 +965,15 @@ void craft_world_maybe_shift(int player_wx, int player_wz, uint32_t seed) {
         int s1 = (dz > 0) ? CRAFT_WORLD_Z : -dz;
         craft_gen_stamp_features_region(seed, 0, CRAFT_WORLD_X, s0 - R, s1 + R);
     }
+    yield_now();
 
     /* Sky-height, lightmap, and torch list are all local-indexed —
-     * rebuild from the contents of the new window. Few ms total. */
+     * rebuild from the contents of the new window. Few ms total, and
+     * the yields above/below keep audio flowing across the burst. (An
+     * incremental band-relight was tried and reverted: the max-BFS
+     * light flood can't propagate through already-lit overlap cells
+     * into a freshly-cleared band, so it diverged from a full rebuild.
+     * The regen above dominates the shift cost regardless.) */
     compute_skyheight_all();
     craft_torches_rebuild();
     craft_redstone_rescan();   /* registry is local-indexed — rebuild for the new window */

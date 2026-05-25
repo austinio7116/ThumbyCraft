@@ -573,18 +573,24 @@ static void fire_cdl_event(const CDLNote *n) {
                         n->release);
 }
 
-void craft_audio_music_tick(float dt) {
-    if (!s_music.enabled) {
-        s_music.cur_gain *= expf(-3.0f * dt);
-        return;
-    }
-    s_music.t     += dt;
-    s_music.seq_t += dt;
-
-    /* Fire every event whose time has arrived. In forward mode events
-     * fire when cdl_seq[i].t <= seq_t and i marches up; in reverse mode
-     * we mirror the time axis (each event's effective trigger is
-     * period − t) and i marches down. */
+/* Advance the music note clock by `ds` seconds and fire any events
+ * whose time has arrived. Called per-sample from craft_audio_render so
+ * the timeline is driven by AUDIO OUTPUT, not the frame rate.
+ *
+ * The old design advanced seq_t by the frame `dt` once per frame. A
+ * chunk-load hitch (one 50-300 ms frame) made seq_t leap forward,
+ * firing a burst of notes at once and cutting the playing ones — the
+ * "click" heard on every shift. Clocking from rendered samples instead
+ * makes the music completely frame-rate-independent: a long frame just
+ * means the next render produces more samples, advancing the timeline
+ * by exactly the elapsed real time with no jump.
+ *
+ * In forward mode events fire when cdl_seq[i].t <= seq_t and i marches
+ * up; in reverse mode the time axis is mirrored (trigger at period − t)
+ * and i marches down. */
+static void music_advance(float ds) {
+    s_music.t     += ds;
+    s_music.seq_t += ds;
     if (s_music_dir > 0) {
         while (s_music.next_idx < CDL_SEQ_LEN &&
                cdl_seq[s_music.next_idx].t <= s_music.seq_t) {
@@ -598,7 +604,6 @@ void craft_audio_music_tick(float dt) {
             s_music.next_idx--;
         }
     }
-
     /* Loop the sequence — wrap back to the start once the period ends.
      * Re-roll direction and pitch so each loop is its own surprise; do
      * NOT randomise the start point on wrap (that's reserved for game
@@ -608,10 +613,14 @@ void craft_audio_music_tick(float dt) {
         reroll_dir_and_start(false);
         reroll_pitch_shift();
     }
+}
 
-    float target = s_music.target_gain;
-    if (s_music.t < s_music.duck_until) target *= 0.30f;
-    s_music.cur_gain += (target - s_music.cur_gain) * (1.0f - expf(-5.0f * dt));
+void craft_audio_music_tick(float dt) {
+    /* Retained for API compatibility (called once per frame by the game
+     * loop), but the music timeline and gain are now advanced from
+     * rendered samples inside craft_audio_render — frame-hitch immune.
+     * See music_advance(). */
+    (void)dt;
 }
 
 /* --- Voice sample ------------------------------------------------- */
@@ -686,8 +695,23 @@ static inline float voice_sample(Voice *v) {
 }
 
 int craft_audio_render(int16_t *out, int n) {
-    float mg = s_music.cur_gain;
+    /* Per-sample clock step + gain-ramp coefficients (replaces the old
+     * once-per-frame dt advance, so music tracks audio output exactly). */
+    const float ds     = 1.0f / (float)CRAFT_AUDIO_RATE;
+    const float gain_k = 1.0f - expf(-5.0f * ds);   /* ramp toward target */
+    const float off_k  = 1.0f - expf(-3.0f * ds);   /* fade when disabled */
     for (int i = 0; i < n; i++) {
+        /* Advance the music timeline by one sample and ramp the gain —
+         * sample-clocked so a frame hitch can't jump the sequence. */
+        if (s_music.enabled) {
+            music_advance(ds);
+            float target = s_music.target_gain;
+            if (s_music.t < s_music.duck_until) target *= 0.30f;
+            s_music.cur_gain += (target - s_music.cur_gain) * gain_k;
+        } else {
+            s_music.cur_gain += (0.0f - s_music.cur_gain) * off_k;
+        }
+        float mg = s_music.cur_gain;
         /* Music dry mix — sum across the 6-voice pool. Idle voices
          * are still cycled through voice_sample so their release
          * tails keep advancing; voice_sample itself early-outs on
