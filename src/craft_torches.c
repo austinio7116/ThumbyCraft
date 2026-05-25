@@ -706,12 +706,15 @@ static int trapdoor_parts_n(bool open, int orient, TorchCuboid *out) {
  *   PISTON_ARM: shaft 0..0.7, head 0.7..1.0   (continues from PISTON_ON cell)
  * `axis` is the orient (Face enum). Each part is built in axis-
  * neutral coords then rotated by remapping fields. */
-static int piston_parts_n(int kind, int orient, TorchCuboid *out) {
+static int piston_parts_n(int kind, int orient, bool sticky, TorchCuboid *out) {
     uint16_t base_l = rgb565(135, 135, 145);
     uint16_t base_d = rgb565(85, 85, 100);
     uint16_t shaft  = rgb565(180, 180, 190);
-    uint16_t head_l = rgb565(180, 130, 65);
-    uint16_t head_d = rgb565(115, 75, 35);
+    /* Sticky pistons wear a green slime cap; regular pistons a wooden
+     * brown one — the Minecraft tell, and what makes the two read
+     * differently both in-world and in the held-item viewport. */
+    uint16_t head_l = sticky ? rgb565(120, 200, 90) : rgb565(180, 130, 65);
+    uint16_t head_d = sticky ? rgb565(70, 140, 55)  : rgb565(115, 75, 35);
 
     /* Build along +Y, then rotate to the actual orient. Local Y
      * is the "shaft axis". */
@@ -878,7 +881,7 @@ static int lever_parts_n(bool on, int orient, TorchCuboid *out) {
  * (all four arms) for held-item previews; the world render passes
  * the per-cell connect mask so only real connections draw. */
 static int torch_parts_full(int kind, int orient, uint8_t connect,
-                            TorchCuboid *out) {
+                            bool sticky, TorchCuboid *out) {
     if (kind == TORCH_KIND_WIRE)              { return wire_parts_n(false, connect, out); }
     if (kind == TORCH_KIND_WIRE_ON)           { return wire_parts_n(true,  connect, out); }
     if (kind == TORCH_KIND_LADDER)            { return ladder_parts_n(orient, out); }
@@ -891,7 +894,7 @@ static int torch_parts_full(int kind, int orient, uint8_t connect,
     if (kind == TORCH_KIND_TRAPDOOR_OPEN)     { return trapdoor_parts_n(true,  orient, out); }
     if (kind == TORCH_KIND_PISTON_OFF ||
         kind == TORCH_KIND_PISTON_ON  ||
-        kind == TORCH_KIND_PISTON_ARM)        { return piston_parts_n(kind, orient, out); }
+        kind == TORCH_KIND_PISTON_ARM)        { return piston_parts_n(kind, orient, sticky, out); }
     if (kind == TORCH_KIND_LEVER_OFF)         { return lever_parts_n(false, orient, out); }
     if (kind == TORCH_KIND_LEVER_ON)          { return lever_parts_n(true,  orient, out); }
 
@@ -933,7 +936,15 @@ static int torch_parts_full(int kind, int orient, uint8_t connect,
 /* Back-compat wrapper for callers that don't have a per-cell
  * connect mask (held-item previews use 0xF = "all four arms"). */
 static int torch_parts(int kind, int orient, TorchCuboid *out) {
-    return torch_parts_full(kind, orient, 0xF, out);
+    return torch_parts_full(kind, orient, 0xF, false, out);
+}
+
+/* A piston sprite cell is "sticky" when the live world block at its
+ * coords is a sticky-piston id — read at render time so we don't have to
+ * widen the sprite list with a sticky kind. */
+static bool torch_cell_sticky(const CraftTorch *t) {
+    BlockId b = craft_world_get(t->wx, (int)t->wy, t->wz);
+    return b == BLK_STICKY_PISTON_OFF || b == BLK_STICKY_PISTON_ON;
 }
 
 /* --- Picking ---------------------------------------------------- */
@@ -984,7 +995,7 @@ int craft_torches_pick(const CraftCamera *cam, float max_dist) {
         if (!t->alive) continue;
         TorchCuboid parts[MAX_SPRITE_PARTS];
         int n_parts = torch_parts_full(t->kind, t->orient,
-                                       t->connect, parts);
+                                       t->connect, torch_cell_sticky(t), parts);
         for (int p = 0; p < n_parts; p++) {
             float bminx = (float)t->wx + parts[p].cx - parts[p].hx;
             float bminy = (float)t->wy + parts[p].cy - parts[p].hy;
@@ -1074,7 +1085,7 @@ void craft_torches_render(const CraftCamera *cam, uint16_t *fb) {
 
         TorchCuboid parts[MAX_SPRITE_PARTS];
         int n_parts = torch_parts_full(t->kind, t->orient,
-                                       t->connect, parts);
+                                       t->connect, torch_cell_sticky(t), parts);
 
         /* Compute the screen bbox containing all 8 corners of the
          * union of every part's world-space AABB. */

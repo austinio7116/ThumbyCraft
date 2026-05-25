@@ -62,8 +62,9 @@ const uint16_t *craft_block_texture(BlockId blk, Face face) {
     else if (blk == BLK_DELAY_ON)           tex_blk = BLK_DELAY;
     else if (blk == BLK_DISPENSER_ON)       tex_blk = BLK_DISPENSER;
     else if (blk == BLK_TARGET_ON)          tex_blk = BLK_TARGET;
-    else if (blk == BLK_STICKY_PISTON_OFF)  tex_blk = BLK_PISTON_OFF;
-    else if (blk == BLK_STICKY_PISTON_ON)   tex_blk = BLK_PISTON_ON;
+    /* Sticky pistons now have their own (green-faced) texture — no longer
+     * aliased to the regular piston, so they differ in the inventory bar
+     * and held-item viewport. */
     int s = slot_for(tex_blk, face);
 #ifdef CRAFT_TEXTURES_BAKED
     if (tex_blk == BLK_WATER_L0) {
@@ -354,50 +355,45 @@ static void bake_lava_frame(uint16_t *out, int variant) {
     }
 }
 
-/* Frozen ice tile — the same domain-warped Voronoi as lava, but static
- * and blue: mid-blue cracked plates split by bright frosty white-blue
- * seams, with a low-frequency shade field so no two plates look alike.
- * Periodic over 16px (toroidal seeds + period-16 warp), so it tiles
- * seamlessly and the renderer's per-cell offset/flip works on it too. */
+/* Frozen ice tile — clean Voronoi plates: a few big cells of light blue
+ * split by near-white crack lines. Few seeds (big plates, not speckle),
+ * LINEAR-distance crack metric (d2-d1 in sqrt space) so seams are
+ * continuous ~1px lines rather than scattered dots, and a subtle per-plate
+ * brightness tier + interior sheen for variation. Seeds wrap toroidally so
+ * the tile is seamless: the renderer applies a per-cell offset/flip (like
+ * lava) for block-scale variety, plus a world-position value-noise
+ * brightness for lake-scale variety (see ice_macro_q8 in craft_render). */
 static void bake_ice_tile(uint16_t *out) {
-    enum { ICE_SEEDS = 13 };
+    enum { ICE_SEEDS = 7 };
     float sx[ICE_SEEDS], sy[ICE_SEEDS];
-    uint32_t s = 0x1CE50Fu;
+    uint32_t s = 0x1CE5A2u;
     for (int i = 0; i < ICE_SEEDS; i++) {
         sx[i] = (float)(xs32(&s) & 0xFF) * (16.0f / 256.0f);
         sy[i] = (float)(xs32(&s) & 0xFF) * (16.0f / 256.0f);
     }
-    const float F = 6.2831853f / 16.0f;
     for (int y = 0; y < CRAFT_TEX_SIZE; y++) {
         for (int x = 0; x < CRAFT_TEX_SIZE; x++) {
-            float wx = x + 3.0f * sinf(F * 2.0f * y)
-                         + 1.6f * sinf(F * 3.0f * y);
-            float wy = y + 3.0f * cosf(F * 2.0f * x)
-                         + 1.6f * cosf(F * 3.0f * x);
-            float d1 = 1e9f, d2 = 1e9f;
+            float d1 = 1e9f, d2 = 1e9f; int c1 = 0;
             for (int i = 0; i < ICE_SEEDS; i++) {
-                float dx = wx - sx[i], dy = wy - sy[i];
-                dx -= 16.0f * floorf(dx / 16.0f + 0.5f);
+                float dx = (float)x - sx[i], dy = (float)y - sy[i];
+                dx -= 16.0f * floorf(dx / 16.0f + 0.5f);   /* toroidal — seamless */
                 dy -= 16.0f * floorf(dy / 16.0f + 0.5f);
                 float dd = dx * dx + dy * dy;
-                if (dd < d1)      { d2 = d1; d1 = dd; }
+                if (dd < d1)      { d2 = d1; d1 = dd; c1 = i; }
                 else if (dd < d2) { d2 = dd; }
             }
-            float edge = d2 - d1;
-            float cool = 0.5f + 0.5f * sinf(F * (x + y));   /* low-freq shade */
-            uint32_t n = (uint32_t)(x * 73856093) ^ (uint32_t)(y * 19349663);
-            int j = (int)(n & 7);
+            float edge = sqrtf(d2) - sqrtf(d1);   /* linear → connected ~1px seam */
             int rr, gg, bb;
-            if (edge < 16.0f) {                 /* bright frosty crack seam */
-                int hot = (int)(16.0f - edge);  /* 0..16, brightest at seam */
-                rr = 150 + hot * 6;             /* → ~246, near-white */
-                gg = 198 + hot * 3;             /* → ~246 */
-                bb = 235 + hot;                 /* → ~251 */
-            } else {                            /* mid-blue ice plate */
-                int frost = d1 > 30.0f ? 30 : (int)d1;   /* paler toward centre */
-                rr = 58 + (int)(cool * 34.0f) + frost / 2 + j;   /* ~58..110 */
-                gg = 124 + (int)(cool * 34.0f) + frost / 2 + j;  /* ~124..175 */
-                bb = 198 + (int)(cool * 26.0f) + frost / 4;      /* ~198..230 */
+            if (edge < 1.0f) {                    /* near-white crack line */
+                rr = 248; gg = 252; bb = 255;
+            } else {                              /* light-blue plate */
+                uint32_t h = (uint32_t)c1 * 0x9E3779B1u;
+                float lev = (float)(int)(h & 3) - 1.5f;     /* -1.5..1.5 tier */
+                float sd1 = sqrtf(d1);
+                float sheen = (1.0f - (sd1 > 8.0f ? 8.0f : sd1) / 8.0f) * 14.0f;
+                rr = (int)(224.0f + lev * 7.0f + sheen);     /* near-white, faint blue */
+                gg = (int)(236.0f + lev * 7.0f + sheen);
+                bb = (int)(250.0f + lev * 6.0f + sheen * 0.6f);
             }
             if (rr < 0) rr = 0; if (rr > 255) rr = 255;
             if (gg < 0) gg = 0; if (gg > 255) gg = 255;
@@ -1253,8 +1249,16 @@ void craft_blocks_build_textures(void) {
      * face that pushes (one side gets a different texture, but for
      * v1 every face shows the same — orientation goes through the
      * lever pipeline later). Active variant brightens the face. */
-    for (int variant = 0; variant < 2; variant++) {
-        BlockId blk = (variant == 0) ? BLK_PISTON_OFF : BLK_PISTON_ON;
+    for (int variant = 0; variant < 4; variant++) {
+        /* 0/1 = regular off/on (brown face), 2/3 = sticky off/on (green
+         * slime face) — so the two pistons read differently in the
+         * inventory swatch and the held-item viewport, matching the
+         * green slime cap the 3D world model now draws. */
+        bool sticky = (variant >= 2);
+        bool on     = (variant == 1 || variant == 3);
+        BlockId blk = (variant == 0) ? BLK_PISTON_OFF :
+                      (variant == 1) ? BLK_PISTON_ON :
+                      (variant == 2) ? BLK_STICKY_PISTON_OFF : BLK_STICKY_PISTON_ON;
         uint16_t *side = &craft_textures[(blk * 3 + 1) * CRAFT_TEX_PIXELS];
         speckle(side, 0xD15700u + variant, 120, 120, 130, 35);
         uint16_t band = rgb565(85, 85, 100);
@@ -1266,7 +1270,8 @@ void craft_blocks_build_textures(void) {
             side[y * CRAFT_TEX_SIZE + 1]  = band;
             side[y * CRAFT_TEX_SIZE + 14] = band;
         }
-        uint16_t face = variant ? rgb565(220, 180, 90) : rgb565(170, 130, 60);
+        uint16_t face = sticky ? (on ? rgb565(150, 230, 110) : rgb565(110, 185, 75))
+                               : (on ? rgb565(220, 180, 90)  : rgb565(170, 130, 60));
         for (int y = 5; y < 11; y++) {
             for (int x = 5; x < 11; x++) {
                 side[y * CRAFT_TEX_SIZE + x] = face;

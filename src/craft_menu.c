@@ -227,6 +227,9 @@ static void inv_rebuild_visible(const CraftPlayer *p) {
         /* Flowing-water levels L1..L7 are sim state, not items —
          * only the canonical L0 ("water") appears. */
         if (craft_is_water_id((uint8_t)b) && b != BLK_WATER_L0) continue;
+        /* Likewise flowing-lava levels L1..L3 — only the source BLK_LAVA
+         * is a placeable item. */
+        if (craft_is_lava_id((uint8_t)b) && b != BLK_LAVA) continue;
         bool owned = (p->mode == CRAFT_MODE_CREATIVE) || (p->inventory[b] > 0);
         if (!owned) continue;
         s_inv_visible[s_inv_visible_count++] = (BlockId)b;

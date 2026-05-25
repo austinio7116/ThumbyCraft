@@ -143,3 +143,37 @@ target_compile_options(thumbycraft_host PRIVATE
 )
 
 target_link_libraries(thumbycraft_host PRIVATE ${SDL2_LIBRARIES} m)
+
+add_executable(redstone_test
+    ${CMAKE_CURRENT_LIST_DIR}/redstone_test.c
+    ${CMAKE_CURRENT_LIST_DIR}/craft_chunk_store_stub.c
+    ${SRC}/craft_world.c
+    ${SRC}/craft_blocks.c
+    ${SRC}/craft_gen.c
+    ${SRC}/craft_render.c
+    ${SRC}/craft_player.c
+    ${SRC}/craft_hud.c
+    ${SRC}/craft_audio.c
+    ${SRC}/craft_save.c
+    ${SRC}/craft_font.c
+    ${SRC}/craft_menu.c
+    ${SRC}/craft_mobs.c
+    ${SRC}/craft_particles.c
+    ${SRC}/craft_torches.c
+    ${SRC}/craft_drops.c
+    ${SRC}/craft_tool_models.c
+    ${SRC}/craft_furnace.c
+    ${SRC}/craft_chests.c
+    ${SRC}/craft_water.c
+    ${SRC}/craft_lava.c
+    ${SRC}/craft_redstone.c
+    ${SRC}/craft_title.c
+    ${SRC}/craft_main.c
+    ${CRAFT_BAKED_C}
+)
+add_dependencies(redstone_test generate_craft_textures)
+target_compile_definitions(redstone_test PRIVATE CRAFT_TEXTURES_BAKED=1)
+target_include_directories(redstone_test PRIVATE ${SRC} ${SDL2_INCLUDE_DIRS})
+target_compile_options(redstone_test PRIVATE
+    -O2 -g -Wall -Wextra -Wno-unused-parameter -Wno-unused-function -ffast-math)
+target_link_libraries(redstone_test PRIVATE ${SDL2_LIBRARIES} m)

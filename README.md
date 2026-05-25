@@ -42,7 +42,49 @@ drifting clouds  ·  flash-backed worlds  ·  280 MHz dual-core M33 tile-stealin
 
 ---
 
-## What's new
+## What's new in 1.16
+
+A performance + polish release — the chunk-load stutter is gone, the
+raycaster is meaningfully faster, and lava/ice/pistons got a pass.
+
+**Performance.**
+- **Smooth chunk loading.** Terrain now streams in column-by-column as
+  you walk (in small batched runs) instead of rebuilding a whole chunk
+  at once, so the periodic hitch when you cross into new area is gone.
+  The music no longer clicks on the transition — it's clocked from the
+  audio samples rather than the frame timer, so a long frame can't skip
+  it. The trade-off is that spreading the chunk work across many frames
+  costs a little peak framerate while you're moving — it used to all
+  land in one stutter instead.
+- **~30 % faster raycaster — which more than makes up for that.** A
+  coarse terrain-height grid lets rays skip straight over the empty air
+  between the camera and the first solid block instead of stepping
+  through it one cell at a time (about 95 % of steps were landing on
+  empty air). Biggest gain on open and long-distance views. Net result
+  across the two changes: a steadier ~20 fps with no hitches, where
+  before you got higher peaks but a stutter on every chunk boundary.
+- **FPS counter toggle** in the pause menu (off by default).
+
+**Lava.**
+- **Flowing lava** spreads from a source up to three blocks
+  (Minecraft-accurate overworld reach), oozing slowly; running it into
+  water still hardens to obsidian.
+- **Lava settles** into a still pool when contained, instead of
+  animating and re-lighting every tick forever.
+- The creative inventory no longer lists the flowing-lava levels —
+  only the lava source shows, the same as water.
+
+**Visuals.**
+- **New ice** — a clean near-white cracked-plate sheet with per-block
+  variety plus smooth large-scale brightness variation, replacing the
+  old speckly pattern.
+- **Sticky pistons** now read differently from regular pistons: a green
+  slime cap in the world model and a green face in the inventory bar +
+  held hand.
+
+**Other.** Creative mode can break any block; a held torch can act as a
+light source (toggle); an optional 64×64 low-res perf mode; "New world"
+moved to the bottom of the pause menu.
 
 **1.15.1 (fixes):**
 

@@ -161,15 +161,13 @@ void craft_lava_tick(float dt) {
                     }
                 }
 
-                /* --- Decay --- *
-                 * A flowing cell with no lower-level lava neighbour is
-                 * orphaned and decays a level per tick; at MAX it
-                 * evaporates to air (no lava persistence — only the
-                 * BLK_LAVA source carries permanence, and it doesn't
-                 * tick). Lava never settles into a static pool the way
-                 * water does: a flow that reaches a contained bowl just
-                 * fills it from the source side each tick, and a severed
-                 * flow drains away. */
+                /* --- Decay / settle --- *
+                 * A flowing cell with no strictly-lower FLOWING neighbour
+                 * is orphaned and decays a level per tick. Mirrors the
+                 * water sim: the static BLK_LAVA source (the L0 marker)
+                 * does NOT feed flowing cells — otherwise a poured pool
+                 * stays perpetually live next to the source and never
+                 * comes to rest. Only a lower flowing level feeds. */
                 bool fed = false;
                 {
                     static const int dx2[4] = { 1, -1, 0,  0 };
@@ -181,18 +179,39 @@ void craft_lava_tick(float dt) {
                         if ((unsigned)nlz >= CRAFT_WORLD_Z) continue;
                         int nidx = (wy * CRAFT_WORLD_Z + nlz) * CRAFT_WORLD_X + nlx;
                         uint8_t nb = craft_world_blocks[nidx];
-                        if (!is_lava(nb)) continue;
-                        /* A static source neighbour feeds us (level 0),
-                         * and so does any strictly-lower flowing level. */
-                        if (nb == BLK_LAVA) { fed = true; break; }
+                        if (!is_lava(nb) || nb == BLK_LAVA) continue;
                         if (lava_level_of(nb) < lvl) { fed = true; break; }
                     }
                 }
                 if (!fed) {
-                    if (lvl >= LAVA_LEVEL_MAX)
-                        queue_event(lx, wy, lz, (uint8_t)BLK_AIR);
-                    else
+                    if (lvl >= LAVA_LEVEL_MAX) {
+                        /* Settled-pool detection (mirrors water): a MAX
+                         * cell fully contained on all 4 sides, with at
+                         * least one solid/static-lava wall, freezes to the
+                         * static BLK_LAVA source + persists — so a poured
+                         * pool reaches a still resting state and stops
+                         * ticking/relighting. Each settled cell becomes a
+                         * wall for the next ring in, so the pool settles
+                         * ring-by-ring. Open fronts still evaporate. */
+                        static const int dxp[4] = { 1, -1, 0,  0 };
+                        static const int dzp[4] = { 0,  0, 1, -1 };
+                        bool contained = true, has_wall = false;
+                        for (int d = 0; d < 4 && contained; d++) {
+                            int nlx = lx + dxp[d], nlz = lz + dzp[d];
+                            if ((unsigned)nlx >= CRAFT_WORLD_X ||
+                                (unsigned)nlz >= CRAFT_WORLD_Z) { contained = false; break; }
+                            int nidx = (wy * CRAFT_WORLD_Z + nlz) * CRAFT_WORLD_X + nlx;
+                            uint8_t nb2 = craft_world_blocks[nidx];
+                            if (nb2 == BLK_AIR) { contained = false; break; }
+                            if (!is_lava(nb2) || nb2 == BLK_LAVA) has_wall = true;
+                        }
+                        if (contained && has_wall)
+                            queue_event(lx, wy, lz, (uint8_t)BLK_LAVA);
+                        else
+                            queue_event(lx, wy, lz, (uint8_t)BLK_AIR);
+                    } else {
                         queue_event(lx, wy, lz, lava_byte(lvl + 1));
+                    }
                 }
             }
         }
@@ -210,10 +229,11 @@ void craft_lava_tick(float dt) {
         LavaEvent *e = &s_events[i];
         int wx = (int)e->lx + ox, wz = (int)e->lz + oz;
         craft_world_set_byte(wx, (int)e->wy, wz, e->byte);
-        if (e->byte == (uint8_t)BLK_OBSIDIAN) {
-            /* Permanent — record in the chunk store so the petrified
-             * rock survives window reloads and saves. */
-            craft_world_persist_byte(wx, (int)e->wy, wz, (uint8_t)BLK_OBSIDIAN);
+        if (e->byte == (uint8_t)BLK_OBSIDIAN || e->byte == (uint8_t)BLK_LAVA) {
+            /* Permanent — record in the chunk store so the petrified rock
+             * (obsidian) and settled pool cells (static BLK_LAVA) survive
+             * window reloads and saves. */
+            craft_world_persist_byte(wx, (int)e->wy, wz, e->byte);
         }
     }
     if (changed) craft_world_rebuild_lightmap();

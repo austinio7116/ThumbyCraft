@@ -57,6 +57,33 @@ static uint8_t s_cmax[CGX * CGZ];
 static bool s_coarse_skip = true;        /* toggled off by the test harness */
 void craft_render_set_coarse_skip(bool on) { s_coarse_skip = on; }
 
+/* Large-scale ice variation. The ice tile tessellates (no per-cell shift),
+ * so a big sheet would otherwise show its 1-block period. This adds smooth
+ * value-noise brightness patches keyed to world (x,z) — interpolated region
+ * hashes, no transcendentals and no hard region edges (unlike a plain
+ * per-region hash, which would show a visible grid). Returns a q8 brightness
+ * multiplier (256 = unchanged). Computed once per ice cell (cached in the
+ * strip loop), so the per-pixel cost is just the multiply. */
+static inline float vn_hash01(int a, int b) {
+    uint32_t n = (uint32_t)(a * 73856093) ^ (uint32_t)(b * 19349663);
+    n ^= n >> 13; n *= 0x9E3779B1u; n ^= n >> 16;
+    return (float)(n & 255) * (1.0f / 255.0f);
+}
+static int ice_macro_q8(int fx, int fz) {
+    const float R = 7.0f;                /* patch size in world cells */
+    float gfx = (float)fx / R, gfz = (float)fz / R;
+    int gx = (int)floorf(gfx), gz = (int)floorf(gfz);
+    float tx = gfx - (float)gx, tz = gfz - (float)gz;
+    tx = tx * tx * (3.0f - 2.0f * tx);   /* smoothstep — no creases at borders */
+    tz = tz * tz * (3.0f - 2.0f * tz);
+    float v00 = vn_hash01(gx, gz),     v10 = vn_hash01(gx + 1, gz);
+    float v01 = vn_hash01(gx, gz + 1), v11 = vn_hash01(gx + 1, gz + 1);
+    float a = v00 + (v10 - v00) * tx;
+    float b = v01 + (v11 - v01) * tx;
+    float n = a + (b - a) * tz;          /* 0..1 */
+    return (int)((0.84f + 0.30f * n) * 256.0f);   /* ~215..291 */
+}
+
 /* HUD hotbar background plate — fully opaque, drawn over the world in
  * craft_hud_draw_hotbar after the strip. We skip raycasting under it
  * because nothing we render in those pixels can ever be seen.
@@ -775,6 +802,10 @@ void craft_render_strip(const CraftCamera *cam, uint16_t *fb,
     int     last_face = -1;
     const uint16_t *last_tex = NULL;
 
+    /* Ice macro-brightness cache — value-noise is per ice cell, so compute
+     * it once when the hit cell changes and reuse for every pixel in it. */
+    int ice_fx = 0x7FFFFFFF, ice_fz = 0, ice_m = 256;
+
     /* Low-res perf mode: trace one ray per 2×2 block (¼ the rays) and
      * replicate the result into the block. Full-res keeps step 1. */
     const int xstep = s_lowres_enabled ? 2 : 1;
@@ -838,13 +869,16 @@ void craft_render_strip(const CraftCamera *cam, uint16_t *fb,
                     if (tu < 0) tu = 0; else if (tu >= CRAFT_TEX_SIZE) tu = CRAFT_TEX_SIZE - 1;
                     if (tv < 0) tv = 0; else if (tv >= CRAFT_TEX_SIZE) tv = CRAFT_TEX_SIZE - 1;
                     if (craft_is_lava_id((uint8_t)h.blk) || h.blk == BLK_ICE) {
-                        /* Per-cell offset + D4 transform so a lava/ice
-                         * lake doesn't show the same 16px tile in every
-                         * cell. The tile is toroidally seamless (period
-                         * 16), so an offset just reveals a different patch
-                         * with no within-face seam; flips/swaps add
-                         * orientations. Hash is per world cell so it's
-                         * stable frame-to-frame. */
+                        /* Per-cell offset + D4 transform so a lava/ice lake
+                         * doesn't show the same 16px tile in every cell.
+                         * The tile is toroidally seamless (period 16), so
+                         * an offset just reveals a different patch with no
+                         * within-face seam; flips/swaps add orientations.
+                         * Hash is per world cell so it's stable frame-to-
+                         * frame. Ice additionally gets smooth large-scale
+                         * brightness patches from ice_macro_q8 below — the
+                         * per-cell shift gives block-scale variety, the
+                         * value-noise gives lake-scale variety. */
                         uint32_t hsh = (uint32_t)(h.fx * 73856093)
                                      ^ (uint32_t)(h.fy * 19349663)
                                      ^ (uint32_t)(h.fz * 83492791);
@@ -858,6 +892,19 @@ void craft_render_strip(const CraftCamera *cam, uint16_t *fb,
                         c = tex[v * CRAFT_TEX_SIZE + u];
                     } else {
                         c = tex[tv * CRAFT_TEX_SIZE + tu];
+                    }
+                    /* Ice: smooth world-position brightness patches (the
+                     * tile tessellates, so this is what supplies large-scale
+                     * variety). Cached per cell. */
+                    if (h.blk == BLK_ICE) {
+                        if (h.fx != ice_fx || h.fz != ice_fz) {
+                            ice_m = ice_macro_q8(h.fx, h.fz);
+                            ice_fx = h.fx; ice_fz = h.fz;
+                        }
+                        int r = (c >> 11) & 0x1F, g = (c >> 5) & 0x3F, b = c & 0x1F;
+                        r = (r * ice_m) >> 8; g = (g * ice_m) >> 8; b = (b * ice_m) >> 8;
+                        if (r > 31) r = 31; if (g > 63) g = 63; if (b > 31) b = 31;
+                        c = (uint16_t)((r << 11) | (g << 5) | b);
                     }
                     /* Repeater (DELAY) delay-setting indicator — a bright
                      * marker on the top face that slides toward the far
