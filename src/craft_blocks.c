@@ -55,6 +55,7 @@ const uint16_t *craft_block_texture(BlockId blk, Face face) {
      * place, just the per-variant baking still TBD). */
     BlockId tex_blk = blk;
     if (craft_is_water_id((uint8_t)blk))    tex_blk = BLK_WATER_L0;
+    else if (craft_is_lava_id((uint8_t)blk)) tex_blk = BLK_LAVA;
     else if (blk == BLK_OBSERVER_ON)        tex_blk = BLK_OBSERVER;
     else if (blk == BLK_NOTE_BLOCK_ON)      tex_blk = BLK_NOTE_BLOCK;
     else if (blk == BLK_NOT_GATE_ON)        tex_blk = BLK_NOT_GATE;
@@ -161,6 +162,9 @@ const char *craft_block_name(BlockId blk) {
         case BLK_SNOWY_ROCK:    return "snowy rock";
         case BLK_ICE:           return "ice";
         case BLK_LAVA:          return "lava";
+        case BLK_LAVA_L1:
+        case BLK_LAVA_L2:
+        case BLK_LAVA_L3:       return "lava";
         case BLK_OBSIDIAN:      return "obsidian";
         case BLK_GRAVEL:        return "gravel";
         case BLK_FLINT:         return "flint";

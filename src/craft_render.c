@@ -61,6 +61,9 @@ static bool  s_far_lod_enabled = false;
  * mild "scan-line" softness that stays in screen space. */
 static bool s_interlace_enabled = false;
 static int  s_interlace_phase   = 0;   /* 0 → render even rows, 1 → odd */
+static bool s_lowres_enabled    = false;  /* 64×64 perf mode: ¼ rays, 2×2 upscale */
+static bool s_torch_light       = false;  /* menu opt: a held torch lights the scene */
+static bool s_player_light_on   = false;  /* per-frame: torch_light && holding a torch */
 static float s_sun_y = 1.0f;          /* sin(sun_angle): +1 noon, -1 midnight */
 static float s_cloud_drift = 0.0f;    /* world units of east drift since boot */
 static int   s_brightness_q8 = 256;   /* 0..256, applied to face_shade */
@@ -77,6 +80,21 @@ void craft_render_set_interlace(bool on) {
     if (!on) s_interlace_phase = 0;
 }
 bool craft_render_get_interlace(void) { return s_interlace_enabled; }
+void craft_render_set_lowres(bool on) {
+    s_lowres_enabled = on;
+    /* Low-res and interlace are both row-thinning perf tricks; running
+     * both together just doubles the artefacts for no extra gain, so
+     * low-res takes over and forces interlace off. */
+    if (on) { s_interlace_enabled = false; s_interlace_phase = 0; }
+}
+bool craft_render_get_lowres(void) { return s_lowres_enabled; }
+void craft_render_set_torch_light(bool on) {
+    s_torch_light = on;
+    if (!on) s_player_light_on = false;
+}
+bool craft_render_get_torch_light(void) { return s_torch_light; }
+/* Set per-frame: the game loop passes (torch_light_opt && held==TORCH). */
+void craft_render_set_player_light(bool on) { s_player_light_on = on; }
 float craft_render_sun_y(void) { return s_sun_y; }
 int   craft_render_brightness_q8(void) { return s_brightness_q8; }
 
@@ -629,25 +647,33 @@ void craft_render_strip(const CraftCamera *cam, uint16_t *fb,
     int     last_face = -1;
     const uint16_t *last_tex = NULL;
 
-    for (int py = y_start; py < y_end; py++) {
+    /* Low-res perf mode: trace one ray per 2×2 block (¼ the rays) and
+     * replicate the result into the block. Full-res keeps step 1. */
+    const int xstep = s_lowres_enabled ? 2 : 1;
+    const int ystep = s_lowres_enabled ? 2 : 1;
+
+    for (int py = y_start; py < y_end; py += ystep) {
         /* Interlace pass 1: only render rows whose parity matches the
          * current phase. Skipped rows are filled by the second pass
-         * below using same-tile spatial reconstruction. */
+         * below using same-tile spatial reconstruction. (Forced off when
+         * low-res is active, so ystep stays the sole row thinner.) */
         if (s_interlace_enabled && ((py & 1) != s_interlace_phase)) continue;
 
         float ndc_y = -((float)(py * 2 - CRAFT_FB_H + 1) / (float)CRAFT_FB_H);
         float vy = ndc_y * s_fov_tan_v;
         Vec3 up_vy = v3(s_up.x * vy, s_up.y * vy, s_up.z * vy);
-        uint16_t *row = &fb[py * CRAFT_FB_W];
 
         bool row_in_hud = (py >= CRAFT_HUD_PLATE_Y0);
-        for (int px = 0; px < CRAFT_FB_W; px++) {
+        for (int px = 0; px < CRAFT_FB_W; px += xstep) {
             /* Skip rays behind the opaque hotbar plate — those pixels
              * get overwritten unconditionally by craft_hud_draw_hotbar.
              * zbuf is set to 0 (near sentinel) so downstream sprite
              * passes (mobs, particles, held item) also skip the
-             * region. */
-            if (row_in_hud && px >= CRAFT_HUD_PLATE_X0 && px <= CRAFT_HUD_PLATE_X1) {
+             * region. Skipped in low-res: the plate spans odd columns we
+             * no longer sample exactly, and the rays are already quartered,
+             * so we just let them render and rely on the opaque overwrite. */
+            if (!s_lowres_enabled && row_in_hud &&
+                px >= CRAFT_HUD_PLATE_X0 && px <= CRAFT_HUD_PLATE_X1) {
                 craft_zbuf[py * CRAFT_FB_W + px] = 0;
                 continue;
             }
@@ -683,7 +709,7 @@ void craft_render_strip(const CraftCamera *cam, uint16_t *fb,
                     int tv = (int)(h.v * CRAFT_TEX_SIZE);
                     if (tu < 0) tu = 0; else if (tu >= CRAFT_TEX_SIZE) tu = CRAFT_TEX_SIZE - 1;
                     if (tv < 0) tv = 0; else if (tv >= CRAFT_TEX_SIZE) tv = CRAFT_TEX_SIZE - 1;
-                    if (h.blk == BLK_LAVA || h.blk == BLK_ICE) {
+                    if (craft_is_lava_id((uint8_t)h.blk) || h.blk == BLK_ICE) {
                         /* Per-cell offset + D4 transform so a lava/ice
                          * lake doesn't show the same 16px tile in every
                          * cell. The tile is toroidally seamless (period
@@ -811,6 +837,23 @@ void craft_render_strip(const CraftCamera *cam, uint16_t *fb,
                     int floor_v = TORCH_FLOOR[torch_level];
                     if (face_shade_v < floor_v) face_shade_v = floor_v;
                 }
+                /* Held-torch light — a brightness floor that decays with
+                 * distance from the eye to the hit cell. Computed purely
+                 * from the camera position and the (already known) hit
+                 * cell, so it tracks the player perfectly with ZERO
+                 * lightmap rebuilds. Squared distance keeps it sqrt-free;
+                 * the tiers mirror the static TORCH_FLOOR gradient. */
+                if (s_player_light_on) {
+                    float ddx = (h.fx + 0.5f) - cam->pos.x;
+                    float ddy = (h.fy + 0.5f) - cam->pos.y;
+                    float ddz = (h.fz + 0.5f) - cam->pos.z;
+                    float d2 = ddx * ddx + ddy * ddy + ddz * ddz;
+                    int pfloor = 0;
+                    if      (d2 <  6.25f) pfloor = 220;  /* ≤ 2.5 blocks */
+                    else if (d2 < 20.25f) pfloor = 165;  /* ≤ 4.5 blocks */
+                    else if (d2 < 42.25f) pfloor = 110;  /* ≤ 6.5 blocks */
+                    if (face_shade_v < pfloor) face_shade_v = pfloor;
+                }
                 c = shade(c, face_shade_v);
 
                 if (h.passed_water) {
@@ -869,8 +912,6 @@ void craft_render_strip(const CraftCamera *cam, uint16_t *fb,
                 }
                 out = fog_mix(c, fog_t, py);
             }
-            craft_zbuf[py * CRAFT_FB_W + px] = z_q;
-
             if (underwater) {
                 int r1 = (out >> 11) & 0x1F, g1 = (out >> 5) & 0x3F, b1 = out & 0x1F;
                 r1 = r1 / 3;
@@ -879,7 +920,16 @@ void craft_render_strip(const CraftCamera *cam, uint16_t *fb,
                 if (b1 > 31) b1 = 31;
                 out = (uint16_t)((r1 << 11) | (g1 << 5) | b1);
             }
-            row[px] = out;
+            /* Write the result. Full-res = single pixel; low-res =
+             * replicate across the xstep×ystep block, clamped to the
+             * framebuffer and this strip's y_end. */
+            for (int yy = 0; yy < ystep && (py + yy) < y_end; yy++) {
+                int base = (py + yy) * CRAFT_FB_W + px;
+                for (int xx = 0; xx < xstep && (px + xx) < CRAFT_FB_W; xx++) {
+                    craft_zbuf[base + xx] = z_q;
+                    fb[base + xx] = out;
+                }
+            }
         }
     }
 

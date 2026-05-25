@@ -186,6 +186,9 @@ bool craft_save_deserialise(const uint8_t *in, size_t n,
     } else if (version == CRAFT_SAVE_VERSION_V14) {
         inv_len = CRAFT_SAVE_INVENTORY_LEN_V14;
         has_orient = true;
+    } else if (version == CRAFT_SAVE_VERSION_V15) {
+        inv_len = CRAFT_SAVE_INVENTORY_LEN_V15;
+        has_orient = true;
     } else if (version == CRAFT_SAVE_VERSION) {
         inv_len = BLK_COUNT;
         has_orient = true;

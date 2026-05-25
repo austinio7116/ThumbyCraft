@@ -63,7 +63,7 @@
  *      v6/v7 loads dual-read with the old inventory size; chunk
  *      bytes that were old-format water (id=7 with upper bits set)
  *      get translated to the new WATER_L* ID on chunk restore. */
-#define CRAFT_SAVE_VERSION 15u
+#define CRAFT_SAVE_VERSION 16u
 #define CRAFT_SAVE_VERSION_V5 5u   /* legacy, read-only */
 #define CRAFT_SAVE_VERSION_V6 6u   /* legacy, dual-read on load only */
 #define CRAFT_SAVE_VERSION_V7 7u   /* legacy, dual-read on load only */
@@ -74,6 +74,7 @@
 #define CRAFT_SAVE_VERSION_V12 12u /* legacy, dual-read on load only */
 #define CRAFT_SAVE_VERSION_V13 13u /* legacy, dual-read on load only */
 #define CRAFT_SAVE_VERSION_V14 14u /* legacy, dual-read on load only */
+#define CRAFT_SAVE_VERSION_V15 15u /* legacy, dual-read on load only */
 /* Inventory-array length used by each save version. The current
  * BLK_COUNT is the v11 value; older versions were written with
  * fewer block IDs. */
@@ -86,6 +87,7 @@
 #define CRAFT_SAVE_INVENTORY_LEN_V12 91
 #define CRAFT_SAVE_INVENTORY_LEN_V13 92
 #define CRAFT_SAVE_INVENTORY_LEN_V14 93
+#define CRAFT_SAVE_INVENTORY_LEN_V15 96   /* BLK_COUNT before the 3 lava levels */
 #define CRAFT_SAVE_MAX_BYTES (4096 - 32)   /* one flash sector minus header */
 
 /* Public field offset for the chunks_nonce inside the serialised

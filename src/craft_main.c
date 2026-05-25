@@ -27,6 +27,7 @@
 #include "craft_furnace.h"
 #include "craft_chests.h"
 #include "craft_water.h"
+#include "craft_lava.h"
 #include "craft_redstone.h"
 
 #ifdef THUMBYONE_SLOT_MODE
@@ -350,6 +351,7 @@ void craft_main_init(uint16_t *fb, uint32_t seed) {
     craft_furnace_init();
     craft_chests_init();
     craft_water_init();
+    craft_lava_init();
     craft_redstone_init();
     /* Starter chest 2 blocks east of spawn — pre-stocked with a bow
      * and arrows so the player can verify the ranged loop without
@@ -586,6 +588,18 @@ static void handle_menu_result(CraftMenuResult r) {
             craft_menu_toast(on ? "Interlace ON" : "Interlace OFF");
             break;
         }
+        case CRAFT_MENU_RESULT_LOWRES: {
+            bool on = !craft_render_get_lowres();
+            craft_render_set_lowres(on);
+            craft_menu_toast(on ? "Low-res ON" : "Low-res OFF");
+            break;
+        }
+        case CRAFT_MENU_RESULT_TORCH_LIGHT: {
+            bool on = !craft_render_get_torch_light();
+            craft_render_set_torch_light(on);
+            craft_menu_toast(on ? "Torch light ON" : "Torch light OFF");
+            break;
+        }
         case CRAFT_MENU_RESULT_QUIT_TO_LOBBY:
             s_quit_to_lobby_req = true;
             break;
@@ -631,6 +645,7 @@ static void handle_menu_result(CraftMenuResult r) {
             craft_chests_init();
             craft_furnace_init();
             craft_water_init();
+            craft_lava_init();
             craft_redstone_init();
             craft_drops_init();
             craft_particles_init();
@@ -721,6 +736,7 @@ void craft_main_step(const CraftInput *in, float dt, int fps) {
     craft_drops_tick(dt, &s_player);
     craft_furnace_tick(dt);
     craft_water_tick(dt);
+    craft_lava_tick(dt);
     craft_redstone_tick(dt);
     craft_redstone_tick_fuses(dt);
     craft_mobs_day_night_tick(dt, craft_render_sun_y(), &s_player);
@@ -818,6 +834,7 @@ void craft_main_tick(const CraftInput *in, float dt) {
     craft_drops_tick(dt, &s_player);
     craft_furnace_tick(dt);
     craft_water_tick(dt);
+    craft_lava_tick(dt);
     craft_redstone_tick(dt);
     craft_redstone_tick_fuses(dt);
     craft_mobs_day_night_tick(dt, craft_render_sun_y(), &s_player);
@@ -868,6 +885,13 @@ void craft_main_render_begin(void) {
      * craft_main_draw_hud so physics next tick uses the logical y. */
     s_player.cam.pos.y -= s_player.step_lag;
     craft_render_set_time(s_world_time);
+    /* Held-torch lighting: active only when the option is on AND the
+     * selected hotbar item is a torch. Recomputed per frame so it lights
+     * up the instant the player scrolls to a torch and goes dark again
+     * when they scroll away — all at render time, no lightmap work. */
+    craft_render_set_player_light(
+        craft_render_get_torch_light() &&
+        s_player.hotbar[s_player.hotbar_idx] == BLK_TORCH);
     craft_render_begin(&s_player.cam);
 }
 void craft_main_render_strip(int y_start, int y_end) {

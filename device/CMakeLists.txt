@@ -99,6 +99,7 @@ set(CRAFT_DEVICE_SOURCES
     ${SRC}/craft_furnace.c
     ${SRC}/craft_chests.c
     ${SRC}/craft_water.c
+    ${SRC}/craft_lava.c
     ${SRC}/craft_redstone.c
     ${SRC}/craft_title.c
     ${SRC}/craft_main.c

@@ -50,6 +50,11 @@ typedef struct {
 static ModEntry s_mods[MOD_TABLE_SIZE];
 static int      s_mod_count;
 
+/* Batch-rebuild deferral (see craft_world_begin/end_batch). */
+static bool s_defer_rebuild  = false;
+static bool s_pending_torch  = false;
+static bool s_pending_light  = false;
+
 /* --- Dirty-chunk queue ------------------------------------------ *
  * Every block edit marks its chunk dirty. Persist paths consult
  * this list instead of scanning the whole window, so unmodified
@@ -463,7 +468,7 @@ void craft_world_rebuild_lightmap(void) {
                 /* Torches, lava and lit portals all emit light. (These
                  * use a full-byte compare — their ids are above the
                  * legacy 6-bit mask that the torch check still relies on.) */
-                if ((b & 0x3F) == BLK_TORCH || b == BLK_LAVA || b == BLK_PORTAL ||
+                if ((b & 0x3F) == BLK_TORCH || craft_is_lava_id(b) || b == BLK_PORTAL ||
                     b == BLK_LAMP_ON) {
                     light_flood_from(lx, wy, lz);
                 }
@@ -550,7 +555,8 @@ void craft_world_set(int wx, int wy, int wz, BlockId blk) {
      * water tick picks them up and they flow into the new air space.
      * Water-tick evaporations also pass through here, but those have
      * prev == water and so don't trigger the activation. */
-    if (blk == BLK_AIR && prev != BLK_AIR && !craft_is_water_id((uint8_t)prev)) {
+    if (blk == BLK_AIR && prev != BLK_AIR &&
+        !craft_is_water_id((uint8_t)prev) && !craft_is_lava_id((uint8_t)prev)) {
         static const int dxw[6] = { 1, -1, 0,  0, 0,  0 };
         static const int dyw[6] = { 0,  0, 1, -1, 0,  0 };
         static const int dzw[6] = { 0,  0, 0,  0, 1, -1 };
@@ -564,8 +570,13 @@ void craft_world_set(int wx, int wy, int wz, BlockId blk) {
             if ((unsigned)nlx >= CRAFT_WORLD_X) continue;
             if ((unsigned)nlz >= CRAFT_WORLD_Z) continue;
             int nidx = local_idx(nlx, ny, nlz);
+            /* Wake a static fluid source that just gained an exposed
+             * face: water L0 → L1, lava source → L1. The flow sim then
+             * spreads it into the new air space. */
             if (craft_world_blocks[nidx] == BLK_WATER_L0) {
                 craft_world_blocks[nidx] = (uint8_t)BLK_WATER_L1;
+            } else if (craft_world_blocks[nidx] == BLK_LAVA) {
+                craft_world_blocks[nidx] = (uint8_t)BLK_LAVA_L1;
             }
         }
     }
@@ -627,16 +638,37 @@ void craft_world_set(int wx, int wy, int wz, BlockId blk) {
         if (prev == BLK_TORCH && blk != BLK_TORCH) {
             craft_torches_forget_orient(wx, wy, wz);
         }
-        craft_torches_rebuild();
         /* Torches actually emit light, so a torch change forces a
          * lightmap rebuild. Wire/lever transitions don't affect
          * lightmap (wires are non-opaque both ways; levers are
          * solid both ways), so skip that work. */
-        if (torch_change) craft_world_rebuild_lightmap();
-        else if (transp_changed) craft_world_rebuild_lightmap();
+        bool want_light = torch_change || transp_changed;
+        if (s_defer_rebuild) {
+            s_pending_torch = true;
+            if (want_light) s_pending_light = true;
+        } else {
+            craft_torches_rebuild();
+            if (want_light) craft_world_rebuild_lightmap();
+        }
     } else if (transp_changed || lamp_change) {
-        craft_world_rebuild_lightmap();
+        if (s_defer_rebuild) s_pending_light = true;
+        else craft_world_rebuild_lightmap();
     }
+}
+
+void craft_world_begin_batch(void) {
+    s_defer_rebuild = true;
+    s_pending_torch = false;
+    s_pending_light = false;
+}
+
+bool craft_world_end_batch(void) {
+    s_defer_rebuild = false;
+    bool torch = s_pending_torch;
+    if (s_pending_light) craft_world_rebuild_lightmap();
+    s_pending_torch = false;
+    s_pending_light = false;
+    return torch;
 }
 
 BlockId craft_world_block_at(int wx, int wy, int wz, uint32_t seed) {

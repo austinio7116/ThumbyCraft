@@ -73,6 +73,17 @@ static inline int craft_world_light_level(int wx, int wy, int wz) {
  * torches in view. */
 void craft_world_rebuild_lightmap(void);
 
+/* Batch guard for bursts of craft_world_set calls (the redstone tick).
+ * Between begin/end, each set records that a torch-list or lightmap
+ * rebuild is needed instead of running it immediately — so a piston
+ * action (or every piston/door/observer firing in one tick) collapses
+ * its 2-3 set-triggered rebuilds into a single rebuild at end_batch.
+ * end_batch flushes the deferred lightmap and returns true if a
+ * torch-list rebuild was requested, letting the caller fold in its own
+ * signals (e.g. the wire checksum) and rebuild the sprite list once. */
+void craft_world_begin_batch(void);
+bool craft_world_end_batch(void);
+
 /* Initialise the world to an empty buffer at origin (0, 0). */
 void craft_world_init(void);
 

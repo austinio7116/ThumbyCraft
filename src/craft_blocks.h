@@ -153,6 +153,12 @@ typedef enum {
     BLK_GRAVEL          = 93,   /* worldgen patches; mining ~10% drops flint (save v15) */
     BLK_FLINT           = 94,   /* item — lights an obsidian portal frame (save v15) */
     BLK_PORTAL          = 95,   /* lit portal — swirling purple, walk-through (save v15) */
+    /* Flowing lava (save v16). BLK_LAVA is the static source (L0);
+     * these are the decaying flow levels the lava sim spreads, mirroring
+     * water's L1..L7 — but lava flows far more slowly. */
+    BLK_LAVA_L1         = 96,
+    BLK_LAVA_L2         = 97,
+    BLK_LAVA_L3         = 98,
     BLK_COUNT
 } BlockId;
 
@@ -177,6 +183,23 @@ static inline BlockId craft_water_for_level(int level) {
     if (level <= 0) return BLK_WATER_L0;
     if (level >= 7) return BLK_WATER_L7;
     return (BlockId)(BLK_WATER_L1 + (level - 1));
+}
+
+/* Lava level scheme — mirrors water. BLK_LAVA is the static source
+ * (L0, never decays); BLK_LAVA_L1..L3 are flowing levels. The flow sim
+ * (craft_lava.c) is identical in shape to water's but ticks far slower. */
+static inline bool craft_is_lava_id(uint8_t b) {
+    return b == BLK_LAVA || (b >= BLK_LAVA_L1 && b <= BLK_LAVA_L3);
+}
+static inline uint8_t craft_lava_level(uint8_t b) {
+    if (b == BLK_LAVA) return 0;
+    if (b >= BLK_LAVA_L1 && b <= BLK_LAVA_L3) return (uint8_t)(1 + (b - BLK_LAVA_L1));
+    return 0;
+}
+static inline BlockId craft_lava_for_level(int level) {
+    if (level <= 0) return BLK_LAVA;
+    if (level >= 3) return BLK_LAVA_L3;
+    return (BlockId)(BLK_LAVA_L1 + (level - 1));
 }
 
 /* Backwards-compat alias for older code that referenced PICKAXE
@@ -254,7 +277,7 @@ static inline bool craft_block_opaque(BlockId blk) {
  * they need an explicit allow-list. */
 static inline bool craft_block_solid(BlockId blk) {
     if (blk == BLK_AIR || craft_is_water_id((uint8_t)blk) || blk == BLK_TORCH) return false;
-    if (blk == BLK_LAVA) return false;   /* fluid — you sink into it */
+    if (craft_is_lava_id((uint8_t)blk)) return false;   /* fluid — you sink into it */
     if (blk == BLK_PORTAL) return false; /* walk-through shimmer */
     if (blk == BLK_REDSTONE_WIRE || blk == BLK_REDSTONE_WIRE_ON) return false;
     if (blk == BLK_FURNACE) return true;
@@ -293,7 +316,7 @@ static inline bool craft_block_solid(BlockId blk) {
  * entries have inventory slots but never become cells. */
 static inline bool craft_block_placeable(BlockId blk) {
     if (blk == BLK_AIR) return false;
-    if (blk == BLK_LAVA) return false;   /* world-gen hazard, no bucket yet */
+    if (craft_is_lava_id((uint8_t)blk)) return false;   /* world-gen hazard, no bucket yet */
     if (blk == BLK_FURNACE || blk == BLK_CHEST) return true;
     /* BLK_REDSTONE is an inventory item; placing it converts to
      * BLK_REDSTONE_WIRE (handled in the player's B-press path), so

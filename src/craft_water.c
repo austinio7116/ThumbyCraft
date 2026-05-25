@@ -208,7 +208,7 @@ void craft_water_tick(float dt) {
                         if ((unsigned)nlz >= CRAFT_WORLD_Z) continue;
                         if ((unsigned)nwy >= CRAFT_WORLD_Y) continue;
                         int nidx = (nwy * CRAFT_WORLD_Z + nlz) * CRAFT_WORLD_X + nlx;
-                        if (craft_world_blocks[nidx] == BLK_LAVA)
+                        if (craft_is_lava_id(craft_world_blocks[nidx]))
                             craft_world_set(nlx + ox, nwy, nlz + oz, BLK_OBSIDIAN);
                     }
                 }

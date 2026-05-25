@@ -44,6 +44,8 @@ static const MenuItem ITEMS[] = {
     { "Auto save",     CRAFT_MENU_RESULT_AUTOSAVE,   false },
     { "Far LOD",       CRAFT_MENU_RESULT_FAR_LOD,    false },
     { "Interlace",     CRAFT_MENU_RESULT_INTERLACE,  false },
+    { "Low-res",       CRAFT_MENU_RESULT_LOWRES,     false },
+    { "Torch light",   CRAFT_MENU_RESULT_TORCH_LIGHT, false },
 #ifdef THUMBYONE_SLOT_MODE
     /* Reboot into ThumbyOne lobby. Only present in slot builds —
      * standalone ThumbyCraft has no lobby to return to. */
@@ -1410,6 +1412,20 @@ static void draw_main_page(uint16_t *fb, const CraftPlayer *p) {
                                : rgb565(120, 120, 130));
         } else if (ITEMS[i].result == CRAFT_MENU_RESULT_INTERLACE) {
             bool on = craft_render_get_interlace();
+            const char *st = on ? "ON" : "OFF";
+            int sw = craft_font_width(st);
+            craft_font_draw(fb, st, x0 + panel_w - sw - 6, item_y,
+                            on ? rgb565(120, 220, 255)
+                               : rgb565(120, 120, 130));
+        } else if (ITEMS[i].result == CRAFT_MENU_RESULT_LOWRES) {
+            bool on = craft_render_get_lowres();
+            const char *st = on ? "ON" : "OFF";
+            int sw = craft_font_width(st);
+            craft_font_draw(fb, st, x0 + panel_w - sw - 6, item_y,
+                            on ? rgb565(120, 220, 255)
+                               : rgb565(120, 120, 130));
+        } else if (ITEMS[i].result == CRAFT_MENU_RESULT_TORCH_LIGHT) {
+            bool on = craft_render_get_torch_light();
             const char *st = on ? "ON" : "OFF";
             int sw = craft_font_width(st);
             craft_font_draw(fb, st, x0 + panel_w - sw - 6, item_y,

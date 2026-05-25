@@ -719,7 +719,7 @@ void craft_player_tick(CraftPlayer *p, const CraftInput *in, float dt) {
         for (int yy = ly0; yy <= ly1 && !in_lava; yy++)
             for (int zz = lz0; zz <= lz1 && !in_lava; zz++)
                 for (int xx = lx0; xx <= lx1 && !in_lava; xx++)
-                    if (craft_world_get(xx, yy, zz) == BLK_LAVA) in_lava = true;
+                    if (craft_is_lava_id((uint8_t)craft_world_get(xx, yy, zz))) in_lava = true;
         if (in_lava) craft_player_take_damage(p, 3);
     }
 
@@ -877,19 +877,24 @@ void craft_player_tick(CraftPlayer *p, const CraftInput *in, float dt) {
                     goto break_handled;
                 }
                 /* Mining tier gating. Player has the highest pickaxe
-                 * they own; reject if the block needs a higher tier. */
-                int need = craft_block_pickaxe_tier(was);
-                int have = 0;
-                if      (p->inventory[BLK_PICKAXE_DIAMOND] > 0) have = 4;  /* only diamond mines obsidian */
-                else if (p->inventory[BLK_PICKAXE_GOLD]    > 0) have = 3;
-                else if (p->inventory[BLK_PICKAXE_SILVER]  > 0) have = 3;
-                else if (p->inventory[BLK_PICKAXE_IRON]    > 0) have = 3;
-                else if (p->inventory[BLK_PICKAXE_STONE]   > 0) have = 2;
-                else if (p->inventory[BLK_PICKAXE_WOOD]    > 0) have = 1;
-                if (need > have) {
-                    extern void craft_audio_pickaxe_ting(void);
-                    craft_audio_pickaxe_ting();
-                    goto break_handled;
+                 * they own; reject if the block needs a higher tier.
+                 * Creative has no destroy restrictions — it breaks any
+                 * block instantly regardless of pickaxe (bedrock at y=0
+                 * is still protected by the floor check above). */
+                if (p->mode != CRAFT_MODE_CREATIVE) {
+                    int need = craft_block_pickaxe_tier(was);
+                    int have = 0;
+                    if      (p->inventory[BLK_PICKAXE_DIAMOND] > 0) have = 4;  /* only diamond mines obsidian */
+                    else if (p->inventory[BLK_PICKAXE_GOLD]    > 0) have = 3;
+                    else if (p->inventory[BLK_PICKAXE_SILVER]  > 0) have = 3;
+                    else if (p->inventory[BLK_PICKAXE_IRON]    > 0) have = 3;
+                    else if (p->inventory[BLK_PICKAXE_STONE]   > 0) have = 2;
+                    else if (p->inventory[BLK_PICKAXE_WOOD]    > 0) have = 1;
+                    if (need > have) {
+                        extern void craft_audio_pickaxe_ting(void);
+                        craft_audio_pickaxe_ting();
+                        goto break_handled;
+                    }
                 }
                 craft_world_set(h.bx, h.by, h.bz, BLK_AIR);
                 if (was == BLK_FURNACE) {
@@ -941,7 +946,7 @@ void craft_player_tick(CraftPlayer *p, const CraftInput *in, float dt) {
                     else if (was == BLK_TRAPDOOR_ON)   dropped = BLK_TRAPDOOR_OFF;
                     else if (was == BLK_PISTON_ON)     dropped = BLK_PISTON_OFF;
                     else if (was == BLK_PISTON_ARM)    dropped = BLK_AIR;
-                    else if (was == BLK_LAVA)          dropped = BLK_AIR;   /* never pick up lava */
+                    else if (craft_is_lava_id((uint8_t)was)) dropped = BLK_AIR;   /* never pick up lava */
                     else if (was == BLK_GRAVEL) {
                         /* ~10% of gravel yields flint (the rest gravel).
                          * Deterministic per-cell so re-mining is stable. */

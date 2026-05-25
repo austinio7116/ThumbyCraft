@@ -352,6 +352,11 @@ void craft_redstone_tick(float dt) {
      * was placed/removed since the last tick. Every phase below then
      * iterates s_rs (the redstone cells) instead of the full window. */
     s_in_tick = true;
+    /* Defer the per-set torch/lightmap rebuilds that each craft_world_set
+     * below would otherwise run immediately — a piston action makes 2-3
+     * sets, and every driven block in this tick adds more. Batched, the
+     * whole tick costs one lightmap + one torch rebuild at most. */
+    craft_world_begin_batch();
     if (s_rs_dirty) rs_full_scan();
 
     /* Phase 1 — collect lever_on positions and seed BFS. Also reset
@@ -921,6 +926,12 @@ void craft_redstone_tick(float dt) {
 
     s_in_tick = false;
 
+    /* End the batch: this flushes a single deferred lightmap rebuild (if
+     * any driven block changed transparency this tick) and tells us
+     * whether any sprite-bearing block changed, so we can fold that into
+     * the torch-rebuild decision below. */
+    bool batch_torch = craft_world_end_batch();
+
     /* Re-checksum the lit-wire set; compare to the snapshot taken at the
      * top of the tick. */
     uint32_t wire_sum_after = 0;
@@ -930,12 +941,12 @@ void craft_redstone_tick(float dt) {
             wire_sum_after ^= (uint32_t)wi * 2654435761u;
     }
 
-    /* Rebuild the sprite list only on a REAL change: a wire actually
-     * switched on/off (checksum differs), or a non-wire sprite-bearing
-     * change happened (state_changed — observers/gates only set this on
-     * an actual transition, never every tick). A steadily-powered wire
-     * matches neither, so it no longer forces a full rebuild per tick. */
-    if (state_changed || wire_sum_before != wire_sum_after)
+    /* Rebuild the sprite list at most once, and only on a REAL change: a
+     * driven sprite block changed (batch_torch — pistons/doors/observers),
+     * a wire actually switched on/off (checksum differs), or a gate
+     * transition set state_changed. A steadily-powered wire matches none,
+     * so it no longer forces a full rebuild per tick. */
+    if (batch_torch || state_changed || wire_sum_before != wire_sum_after)
         craft_torches_rebuild();
 
     /* Remember this tick's pad count so the next tick still runs once

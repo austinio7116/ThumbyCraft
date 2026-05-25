@@ -76,6 +76,21 @@ bool craft_render_get_far_lod(void);
 void craft_render_set_interlace(bool on);
 bool craft_render_get_interlace(void);
 
+/* Toggle low-res (64×64) performance mode: trace one ray per 2×2
+ * pixel block and replicate the result, quartering the ray count.
+ * Forces interlace off (the two row-thinning tricks don't combine). */
+void craft_render_set_lowres(bool on);
+bool craft_render_get_lowres(void);
+
+/* Held-torch lighting. craft_render_set_torch_light is the persistent
+ * menu option ("a held torch lights the scene"). craft_render_set_player_light
+ * is the per-frame effective state the game loop computes each frame as
+ * (torch_light_option && selected hotbar item is a torch). The light is
+ * a render-time distance falloff from the eye — no lightmap rebuilds. */
+void craft_render_set_torch_light(bool on);
+bool craft_render_get_torch_light(void);
+void craft_render_set_player_light(bool on);
+
 /* Drive the day/night cycle. `world_time` is seconds since world
  * start (or current cycle position — wraps every 240 s by the
  * convention craft_main uses). Updates sun position, sky colours,
