@@ -27,6 +27,10 @@ void craft_redstone_tick(float dt);
  * world; per-block edits use note_change below. */
 void craft_redstone_rescan(void);
 
+/* Defer the registry rescan to the next tick (streaming shift uses
+ * this to avoid a per-frame full-window scan). */
+void craft_redstone_mark_dirty(void);
+
 /* Incremental update for a single block transition. Called from
  * craft_world_set so the tick can short-circuit when nothing is
  * powered. Pass the previous block id and the new one. */

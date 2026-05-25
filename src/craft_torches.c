@@ -183,87 +183,127 @@ static const uint8_t s_sprite_kind1[256] = {
     [BLK_LEVER_ON]          = TORCH_KIND_LEVER_ON + 1,
 };
 
-void craft_torches_rebuild(void) {
-    s_torch_count = 0;
-    for (int i = 0; i < CRAFT_MAX_TORCHES; i++) craft_torches[i].alive = false;
+/* Wire-connection mask for a wire at local (lx,wy,lz). */
+static uint8_t wire_connect_mask(int lx, int wy, int lz) {
+    static const int ndx[4] = { 1, -1, 0,  0 };
+    static const int ndz[4] = { 0,  0, 1, -1 };
+    uint8_t connect = 0;
+    for (int d = 0; d < 4; d++) {
+        int nlx = lx + ndx[d], nlz = lz + ndz[d];
+        if ((unsigned)nlx >= CRAFT_WORLD_X) continue;
+        if ((unsigned)nlz >= CRAFT_WORLD_Z) continue;
+        BlockId nb = (BlockId)craft_world_blocks[(wy * CRAFT_WORLD_Z + nlz) * CRAFT_WORLD_X + nlx];
+        if (nb == BLK_REDSTONE_WIRE || nb == BLK_REDSTONE_WIRE_ON ||
+            nb == BLK_LEVER_OFF || nb == BLK_LEVER_ON ||
+            nb == BLK_DOOR_OFF || nb == BLK_DOOR_ON ||
+            nb == BLK_TRAPDOOR_OFF || nb == BLK_TRAPDOOR_ON ||
+            nb == BLK_PISTON_OFF || nb == BLK_PISTON_ON ||
+            nb == BLK_STICKY_PISTON_OFF || nb == BLK_STICKY_PISTON_ON ||
+            nb == BLK_DISPENSER || nb == BLK_DISPENSER_ON ||
+            nb == BLK_TARGET || nb == BLK_TARGET_ON ||
+            nb == BLK_TNT || nb == BLK_TNT_FUSED ||
+            nb == BLK_PRESSURE_PAD || nb == BLK_REDSTONE_BLOCK)
+            connect |= (1u << d);
+    }
+    return connect;
+}
 
-    int ox = craft_world_origin_x;
-    int oz = craft_world_origin_z;
-    /* Two priority passes: functional sprites (redstone, doors,
-     * pistons, ladders, torches) first; decorative vines/lily pads
-     * last — so when the list fills, the dropped overflow is
-     * decoration, never the player's circuits.
-     *
-     * Loop order is wy→lz→lx so the innermost step walks contiguous
-     * buffer bytes (idx = base + lx); the old lz→lx→wy order jumped
-     * 4 KB per inner step and missed cache on nearly every cell. */
-    for (int pass = 0; pass < 2; pass++) {
-    for (int wy = 0; wy < CRAFT_WORLD_Y; wy++) {
-        for (int lz = 0; lz < CRAFT_WORLD_Z; lz++) {
+static void add_sprite_cell(int lx, int wy, int lz, uint8_t kind) {
+    if (s_torch_count >= CRAFT_MAX_TORCHES) return;
+    CraftTorch *t = &craft_torches[s_torch_count++];
+    t->alive   = true;
+    t->wx      = lx + craft_world_origin_x;
+    t->wz      = lz + craft_world_origin_z;
+    t->wy      = (int16_t)wy;
+    t->kind    = kind;
+    t->connect = 0;
+    if (kind == TORCH_KIND_TORCH || kind == TORCH_KIND_LADDER ||
+        kind == TORCH_KIND_VINE ||
+        kind == TORCH_KIND_DOOR_CLOSED  || kind == TORCH_KIND_DOOR_OPEN ||
+        kind == TORCH_KIND_TRAPDOOR_CLOSED || kind == TORCH_KIND_TRAPDOOR_OPEN ||
+        kind == TORCH_KIND_PISTON_OFF || kind == TORCH_KIND_PISTON_ON ||
+        kind == TORCH_KIND_PISTON_ARM ||
+        kind == TORCH_KIND_LEVER_OFF || kind == TORCH_KIND_LEVER_ON) {
+        t->orient = orient_lookup(t->wx, t->wy, t->wz);
+    } else {
+        t->orient = (uint8_t)FACE_PY;
+    }
+    if (kind == TORCH_KIND_WIRE || kind == TORCH_KIND_WIRE_ON)
+        t->connect = wire_connect_mask(lx, wy, lz);
+}
+
+/* Scan a local region, appending its sprite cells. pass 0 = functional
+ * only, 1 = decorative only — preserving the overflow priority split. */
+static void scan_sprites_region(int lx0, int lx1, int lz0, int lz1, int pass) {
+    if (lx0 < 0) lx0 = 0; if (lx1 > CRAFT_WORLD_X) lx1 = CRAFT_WORLD_X;
+    if (lz0 < 0) lz0 = 0; if (lz1 > CRAFT_WORLD_Z) lz1 = CRAFT_WORLD_Z;
+    for (int wy = 0; wy < CRAFT_WORLD_Y; wy++)
+        for (int lz = lz0; lz < lz1; lz++) {
             int base = (wy * CRAFT_WORLD_Z + lz) * CRAFT_WORLD_X;
-            for (int lx = 0; lx < CRAFT_WORLD_X; lx++) {
+            for (int lx = lx0; lx < lx1; lx++) {
                 uint8_t k1 = s_sprite_kind1[craft_world_blocks[base + lx]];
                 if (!k1) continue;
                 uint8_t kind = (uint8_t)(k1 - 1);
-                /* pass 0 = functional only; pass 1 = decorative only. */
-                bool decorative = (kind == TORCH_KIND_VINE ||
-                                   kind == TORCH_KIND_LILY_PAD);
+                bool decorative = (kind == TORCH_KIND_VINE || kind == TORCH_KIND_LILY_PAD);
                 if ((pass == 0) == decorative) continue;
-                if (s_torch_count >= CRAFT_MAX_TORCHES) goto done;
-                CraftTorch *t = &craft_torches[s_torch_count++];
-                t->alive  = true;
-                t->wx     = lx + ox;
-                t->wz     = lz + oz;
-                t->wy     = (int16_t)wy;
-                t->kind   = kind;
-                t->connect = 0;
-                if (kind == TORCH_KIND_TORCH || kind == TORCH_KIND_LADDER ||
-                    kind == TORCH_KIND_VINE ||
-                    kind == TORCH_KIND_DOOR_CLOSED  || kind == TORCH_KIND_DOOR_OPEN ||
-                    kind == TORCH_KIND_TRAPDOOR_CLOSED || kind == TORCH_KIND_TRAPDOOR_OPEN ||
-                    kind == TORCH_KIND_PISTON_OFF || kind == TORCH_KIND_PISTON_ON ||
-                    kind == TORCH_KIND_PISTON_ARM ||
-                    kind == TORCH_KIND_LEVER_OFF || kind == TORCH_KIND_LEVER_ON) {
-                    t->orient = orient_lookup(t->wx, t->wy, t->wz);
-                } else {
-                    t->orient = (uint8_t)FACE_PY;
-                }
-                /* Wire connection mask — bit per neighbour cell that
-                 * a wire should visually "wire up" with: another wire,
-                 * a lever (source), or any of the driven blocks (door,
-                 * trapdoor, piston, TNT). Lookups go through the
-                 * direct array — same fast path the redstone tick uses. */
-                if (kind == TORCH_KIND_WIRE || kind == TORCH_KIND_WIRE_ON) {
-                    static const int ndx[4] = { 1, -1, 0,  0 };
-                    static const int ndz[4] = { 0,  0, 1, -1 };
-                    for (int d = 0; d < 4; d++) {
-                        int nlx = lx + ndx[d];
-                        int nlz = lz + ndz[d];
-                        if ((unsigned)nlx >= CRAFT_WORLD_X) continue;
-                        if ((unsigned)nlz >= CRAFT_WORLD_Z) continue;
-                        int nidx = (wy * CRAFT_WORLD_Z + nlz) * CRAFT_WORLD_X + nlx;
-                        BlockId nb = (BlockId)craft_world_blocks[nidx];
-                        if (nb == BLK_REDSTONE_WIRE || nb == BLK_REDSTONE_WIRE_ON ||
-                            nb == BLK_LEVER_OFF || nb == BLK_LEVER_ON ||
-                            nb == BLK_DOOR_OFF || nb == BLK_DOOR_ON ||
-                            nb == BLK_TRAPDOOR_OFF || nb == BLK_TRAPDOOR_ON ||
-                            nb == BLK_PISTON_OFF || nb == BLK_PISTON_ON ||
-                            nb == BLK_STICKY_PISTON_OFF || nb == BLK_STICKY_PISTON_ON ||
-                            nb == BLK_DISPENSER || nb == BLK_DISPENSER_ON ||
-                            nb == BLK_TARGET || nb == BLK_TARGET_ON ||
-                            nb == BLK_TNT || nb == BLK_TNT_FUSED ||
-                            nb == BLK_PRESSURE_PAD ||
-                            nb == BLK_REDSTONE_BLOCK) {
-                            t->connect |= (1u << d);
-                        }
-                    }
-                }
+                add_sprite_cell(lx, wy, lz, kind);
             }
         }
+}
+
+void craft_torches_rebuild(void) {
+    s_torch_count = 0;
+    for (int i = 0; i < CRAFT_MAX_TORCHES; i++) craft_torches[i].alive = false;
+    scan_sprites_region(0, CRAFT_WORLD_X, 0, CRAFT_WORLD_Z, 0);
+    scan_sprites_region(0, CRAFT_WORLD_X, 0, CRAFT_WORLD_Z, 1);
+}
+
+/* --- Incremental update for streaming shifts ---------------------- */
+void craft_torches_drop_outside(void) {
+    int ox = craft_world_origin_x, oz = craft_world_origin_z;
+    int w = 0;
+    for (int i = 0; i < s_torch_count; i++) {
+        int lx = craft_torches[i].wx - ox, lz = craft_torches[i].wz - oz;
+        if ((unsigned)lx < CRAFT_WORLD_X && (unsigned)lz < CRAFT_WORLD_Z) {
+            if (w != i) craft_torches[w] = craft_torches[i];
+            w++;
+        }
     }
+    for (int i = w; i < s_torch_count; i++) craft_torches[i].alive = false;
+    s_torch_count = w;
+}
+
+void craft_torches_add_region(int lx0, int lx1, int lz0, int lz1) {
+    scan_sprites_region(lx0, lx1, lz0, lz1, 0);
+    scan_sprites_region(lx0, lx1, lz0, lz1, 1);
+}
+
+/* Remove list entries whose local cell falls in the region — paired
+ * with add_region to cleanly REBUILD a strip's sprites (e.g. after a
+ * streamed shift re-stamps features there) without duplicating the
+ * ones already listed. */
+void craft_torches_drop_region(int lx0, int lx1, int lz0, int lz1) {
+    int ox = craft_world_origin_x, oz = craft_world_origin_z;
+    int w = 0;
+    for (int i = 0; i < s_torch_count; i++) {
+        int lx = craft_torches[i].wx - ox, lz = craft_torches[i].wz - oz;
+        if (lx >= lx0 && lx < lx1 && lz >= lz0 && lz < lz1) continue;  /* drop */
+        if (w != i) craft_torches[w] = craft_torches[i];
+        w++;
     }
-done:
-    return;
+    for (int i = w; i < s_torch_count; i++) craft_torches[i].alive = false;
+    s_torch_count = w;
+}
+
+void craft_torches_refresh_connect(int lx0, int lx1, int lz0, int lz1) {
+    int ox = craft_world_origin_x, oz = craft_world_origin_z;
+    for (int i = 0; i < s_torch_count; i++) {
+        if (craft_torches[i].kind != TORCH_KIND_WIRE &&
+            craft_torches[i].kind != TORCH_KIND_WIRE_ON) continue;
+        int lx = craft_torches[i].wx - ox, lz = craft_torches[i].wz - oz;
+        if (lx >= lx0 && lx < lx1 && lz >= lz0 && lz < lz1)
+            craft_torches[i].connect = wire_connect_mask(lx, craft_torches[i].wy, lz);
+    }
 }
 
 /* --- Cuboid model + transforms ----------------------------------- */

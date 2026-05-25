@@ -211,6 +211,14 @@ void craft_redstone_rescan(void) {
     rs_full_scan();
 }
 
+/* Defer a full registry rescan to the next sim tick (5 Hz) instead of
+ * doing it now — used by the streaming shift so a per-frame window
+ * slide doesn't pay the full-window scan every frame. The registry is
+ * only consumed inside the tick, which rebuilds it when dirty. */
+void craft_redstone_mark_dirty(void) {
+    s_rs_dirty = true;
+}
+
 void craft_redstone_note_change(BlockId prev, BlockId blk) {
     /* Keep s_active (the fast-path "something is live" counter) in sync.
      * DISPENSER / TARGET are purely reactive, so only their _ON states

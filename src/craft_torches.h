@@ -104,6 +104,14 @@ bool   craft_torches_orient_deserialise(const uint8_t *in, size_t in_n);
  * Called automatically by craft_world after shifts/load. */
 void craft_torches_rebuild(void);
 
+/* Incremental update for streaming shifts: sprite entries use world
+ * coords, so the overlap's survive a slide. Drop scrolled-out entries,
+ * add a freshly-exposed strip, refresh wire-connections on the seam. */
+void craft_torches_drop_outside(void);
+void craft_torches_drop_region(int lx0, int lx1, int lz0, int lz1);
+void craft_torches_add_region(int lx0, int lx1, int lz0, int lz1);
+void craft_torches_refresh_connect(int lx0, int lx1, int lz0, int lz1);
+
 /* Pick ray — returns the index of the closest torch within max_dist
  * along the camera ray, or -1. Used by the player attack path so A
  * can break torches (they're skipped by the world raycaster). */

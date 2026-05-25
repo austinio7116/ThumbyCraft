@@ -552,6 +552,51 @@ static void lightsrc_scan_strip(int lx0, int lx1, int lz0, int lz1) {
             }
 }
 
+/* Zero the lightmap over a local box (X rounded out to 4-cell bytes so
+ * we can memset whole bytes; over-clearing into the margin is harmless
+ * — the reflood below refills it). */
+static void clear_light_box(int lx0, int lx1, int lz0, int lz1) {
+    lx0 &= ~3; lx1 = (lx1 + 3) & ~3;
+    if (lx0 < 0) lx0 = 0; if (lx1 > CRAFT_WORLD_X) lx1 = CRAFT_WORLD_X;
+    if (lz0 < 0) lz0 = 0; if (lz1 > CRAFT_WORLD_Z) lz1 = CRAFT_WORLD_Z;
+    int b0 = lx0 / 4, nb = (lx1 - lx0) / 4;
+    if (nb <= 0 || lz1 <= lz0) return;
+    for (int wy = 0; wy < CRAFT_WORLD_Y; wy++)
+        for (int lz = lz0; lz < lz1; lz++) {
+            int cell0 = (wy * CRAFT_WORLD_Z + lz) * CRAFT_WORLD_X;
+            memset(&craft_world_lightmap[cell0 / 4 + b0], 0, (size_t)nb);
+        }
+}
+
+/* Relight a freshly-streamed strip EXACTLY: clear the box, then re-flood
+ * every registry source within one light-radius of it. Any source that
+ * can light a cell in the box is within R, so the box ends up correct;
+ * the floods also spill (light_set_max) into the unchanged surroundings
+ * with no effect. (Light *removal* at the trailing edge — a source that
+ * scrolled out — is left stale, but that edge is behind the player and
+ * scrolls away, so it's never seen.) */
+static void relight_strip(int lx0, int lx1, int lz0, int lz1) {
+    clear_light_box(lx0, lx1, lz0, lz1);
+    /* Scan the strip's local band DIRECTLY for sources (not the global
+     * registry — which overflows on cave lava and would force a full
+     * rebuild). Any source that can light a cleared cell is within the
+     * light radius, so flooding the band relights the strip exactly,
+     * and the floods spill harmlessly (light_set_max) into the
+     * surroundings. Strip-scaled — no full-window work. */
+    int R = CRAFT_LIGHT_RADIUS;
+    int sx0 = (lx0 & ~3) - R, sx1 = ((lx1 + 3) & ~3) + R;
+    int sz0 = lz0 - R, sz1 = lz1 + R;
+    if (sx0 < 0) sx0 = 0; if (sx1 > CRAFT_WORLD_X) sx1 = CRAFT_WORLD_X;
+    if (sz0 < 0) sz0 = 0; if (sz1 > CRAFT_WORLD_Z) sz1 = CRAFT_WORLD_Z;
+    for (int wy = 0; wy < CRAFT_WORLD_Y; wy++)
+        for (int lz = sz0; lz < sz1; lz++) {
+            int base = (wy * CRAFT_WORLD_Z + lz) * CRAFT_WORLD_X;
+            for (int lx = sx0; lx < sx1; lx++)
+                if (is_light_source(craft_world_blocks[base + lx]))
+                    light_flood_from(lx, wy, lz);
+        }
+}
+
 void craft_world_rebuild_lightmap(void) {
     memset(craft_world_lightmap, 0, sizeof craft_world_lightmap);
     if (s_lightsrc_valid) {
@@ -1031,64 +1076,8 @@ static void shift_z(int dz, uint32_t seed) {
     }
 }
 
-void craft_world_maybe_shift(int player_wx, int player_wz, uint32_t seed) {
-    int lx = player_wx - craft_world_origin_x;
-    int lz = player_wz - craft_world_origin_z;
-
-    int dx = 0, dz = 0;
-    while (lx < CRAFT_EDGE_MARGIN)                  { dx -= CRAFT_SHIFT; lx += CRAFT_SHIFT; }
-    while (lx >= CRAFT_WORLD_X - CRAFT_EDGE_MARGIN) { dx += CRAFT_SHIFT; lx -= CRAFT_SHIFT; }
-    while (lz < CRAFT_EDGE_MARGIN)                  { dz -= CRAFT_SHIFT; lz += CRAFT_SHIFT; }
-    while (lz >= CRAFT_WORLD_Z - CRAFT_EDGE_MARGIN) { dz += CRAFT_SHIFT; lz -= CRAFT_SHIFT; }
-    if (dx == 0 && dz == 0) return;
-
-    /* Before shifting: persist only chunks that are LEAVING the
-     * window AND are dirty. The mod hash is keyed on world coords —
-     * mods for chunks that stay in window keep living in the hash,
-     * and the background persist_tick will drain them later. */
-    int old_x0, old_x1, old_z0, old_z1;
-    window_chunk_range(&old_x0, &old_x1, &old_z0, &old_z1);
-    int new_origin_x = craft_world_origin_x + dx;
-    int new_origin_z = craft_world_origin_z + dz;
-    int new_x0 = chunk_of(new_origin_x);
-    int new_x1 = chunk_of(new_origin_x + CRAFT_WORLD_X - 1);
-    int new_z0 = chunk_of(new_origin_z);
-    int new_z1 = chunk_of(new_origin_z + CRAFT_WORLD_Z - 1);
-    chunks_persist_departing(old_x0, old_x1, old_z0, old_z1,
-                             new_x0, new_x1, new_z0, new_z1);
-
-    /* No overlap → full regen. Happens only on huge teleports. */
-    int adx = (dx > 0) ? dx : -dx;
-    int adz = (dz > 0) ? dz : -dz;
-    if (adx >= CRAFT_WORLD_X || adz >= CRAFT_WORLD_Z) {
-        craft_world_origin_x += dx;
-        craft_world_origin_z += dz;
-        craft_gen_invalidate_height_cache();
-        craft_world_chunks_restore_window();
-        window_load(seed);
-        craft_gen_stamp_features(seed);
-        s_lightsrc_valid = false;   /* whole window replaced — rescan */
-        compute_skyheight_all();
-        craft_torches_rebuild();
-        craft_world_rebuild_lightmap();
-        return;
-    }
-
-    uint32_t _p0 = prof_now();
-    /* Partial regen: memmove the overlap, regen only the new strip.
-     * X and Z handled independently. Each shift_* function updates
-     * the origin and then refreshes the height cache before regen
-     * so the lazy fill lands at the right coords. */
-    if (dx != 0) shift_x(dx, seed);
-    if (dz != 0) shift_z(dz, seed);
-    uint32_t _p1 = prof_now();
-
-    /* After shift: pull in mods for chunks that newly overlap the
-     * window AND back-stamp any in-hash mods onto the buffer (some
-     * strips were regenerated before the restore added them, so
-     * they'd otherwise be missing). The back-stamp loop scans the
-     * 2K-entry hash — microseconds. */
-    craft_world_chunks_restore_window();
+/* Apply all in-window mods to the buffer (cheap 2K-entry hash scan). */
+static void backstamp_mods(void) {
     for (int i = 0; i < MOD_TABLE_SIZE; i++) {
         ModEntry *e = &s_mods[i];
         if (!(e->flags & 1)) continue;
@@ -1097,74 +1086,105 @@ void craft_world_maybe_shift(int player_wx, int player_wz, uint32_t seed) {
         if ((unsigned)lxi >= CRAFT_WORLD_X) continue;
         if ((unsigned)lzi >= CRAFT_WORLD_Z) continue;
         if ((unsigned)e->wy >= CRAFT_WORLD_Y) continue;
-        int idx = (e->wy * CRAFT_WORLD_Z + lzi) * CRAFT_WORLD_X + lxi;
-        craft_world_blocks[idx] = e->blk;
+        craft_world_blocks[(e->wy * CRAFT_WORLD_Z + lzi) * CRAFT_WORLD_X + lxi] = e->blk;
     }
-    uint32_t _p2 = prof_now();
+}
 
-    yield_now();   /* pump audio after the regen + mod restore */
+/* One streaming step: slide the window by exactly one column (dx,dz is
+ * one of ±1, the other 0) and bring that column fully up to date —
+ * regen, mods, features (+canopy margin), sky-height, lighting, sprite
+ * list, redstone. Everything is strip-scaled, so a step is a few ms
+ * rather than the ~140 ms a full chunk-shift cost. Called per frame as
+ * the player walks, so terrain streams in column-by-column with no
+ * batch hitch. */
+static void do_shift_step(int dx, int dz, uint32_t seed) {
+    if (dx) shift_x(dx, seed);
+    if (dz) shift_z(dz, seed);
+    craft_world_chunks_restore_window();
+    backstamp_mods();
 
-    /* Re-stamp features ONLY for the freshly-exposed strips, widened
-     * by the max canopy radius so a trunk sitting just inside the
-     * overlap whose canopy reaches the new strip still gets drawn.
-     * Bounds the per-shift cost to strip-width + margin instead of
-     * the whole window. Canopy that overhangs into the overlap is
-     * idempotent (AIR-only writes / mod-skip), and the X/Z corner is
-     * harmlessly stamped twice. */
+    /* Region to finalise = the new column widened by the canopy radius
+     * so trees whose trunk is just off-window still stamp their canopy
+     * in (stamp_features_region handles out-of-range trunk columns). */
     const int R = CRAFT_GEN_MAX_TREE_RADIUS;
-    int sxa = 0, sxb = 0, sza = 0, szb = 0;   /* stamped/dirty strip bounds */
-    if (dx != 0) {
-        int s0 = (dx > 0) ? (CRAFT_WORLD_X - dx) : 0;
-        int s1 = (dx > 0) ? CRAFT_WORLD_X : -dx;
-        sxa = s0 - R; sxb = s1 + R;
-        craft_gen_stamp_features_region(seed, sxa, sxb, 0, CRAFT_WORLD_Z);
-    }
-    if (dz != 0) {
-        int s0 = (dz > 0) ? (CRAFT_WORLD_Z - dz) : 0;
-        int s1 = (dz > 0) ? CRAFT_WORLD_Z : -dz;
-        sza = s0 - R; szb = s1 + R;
-        craft_gen_stamp_features_region(seed, 0, CRAFT_WORLD_X, sza, szb);
-    }
-    yield_now();
-    uint32_t _p3 = prof_now();
+    int la, lb, za, zb;       /* feature / sky / relight region */
+    int nx0, nx1, nz0, nz1;   /* the single newly-exposed column */
+    if (dx > 0)      { la = CRAFT_WORLD_X - 1 - R; lb = CRAFT_WORLD_X + R; za = 0; zb = CRAFT_WORLD_Z;
+                       nx0 = CRAFT_WORLD_X - 1; nx1 = CRAFT_WORLD_X; nz0 = 0; nz1 = CRAFT_WORLD_Z; }
+    else if (dx < 0) { la = -R; lb = 1 + R; za = 0; zb = CRAFT_WORLD_Z;
+                       nx0 = 0; nx1 = 1; nz0 = 0; nz1 = CRAFT_WORLD_Z; }
+    else if (dz > 0) { la = 0; lb = CRAFT_WORLD_X; za = CRAFT_WORLD_Z - 1 - R; zb = CRAFT_WORLD_Z + R;
+                       nx0 = 0; nx1 = CRAFT_WORLD_X; nz0 = CRAFT_WORLD_Z - 1; nz1 = CRAFT_WORLD_Z; }
+    else             { la = 0; lb = CRAFT_WORLD_X; za = -R; zb = 1 + R;
+                       nx0 = 0; nx1 = CRAFT_WORLD_X; nz0 = 0; nz1 = 1; }
 
-    /* Sky-height: overlap slid with the window, so only the regenerated
-     * + feature-stamped strip (widened by canopy radius) needs
-     * recomputing. Per-column and independent → identical to a full
-     * recompute over these columns. */
-    if (dx != 0) compute_skyheight_region(sxa, sxb, 0, CRAFT_WORLD_Z);
-    if (dz != 0) compute_skyheight_region(0, CRAFT_WORLD_X, sza, szb);
-    uint32_t _p4 = prof_now();
+    craft_gen_stamp_features_region(seed, la, lb, za, zb);
+    compute_skyheight_region(la, lb, za, zb);
 
-    /* Light-source registry: drop sources that scrolled out, add the
-     * new strip's (slide-invariant world coords mean the overlap's
-     * sources stay valid in place). The lightmap rebuild below then
-     * floods from the registry — no 64³ source scan. If the registry is
-     * invalid (overflowed / a recent edit), rebuild full-scans and
-     * re-validates it. */
     lightsrc_compact();
-    if (dx != 0) lightsrc_scan_strip((dx > 0) ? CRAFT_WORLD_X - dx : 0,
-                                     (dx > 0) ? CRAFT_WORLD_X : -dx,
-                                     0, CRAFT_WORLD_Z);
-    if (dz != 0) lightsrc_scan_strip(0, CRAFT_WORLD_X,
-                                     (dz > 0) ? CRAFT_WORLD_Z - dz : 0,
-                                     (dz > 0) ? CRAFT_WORLD_Z : -dz);
+    lightsrc_scan_strip(nx0, nx1, nz0, nz1);
+    relight_strip(la, lb, za, zb);
 
-    /* Torch list stays a full rebuild for now (bit-identical); regen,
-     * sky-height and the lightmap source-scan are the strip-scaled wins. */
-    craft_torches_rebuild();
-    craft_redstone_rescan();   /* registry is local-indexed — rebuild for the new window */
-    uint32_t _p5 = prof_now();
-    craft_world_rebuild_lightmap();
-    uint32_t _p6 = prof_now();
+    /* Sprites: rebuild the finalised strip's entries (drop then add, so
+     * re-stamped vines are captured without duplication) + seam wires. */
+    craft_torches_drop_outside();
+    craft_torches_drop_region(la, lb, za, zb);
+    craft_torches_add_region(la, lb, za, zb);
+    craft_torches_refresh_connect(la, lb, za, zb);
 
-    if (craft_world_clock_us_cb) {
-        craft_world_shift_us[0] = _p1 - _p0;   /* regen + slide */
-        craft_world_shift_us[1] = _p2 - _p1;   /* mod restore   */
-        craft_world_shift_us[2] = _p3 - _p2;   /* features      */
-        craft_world_shift_us[3] = _p4 - _p3;   /* sky-height    */
-        craft_world_shift_us[4] = _p5 - _p4;   /* torch+redstone+lightsrc */
-        craft_world_shift_us[5] = _p6 - _p5;   /* lightmap flood */
-        craft_world_shift_us[6] = _p6 - _p0;   /* TOTAL          */
+    craft_redstone_mark_dirty();   /* the 5 Hz tick rescans the registry */
+    yield_now();
+}
+
+/* Columns streamed per frame. 1 keeps pace with a walk (~1 block/frame);
+ * a small budget lets diagonal motion and minor catch-up resolve without
+ * the window ever lagging the player. */
+#define STREAM_BUDGET 2
+
+void craft_world_maybe_shift(int player_wx, int player_wz, uint32_t seed) {
+    /* The window continuously re-centres on the player by streaming one
+     * column at a time toward a player-centred origin — no batch shift. */
+    int tox = player_wx - CRAFT_WORLD_X / 2;
+    int toz = player_wz - CRAFT_WORLD_Z / 2;
+    if (craft_world_origin_x == tox && craft_world_origin_z == toz) return;
+
+    uint32_t _p0 = prof_now();
+
+    /* Huge teleport (no overlap) — nothing to stream into, full regen. */
+    int adx = tox - craft_world_origin_x; if (adx < 0) adx = -adx;
+    int adz = toz - craft_world_origin_z; if (adz < 0) adz = -adz;
+    if (adx >= CRAFT_WORLD_X || adz >= CRAFT_WORLD_Z) {
+        craft_world_origin_x = tox;
+        craft_world_origin_z = toz;
+        craft_gen_invalidate_height_cache();
+        craft_world_chunks_restore_window();
+        window_load(seed);
+        craft_gen_stamp_features(seed);
+        s_lightsrc_valid = false;
+        compute_skyheight_all();
+        craft_torches_rebuild();
+        craft_redstone_rescan();
+        craft_world_rebuild_lightmap();
+        if (craft_world_clock_us_cb) craft_world_shift_us[6] = prof_now() - _p0;
+        return;
     }
+
+    /* Normally stream STREAM_BUDGET columns; if the player is about to
+     * reach a window edge (sustained sprint outran the stream) catch up
+     * fully this frame so they never see off-window — a rare blip. */
+    int plx = player_wx - craft_world_origin_x;
+    int plz = player_wz - craft_world_origin_z;
+    bool emergency = plx < 8 || plx >= CRAFT_WORLD_X - 8 ||
+                     plz < 8 || plz >= CRAFT_WORLD_Z - 8;
+    int budget = emergency ? (CRAFT_WORLD_X + CRAFT_WORLD_Z) : STREAM_BUDGET;
+    while (budget > 0 &&
+           (craft_world_origin_x != tox || craft_world_origin_z != toz)) {
+        if (craft_world_origin_x != tox)
+            do_shift_step((tox > craft_world_origin_x) ? 1 : -1, 0, seed);
+        else
+            do_shift_step(0, (toz > craft_world_origin_z) ? 1 : -1, seed);
+        budget--;
+    }
+
+    if (craft_world_clock_us_cb) craft_world_shift_us[6] = prof_now() - _p0;
 }
