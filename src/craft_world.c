@@ -956,9 +956,31 @@ static void regen_one_column(int lx, int lz, int wx, int wz, uint32_t seed) {
     }
 }
 
+/* Slide the lightmap one column along X by dx = ±1. The map is 2 bits
+ * per cell (4/byte), so a one-column slide is a 2-bit shift of each
+ * 16-byte row — NOT a byte memmove (dx/4 == 0 would be a no-op and the
+ * lighting would smear behind the blocks as the window streams). The
+ * shift direction mirrors the block memmove: dx>0 slides cells toward
+ * index 0 (>>2 bits), dx<0 toward the high index (<<2 bits). */
+static void lightmap_slide_x(int dx) {
+    int rowb = CRAFT_WORLD_X / 4;
+    for (int r = 0; r < CRAFT_WORLD_Y * CRAFT_WORLD_Z; r++) {
+        uint8_t *row = &craft_world_lightmap[r * rowb];
+        if (dx > 0) {
+            for (int b = 0; b < rowb; b++)
+                row[b] = (uint8_t)((row[b] >> 2) |
+                                   ((b + 1 < rowb) ? (row[b + 1] << 6) : 0));
+        } else {
+            for (int b = rowb - 1; b >= 0; b--)
+                row[b] = (uint8_t)((row[b] << 2) |
+                                   ((b > 0) ? (row[b - 1] >> 6) : 0));
+        }
+    }
+}
+
 /* Slide the buffer by dx along X: memmove the cells already in
  * memory, then regenerate the freshly-exposed strip. Origin updates
- * to the new value. */
+ * to the new value. (Streaming calls this with dx = ±1.) */
 static void shift_x(int dx, uint32_t seed) {
     int adx = (dx > 0) ? dx : -dx;
     if (adx >= CRAFT_WORLD_X) {
@@ -995,14 +1017,7 @@ static void shift_x(int dx, uint32_t seed) {
             memmove(srow + (-dx), srow, CRAFT_WORLD_X + dx);
         }
     }
-    {
-        int bx = dx / 4, rowb = CRAFT_WORLD_X / 4;
-        for (int r = 0; r < CRAFT_WORLD_Y * CRAFT_WORLD_Z; r++) {
-            uint8_t *lrow = &craft_world_lightmap[r * rowb];
-            if (dx > 0) memmove(lrow, lrow + bx, rowb - bx);
-            else        memmove(lrow + (-bx), lrow, rowb + bx);
-        }
-    }
+    lightmap_slide_x(dx);   /* 2-bit per-cell shift (see helper) */
     craft_world_origin_x += dx;
     /* Height cache anchors on origin — drop and re-anchor before
      * any regen so the lazy fill writes against the new window. */
@@ -1123,7 +1138,16 @@ static void do_shift_step(int dx, int dz, uint32_t seed) {
 
     lightsrc_compact();
     lightsrc_scan_strip(nx0, nx1, nz0, nz1);
+    /* Relight BOTH the leading strip (new terrain) and the trailing
+     * strip (a source that just scrolled out leaves stale glow up to a
+     * light-radius into the trailing edge — clearing + reflooding it
+     * removes that). Both are strip-scaled. */
+    const int LR = CRAFT_LIGHT_RADIUS;
     relight_strip(la, lb, za, zb);
+    if (dx > 0)      relight_strip(0, LR, 0, CRAFT_WORLD_Z);
+    else if (dx < 0) relight_strip(CRAFT_WORLD_X - LR, CRAFT_WORLD_X, 0, CRAFT_WORLD_Z);
+    else if (dz > 0) relight_strip(0, CRAFT_WORLD_X, 0, LR);
+    else             relight_strip(0, CRAFT_WORLD_X, CRAFT_WORLD_Z - LR, CRAFT_WORLD_Z);
 
     /* Sprites: rebuild the finalised strip's entries (drop then add, so
      * re-stamped vines are captured without duplication) + seam wires. */
