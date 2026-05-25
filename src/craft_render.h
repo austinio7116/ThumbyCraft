@@ -68,6 +68,11 @@ bool craft_render_get_clouds(void);
 void craft_render_set_far_lod(bool on);
 bool craft_render_get_far_lod(void);
 
+/* Empty-space skip toggle (default on). Off forces the raycaster to step
+ * every cell — used by the render-equivalence harness to verify the skip
+ * produces pixel-identical output. No reason to turn it off in the game. */
+void craft_render_set_coarse_skip(bool on);
+
 /* Toggle interlaced rendering: render half the rows per frame
  * (alternating phase) and reconstruct the rest by copying their
  * same-tile rendered neighbour. ~45% pixel-loop savings with a mild

@@ -26,6 +26,37 @@
 #define CRAFT_MAX_STEPS  64
 #define CRAFT_MAX_DIST   60.0f
 
+#ifdef CRAFT_PROFILE
+/* Profiling counters (host bench only; zero overhead in normal builds). */
+unsigned long long craft_prof_rays = 0;      /* trace_ray calls */
+unsigned long long craft_prof_steps = 0;     /* total DDA iterations */
+unsigned long long craft_prof_maxed = 0;     /* rays that exhausted MAX_STEPS */
+unsigned long long craft_prof_hits = 0;      /* rays that hit a solid */
+unsigned long long craft_prof_air = 0;       /* steps landing on AIR (skippable) */
+#define PROF_INC(x) ((x)++)
+#else
+#define PROF_INC(x) ((void)0)
+#endif
+
+/* Tallest solid cell (skyheight) in the window, refreshed each frame in
+ * craft_render_begin. Rays travelling only above this never hit. */
+static int s_world_max_top = CRAFT_WORLD_Y - 1;
+
+/* Coarse max-height grid for empty-space skipping. The window's columns
+ * are binned into CM×CM tiles; s_cmax[tile] = the tallest terrain (max
+ * skyheight) in that tile. A ray whose whole traversal of a tile stays
+ * above that height can't hit anything there, so the DDA jumps straight
+ * to the tile's far edge instead of stepping every empty cell — which is
+ * where ~95% of steps were going. Rebuilt each frame from the skyheight
+ * map (the same 4 KB scan that finds s_world_max_top), so it costs
+ * nothing extra to maintain. */
+#define CM_SHIFT 2                       /* tile = 4×4 columns */
+#define CGX (CRAFT_WORLD_X >> CM_SHIFT)
+#define CGZ (CRAFT_WORLD_Z >> CM_SHIFT)
+static uint8_t s_cmax[CGX * CGZ];
+static bool s_coarse_skip = true;        /* toggled off by the test harness */
+void craft_render_set_coarse_skip(bool on) { s_coarse_skip = on; }
+
 /* HUD hotbar background plate — fully opaque, drawn over the world in
  * craft_hud_draw_hotbar after the strip. We skip raycasting under it
  * because nothing we render in those pixels can ever be seen.
@@ -262,16 +293,84 @@ typedef struct {
 INLINE_HOT TraceHit trace_ray(Vec3 origin, Vec3 dir, bool stop_at_water) {
     TraceHit h = (TraceHit){0};
 
-    int vx = (int)origin.x;
-    int vy = (int)origin.y;
-    int vz = (int)origin.z;
-    if (origin.x < 0) vx--;
-    if (origin.y < 0) vy--;
-    if (origin.z < 0) vz--;
-
+    /* Empty-space skip. Walk the coarse height grid in x/z and fast-
+     * forward the ray past every tile whose terrain is entirely below the
+     * ray's path — that air can't contain a hit. `t_enter` is the
+     * distance skipped; the fine DDA below starts from there and only
+     * steps cells that might actually hold geometry. This is where the
+     * win is: ~95% of fine steps were landing on air, mostly the empty
+     * span between the eye and the first solid in view. Disabled by the
+     * harness (s_coarse_skip) for exact equivalence checks. No-op for
+     * rays that start at or below local terrain (no leading air). */
     int sx = (dir.x > 0) ? 1 : (dir.x < 0 ? -1 : 0);
     int sy = (dir.y > 0) ? 1 : (dir.y < 0 ? -1 : 0);
     int sz = (dir.z > 0) ? 1 : (dir.z < 0 ? -1 : 0);
+
+    float t_enter = 0.0f;
+    if (s_coarse_skip && !stop_at_water) {
+        /* Incremental 2D DDA over the coarse grid — one floor + two
+         * reciprocals of setup, then pure adds/compares per tile (no
+         * per-tile divide or floor, which is what made a naive version
+         * cost more than it saved). */
+        float oy = origin.y;
+        float inv_x = (dir.x != 0.0f) ? 1.0f / dir.x : 0.0f;
+        float inv_z = (dir.z != 0.0f) ? 1.0f / dir.z : 0.0f;
+        int cgx = ((int)floorf(origin.x) - craft_world_origin_x) >> CM_SHIFT;
+        int cgz = ((int)floorf(origin.z) - craft_world_origin_z) >> CM_SHIFT;
+        int csx = (dir.x > 0) ? 1 : (dir.x < 0 ? -1 : 0);
+        int csz = (dir.z > 0) ? 1 : (dir.z < 0 ? -1 : 0);
+        const int CM = 1 << CM_SHIFT;
+        /* t at the next coarse boundary in each axis, and the t to cross
+         * one whole tile (constant per axis). */
+        float tnx = (csx > 0)
+            ? ((float)(((cgx + 1) << CM_SHIFT) + craft_world_origin_x) - origin.x) * inv_x
+            : (csx < 0 ? ((float)((cgx << CM_SHIFT) + craft_world_origin_x) - origin.x) * inv_x : 1e30f);
+        float tnz = (csz > 0)
+            ? ((float)(((cgz + 1) << CM_SHIFT) + craft_world_origin_z) - origin.z) * inv_z
+            : (csz < 0 ? ((float)((cgz << CM_SHIFT) + craft_world_origin_z) - origin.z) * inv_z : 1e30f);
+        float tdx = (csx != 0) ? (float)CM * (inv_x < 0 ? -inv_x : inv_x) : 1e30f;
+        float tdz = (csz != 0) ? (float)CM * (inv_z < 0 ? -inv_z : inv_z) : 1e30f;
+        float t_in = 0.0f;
+        for (int guard = CGX + CGZ + 2; guard > 0; guard--) {
+            if ((unsigned)cgx >= (unsigned)CGX ||
+                (unsigned)cgz >= (unsigned)CGZ) break;   /* left the window */
+            float t_exit = tnx < tnz ? tnx : tnz;
+            if (t_exit > CRAFT_MAX_DIST) t_exit = CRAFT_MAX_DIST;
+            float y_in  = oy + dir.y * t_in;
+            float y_out = oy + dir.y * t_exit;
+            float ymin  = y_in < y_out ? y_in : y_out;
+            if (ymin > (float)s_cmax[cgz * CGX + cgx] + 1.0f) {
+                if (tnx < tnz) { t_in = tnx; tnx += tdx; cgx += csx; }
+                else           { t_in = tnz; tnz += tdz; cgz += csz; }
+                if (t_in >= CRAFT_MAX_DIST) return h;    /* nothing but sky ahead */
+                continue;
+            }
+            break;   /* this tile may hold terrain — hand off to fine DDA */
+        }
+        t_enter = t_in;
+    }
+
+    /* Seed the DDA at the skip point WITHOUT moving the ray origin — that
+     * keeps the hit math (h.t, UV, hit cell) bit-for-bit the same as the
+     * no-skip path (t_max below is measured from the true origin). Back
+     * the seed up a couple of t-units into the skipped span first: every
+     * cell before t_enter is provably air (that's why it was skipped), so
+     * the normal step-first loop re-syncs through the last 1-2 air cells
+     * and reaches the first solid with the correct `prev`/face cell — no
+     * special-casing in the hot loop, and robust to the ray crossing a
+     * Y-boundary right at the tile seam (a single-axis back-up was not).
+     * 2.0 t-units is ≥1 cell for any ray (|dir| ≤ ~1.55 here). */
+    if (t_enter > 2.0f) t_enter -= 2.0f; else t_enter = 0.0f;
+    int vx = (int)floorf(origin.x + dir.x * t_enter);
+    int vy = (int)floorf(origin.y + dir.y * t_enter);
+    int vz = (int)floorf(origin.z + dir.z * t_enter);
+
+    /* Climb-out bound: an ascending/level ray that rises past the tallest
+     * terrain can't hit anything more, so break once vy exceeds it. For
+     * descending rays this bound is the window top (the existing exit
+     * check handles it), so the per-step test is a single compare with no
+     * branch on direction. */
+    int vy_break = (sy >= 0) ? s_world_max_top : (CRAFT_WORLD_Y - 1);
 
     /* 1/0 -> a huge number; subsequent comparisons exclude that axis. */
     float inv_x = (dir.x != 0.0f) ? 1.0f / dir.x : 1e30f;
@@ -314,7 +413,9 @@ INLINE_HOT TraceHit trace_ray(Vec3 origin, Vec3 dir, bool stop_at_water) {
     const int idx_dy = CRAFT_WORLD_X * CRAFT_WORLD_Z;
     const int idx_dz = CRAFT_WORLD_X;
 
+    PROF_INC(craft_prof_rays);
     for (int step = 0; step < CRAFT_MAX_STEPS; step++) {
+        PROF_INC(craft_prof_steps);
         prev_vx = vx; prev_vy = vy; prev_vz = vz;
         if (t_max_x < t_max_y && t_max_x < t_max_z) {
             vx += sx;
@@ -337,16 +438,19 @@ INLINE_HOT TraceHit trace_ray(Vec3 origin, Vec3 dir, bool stop_at_water) {
         }
 
         if (t > CRAFT_MAX_DIST) break;
-        /* Terminate the ray when it exits the loaded WINDOW. */
+        /* Climbed above the tallest terrain (ascending) or left the
+         * window — either way the ray is done. vy_break folds the
+         * climb-out into the same compare for descending rays. */
+        if (vy > vy_break) break;
         if ((unsigned)(vx - craft_world_origin_x) >= CRAFT_WORLD_X ||
-            (unsigned)vy >= CRAFT_WORLD_Y ||
+            vy < 0 ||
             (unsigned)(vz - craft_world_origin_z) >= CRAFT_WORLD_Z) break;
 
         /* Direct buffer read — bounds already checked above, idx is
          * maintained incrementally so this is one load. Mask off the
          * top 2 bits, which carry the water-flow level field. */
         BlockId blk = (BlockId)craft_world_blocks[idx];
-        if (blk == BLK_AIR) continue;
+        if (blk == BLK_AIR) { PROF_INC(craft_prof_air); continue; }
         /* Sprite blocks (torches, wires, ladders, pads, doors, trap-
          * doors, pistons, levers) render via the craft_torches sprite
          * post-pass — smaller-than-cube cuboid models drawn AFTER
@@ -404,6 +508,7 @@ INLINE_HOT TraceHit trace_ray(Vec3 origin, Vec3 dir, bool stop_at_water) {
             }
         }
 
+        PROF_INC(craft_prof_hits);
         h.hit = true;
         h.bx = vx; h.by = vy; h.bz = vz;
         h.fx = prev_vx; h.fy = prev_vy; h.fz = prev_vz;
@@ -438,6 +543,7 @@ INLINE_HOT TraceHit trace_ray(Vec3 origin, Vec3 dir, bool stop_at_water) {
         }
         return h;
     }
+    PROF_INC(craft_prof_maxed);   /* loop exhausted without a solid hit */
     return h;
 }
 
@@ -497,6 +603,28 @@ void craft_render_begin(const CraftCamera *cam) {
         s_face_shade_lit[i] = (uint16_t)v;
     }
     rebuild_sky_row();
+    /* Tallest solid cell anywhere in the window — the sky early-out in
+     * trace_ray uses it to terminate rays that travel only through the
+     * empty air above all terrain (the bulk of the cost on open/horizon
+     * views, where 80% of rays otherwise step the full distance and hit
+     * nothing). One 4 KB scan per frame; trivially cheap vs the steps it
+     * saves. */
+    {
+        const uint8_t *sh = craft_world_skyheight;
+        memset(s_cmax, 0, sizeof s_cmax);
+        int mx = 0;
+        for (int lz = 0; lz < CRAFT_WORLD_Z; lz++) {
+            int crow = (lz >> CM_SHIFT) * CGX;
+            const uint8_t *srow = &sh[lz * CRAFT_WORLD_X];
+            for (int lx = 0; lx < CRAFT_WORLD_X; lx++) {
+                int v = srow[lx];
+                if (v > mx) mx = v;
+                int ci = crow + (lx >> CM_SHIFT);
+                if (v > s_cmax[ci]) s_cmax[ci] = (uint8_t)v;
+            }
+        }
+        s_world_max_top = mx;
+    }
     if (s_interlace_enabled) s_interlace_phase ^= 1;
 }
 
