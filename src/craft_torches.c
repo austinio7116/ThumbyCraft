@@ -158,6 +158,31 @@ static uint8_t orient_lookup(int wx, int wy, int wz) {
 
 /* --- Window scan ------------------------------------------------ */
 
+/* Block-id → sprite kind (+1, so 0 = "not a sprite cell"). Replaces a
+ * per-cell 18-way if/else over all 64³ cells, which dominated the
+ * window-shift cost — almost every cell is air/stone and fell through
+ * every comparison. One array read per cell instead. */
+static const uint8_t s_sprite_kind1[256] = {
+    [BLK_TORCH]             = TORCH_KIND_TORCH + 1,
+    [BLK_REDSTONE_WIRE]     = TORCH_KIND_WIRE + 1,
+    [BLK_REDSTONE_WIRE_ON]  = TORCH_KIND_WIRE_ON + 1,
+    [BLK_LADDER]            = TORCH_KIND_LADDER + 1,
+    [BLK_VINE]              = TORCH_KIND_VINE + 1,
+    [BLK_LILY_PAD]          = TORCH_KIND_LILY_PAD + 1,
+    [BLK_PRESSURE_PAD]      = TORCH_KIND_PRESSURE_PAD + 1,
+    [BLK_DOOR_OFF]          = TORCH_KIND_DOOR_CLOSED + 1,
+    [BLK_DOOR_ON]           = TORCH_KIND_DOOR_OPEN + 1,
+    [BLK_TRAPDOOR_OFF]      = TORCH_KIND_TRAPDOOR_CLOSED + 1,
+    [BLK_TRAPDOOR_ON]       = TORCH_KIND_TRAPDOOR_OPEN + 1,
+    [BLK_PISTON_OFF]        = TORCH_KIND_PISTON_OFF + 1,
+    [BLK_PISTON_ON]         = TORCH_KIND_PISTON_ON + 1,
+    [BLK_STICKY_PISTON_OFF] = TORCH_KIND_PISTON_OFF + 1,
+    [BLK_STICKY_PISTON_ON]  = TORCH_KIND_PISTON_ON + 1,
+    [BLK_PISTON_ARM]        = TORCH_KIND_PISTON_ARM + 1,
+    [BLK_LEVER_OFF]         = TORCH_KIND_LEVER_OFF + 1,
+    [BLK_LEVER_ON]          = TORCH_KIND_LEVER_ON + 1,
+};
+
 void craft_torches_rebuild(void) {
     s_torch_count = 0;
     for (int i = 0; i < CRAFT_MAX_TORCHES; i++) craft_torches[i].alive = false;
@@ -167,33 +192,19 @@ void craft_torches_rebuild(void) {
     /* Two priority passes: functional sprites (redstone, doors,
      * pistons, ladders, torches) first; decorative vines/lily pads
      * last — so when the list fills, the dropped overflow is
-     * decoration, never the player's circuits. */
+     * decoration, never the player's circuits.
+     *
+     * Loop order is wy→lz→lx so the innermost step walks contiguous
+     * buffer bytes (idx = base + lx); the old lz→lx→wy order jumped
+     * 4 KB per inner step and missed cache on nearly every cell. */
     for (int pass = 0; pass < 2; pass++) {
-    for (int lz = 0; lz < CRAFT_WORLD_Z; lz++) {
-        for (int lx = 0; lx < CRAFT_WORLD_X; lx++) {
-            for (int wy = 0; wy < CRAFT_WORLD_Y; wy++) {
-                int idx = (wy * CRAFT_WORLD_Z + lz) * CRAFT_WORLD_X + lx;
-                BlockId b = (BlockId)craft_world_blocks[idx];
-                uint8_t kind;
-                if      (b == BLK_TORCH)             kind = TORCH_KIND_TORCH;
-                else if (b == BLK_REDSTONE_WIRE)     kind = TORCH_KIND_WIRE;
-                else if (b == BLK_REDSTONE_WIRE_ON)  kind = TORCH_KIND_WIRE_ON;
-                else if (b == BLK_LADDER)            kind = TORCH_KIND_LADDER;
-                else if (b == BLK_VINE)              kind = TORCH_KIND_VINE;
-                else if (b == BLK_LILY_PAD)          kind = TORCH_KIND_LILY_PAD;
-                else if (b == BLK_PRESSURE_PAD)      kind = TORCH_KIND_PRESSURE_PAD;
-                else if (b == BLK_DOOR_OFF)          kind = TORCH_KIND_DOOR_CLOSED;
-                else if (b == BLK_DOOR_ON)           kind = TORCH_KIND_DOOR_OPEN;
-                else if (b == BLK_TRAPDOOR_OFF)      kind = TORCH_KIND_TRAPDOOR_CLOSED;
-                else if (b == BLK_TRAPDOOR_ON)       kind = TORCH_KIND_TRAPDOOR_OPEN;
-                else if (b == BLK_PISTON_OFF)        kind = TORCH_KIND_PISTON_OFF;
-                else if (b == BLK_PISTON_ON)         kind = TORCH_KIND_PISTON_ON;
-                else if (b == BLK_STICKY_PISTON_OFF) kind = TORCH_KIND_PISTON_OFF;
-                else if (b == BLK_STICKY_PISTON_ON)  kind = TORCH_KIND_PISTON_ON;
-                else if (b == BLK_PISTON_ARM)        kind = TORCH_KIND_PISTON_ARM;
-                else if (b == BLK_LEVER_OFF)         kind = TORCH_KIND_LEVER_OFF;
-                else if (b == BLK_LEVER_ON)          kind = TORCH_KIND_LEVER_ON;
-                else continue;
+    for (int wy = 0; wy < CRAFT_WORLD_Y; wy++) {
+        for (int lz = 0; lz < CRAFT_WORLD_Z; lz++) {
+            int base = (wy * CRAFT_WORLD_Z + lz) * CRAFT_WORLD_X;
+            for (int lx = 0; lx < CRAFT_WORLD_X; lx++) {
+                uint8_t k1 = s_sprite_kind1[craft_world_blocks[base + lx]];
+                if (!k1) continue;
+                uint8_t kind = (uint8_t)(k1 - 1);
                 /* pass 0 = functional only; pass 1 = decorative only. */
                 bool decorative = (kind == TORCH_KIND_VINE ||
                                    kind == TORCH_KIND_LILY_PAD);

@@ -139,15 +139,17 @@ static float humidity_at(int x, int z, uint32_t seed) {
 /* Swamp-ness in [0,1] — high where it's warm AND very humid. Pulled
  * out of the classifier because height_at needs it (swamps sit flat
  * at water level) without paying for the full biome decision. */
-static float swamp_factor(int x, int z, uint32_t seed) {
-    float t = temperature_at(x, z, seed);
-    float hu = humidity_at(x, z, seed);
+static inline float swamp_from_factors(float t, float hu) {
     /* Only TEMPERATE wetland is swamp; cold is taiga, hot+wet is
      * jungle (which keeps rolling terrain, not flat wetland). */
     if (t < 0.38f || t > 0.66f) return 0.0f;
     if (hu < 0.62f) return 0.0f;
     float s = (hu - 0.62f) / 0.18f;
     return s > 1.0f ? 1.0f : s;
+}
+static float swamp_factor(int x, int z, uint32_t seed) {
+    return swamp_from_factors(temperature_at(x, z, seed),
+                              humidity_at(x, z, seed));
 }
 
 /* Pure classifier from precomputed factors — lets callers that
@@ -196,7 +198,13 @@ void craft_gen_invalidate_height_cache(void) {
      * shift-cost win without any storage. */
 }
 
-static int height_at(int x, int z, uint32_t seed) {
+/* Height from already-computed climate factors — lets craft_gen_column
+ * compute mountain/flatland/temperature/humidity ONCE and share them
+ * with the height calc instead of each recomputing the same fbm fields.
+ * `mf` is the raw mountain_factor (unscaled); `f` flatland; `t`,`hu`
+ * temperature/humidity. Bit-identical to the old height_at. */
+static int height_from_factors(int x, int z, uint32_t seed,
+                               float mf, float f, float t, float hu) {
     float nx = (float)x * 0.06f;
     float nz = (float)z * 0.06f;
     float h  = fbm(nx, nz, seed);
@@ -204,20 +212,19 @@ static int height_at(int x, int z, uint32_t seed) {
     /* Flatland biome compresses the height variance and drops the
      * base level — in fully flat regions terrain hugs water level
      * with at most a couple of cells of variation. */
-    float f = flatland_factor(x, z, seed);
     float h_scaled = h * (1.0f - f * 0.82f) + f * 0.18f;
     int height = (int)(h_scaled * 24.0f) + CRAFT_WATER_LEVEL - 4;
 
     /* Mountains add elevation but are inhibited by flatland (they
      * shouldn't co-exist; biome decides which is which). */
-    float m = mountain_factor(x, z, seed) * (1.0f - f);
+    float m = mf * (1.0f - f);
     height += (int)(m * 22.0f);
 
     /* Swamps sit flat and low — pull warm, very-humid lowland columns
      * down toward water level so they read as wetland, not hills.
      * Gated on m (<0.2) so mountains aren't drowned. */
     if (m < 0.2f) {
-        float sw = swamp_factor(x, z, seed);
+        float sw = swamp_from_factors(t, hu);
         if (sw > 0.0f) {
             int target = CRAFT_WATER_LEVEL - 1;
             if (height > target) {
@@ -284,6 +291,16 @@ static int height_at(int x, int z, uint32_t seed) {
     if (height < 1) height = 1;
     if (height >= CRAFT_WORLD_Y - 4) height = CRAFT_WORLD_Y - 4;
     return height;
+}
+
+/* Standalone height — computes the climate factors itself. Used by all
+ * callers except craft_gen_column (which shares its own factors). */
+static int height_at(int x, int z, uint32_t seed) {
+    return height_from_factors(x, z, seed,
+                               mountain_factor(x, z, seed),
+                               flatland_factor(x, z, seed),
+                               temperature_at(x, z, seed),
+                               humidity_at(x, z, seed));
 }
 
 /* Is (x, y, z) inside a cave? Two cave types mixed together so the
@@ -1491,11 +1508,19 @@ BlockId craft_gen_block_at(int x, int y, int z, uint32_t seed) {
 
 void craft_gen_column(int wx, int wz, uint32_t seed,
                       uint8_t out[/* CRAFT_WORLD_Y */]) {
-    int h = height_at(wx, wz, seed);
+    /* Climate factors computed ONCE and shared with the height calc
+     * (height_from_factors) and the biome classifier — the old code
+     * recomputed mountain/temperature/humidity a second time inside
+     * height_at, doubling the per-column 2D-noise cost. */
+    float m      = mountain_factor(wx, wz, seed);
+    float f      = flatland_factor(wx, wz, seed);
+    float t_clim = temperature_at(wx, wz, seed);
+    float hum    = humidity_at(wx, wz, seed);
+
+    int h = height_from_factors(wx, wz, seed, m, f, t_clim, hum);
     if (h < 1) h = 1;
     if (h >= CRAFT_WORLD_Y - 4) h = CRAFT_WORLD_Y - 4;
 
-    float m = mountain_factor(wx, wz, seed);
     /* Ore placement chance — denser in mountain biome.
      * Iron is rarer than coal in both biomes. Test: (hash & mask)==0. */
     uint32_t coal_mask = (m > 0.5f) ? 0x0F : 0x3F;   /* ~1/16 vs 1/64 */
@@ -1503,10 +1528,7 @@ void craft_gen_column(int wx, int wz, uint32_t seed,
 
     /* Terrain pass — stone (or coal ore) / dirt / surface / water / air. */
     int wl = CRAFT_WATER_LEVEL;
-    /* Reuse the mountain factor already computed above; only the two
-     * climate fields are fresh here. */
-    float t_clim = temperature_at(wx, wz, seed);
-    CraftBiome biome = biome_classify(m, t_clim, humidity_at(wx, wz, seed));
+    CraftBiome biome = biome_classify(m, t_clim, hum);
     /* Record the biome for this column so the renderer can tint grass
      * + leaves. Only when the column is inside the resident window. */
     {
@@ -1546,14 +1568,25 @@ void craft_gen_column(int wx, int wz, uint32_t seed,
      * smoothing the cliff is mostly gone, but keeping caves
      * genuinely subterranean is the right default anyway. */
     int cave_top = h - 8;
+    /* Cave noise is the single biggest cost of terrain regen (~3 3D-noise
+     * evals per underground cell). The cave fields are low-frequency in Y
+     * (wavelengths ~6-12 cells), so sampling every cell oversamples — we
+     * evaluate is_cave only on EVEN y and reuse the result for the odd
+     * cell above it. Halves the cave cost; caves become very slightly
+     * 2-tall-quantised vertically, which is barely visible at 1-block
+     * resolution. The lava/air choice still uses the real per-cell y. */
+    bool cave_even = false;
     for (int y = 0; y < h - 3; y++) {
         /* Cave carve before ore placement — caves remove a cell
          * entirely so ore doesn't get assigned to it. y<2 stays
          * solid as a "bedrock" floor. */
-        if (y >= 2 && y < cave_top && is_cave(wx, y, wz, seed)) {
-            /* Deep caverns pool lava; higher caves are open air. */
-            out[y] = (y <= CRAFT_LAVA_LEVEL) ? BLK_LAVA : BLK_AIR;
-            continue;
+        if (y >= 2 && y < cave_top) {
+            if (!(y & 1)) cave_even = is_cave(wx, y, wz, seed);
+            if (cave_even) {
+                /* Deep caverns pool lava; higher caves are open air. */
+                out[y] = (y <= CRAFT_LAVA_LEVEL) ? BLK_LAVA : BLK_AIR;
+                continue;
+            }
         }
         /* Lava pockets — ~4×4×4 magma blobs embedded in solid stone
          * ABOVE the deep lava line, so lava also turns up higher in the

@@ -60,6 +60,13 @@ static void (*s_yield_cb)(void) = NULL;
 static inline void yield_now(void) { if (s_yield_cb) s_yield_cb(); }
 void craft_world_set_yield_cb(void (*cb)(void)) { s_yield_cb = cb; }
 
+/* Shift profiler (device debug) — see header. */
+uint32_t (*craft_world_clock_us_cb)(void) = NULL;
+volatile uint32_t craft_world_shift_us[7];
+static inline uint32_t prof_now(void) {
+    return craft_world_clock_us_cb ? craft_world_clock_us_cb() : 0;
+}
+
 /* --- Dirty-chunk queue ------------------------------------------ *
  * Every block edit marks its chunk dirty. Persist paths consult
  * this list instead of scanning the whole window, so unmodified
@@ -464,23 +471,123 @@ static void compute_skyheight_all(void) {
     }
 }
 
+/* Recompute sky-height for a clamped column rectangle — used after a
+ * shift to refresh only the regenerated/feature-stamped strip rather
+ * than the whole window (per-column and independent, so bit-identical
+ * to compute_skyheight_all over the same columns). */
+static void compute_skyheight_region(int lx0, int lx1, int lz0, int lz1) {
+    if (lx0 < 0) lx0 = 0; if (lx1 > CRAFT_WORLD_X) lx1 = CRAFT_WORLD_X;
+    if (lz0 < 0) lz0 = 0; if (lz1 > CRAFT_WORLD_Z) lz1 = CRAFT_WORLD_Z;
+    for (int lz = lz0; lz < lz1; lz++)
+        for (int lx = lx0; lx < lx1; lx++)
+            compute_skyheight_column(lx, lz);
+}
+
+
+/* True if a raw cell byte emits light (torch / lava / lit portal /
+ * lit lamp). The torch test uses the legacy 6-bit mask the renderer
+ * relies on; the others are full-byte ids above that range. */
+static inline bool is_light_source(uint8_t b) {
+    return (b & 0x3F) == BLK_TORCH || craft_is_lava_id(b) ||
+           b == BLK_PORTAL || b == BLK_LAMP_ON;
+}
+
+/* Light-source registry (world coords, like the torch list). The
+ * lightmap floods from this instead of re-scanning all 64³ cells every
+ * rebuild. On a window shift it's maintained incrementally (slide-
+ * invariant world coords + a strip scan); craft_world_set keeps it
+ * current for single-cell edits; the lava tick invalidates it. If it
+ * ever overflows (a huge lava field) we drop to the full scan. */
+#define LIGHTSRC_MAX 1024
+static struct { int32_t wx, wz; int16_t wy; } s_lightsrc[LIGHTSRC_MAX];
+static int  s_lightsrc_n     = 0;
+static bool s_lightsrc_valid = false;   /* false → rebuild must full-scan */
+
+static void lightsrc_add(int wx, int wy, int wz) {
+    if (!s_lightsrc_valid) return;       /* will be rebuilt by a scan anyway */
+    if (s_lightsrc_n >= LIGHTSRC_MAX) { s_lightsrc_valid = false; return; }
+    s_lightsrc[s_lightsrc_n].wx = wx;
+    s_lightsrc[s_lightsrc_n].wz = wz;
+    s_lightsrc[s_lightsrc_n].wy = (int16_t)wy;
+    s_lightsrc_n++;
+}
+static void lightsrc_remove(int wx, int wy, int wz) {
+    if (!s_lightsrc_valid) return;
+    for (int i = 0; i < s_lightsrc_n; i++) {
+        if (s_lightsrc[i].wx == wx && s_lightsrc[i].wz == wz &&
+            s_lightsrc[i].wy == (int16_t)wy) {
+            s_lightsrc[i] = s_lightsrc[--s_lightsrc_n];   /* swap-remove */
+            return;
+        }
+    }
+}
+
+/* Drop registry entries now outside the window (trailing edge after a
+ * slide) so it tracks only resident sources. */
+static void lightsrc_compact(void) {
+    if (!s_lightsrc_valid) return;
+    int ox = craft_world_origin_x, oz = craft_world_origin_z;
+    int w = 0;
+    for (int i = 0; i < s_lightsrc_n; i++) {
+        int lx = s_lightsrc[i].wx - ox, lz = s_lightsrc[i].wz - oz;
+        if ((unsigned)lx < CRAFT_WORLD_X && (unsigned)lz < CRAFT_WORLD_Z)
+            s_lightsrc[w++] = s_lightsrc[i];
+    }
+    s_lightsrc_n = w;
+}
+
+/* Add every light source found in a freshly-regenerated local strip to
+ * the registry. The strip is brand-new terrain (never been in window),
+ * so none of its sources are already listed — no dedup needed. */
+static void lightsrc_scan_strip(int lx0, int lx1, int lz0, int lz1) {
+    if (!s_lightsrc_valid) return;
+    if (lx0 < 0) lx0 = 0; if (lx1 > CRAFT_WORLD_X) lx1 = CRAFT_WORLD_X;
+    if (lz0 < 0) lz0 = 0; if (lz1 > CRAFT_WORLD_Z) lz1 = CRAFT_WORLD_Z;
+    int ox = craft_world_origin_x, oz = craft_world_origin_z;
+    for (int lz = lz0; lz < lz1; lz++)
+        for (int lx = lx0; lx < lx1; lx++)
+            for (int wy = 0; wy < CRAFT_WORLD_Y; wy++) {
+                if (is_light_source(craft_world_blocks[local_idx(lx, wy, lz)]))
+                    lightsrc_add(lx + ox, wy, lz + oz);
+            }
+}
 
 void craft_world_rebuild_lightmap(void) {
     memset(craft_world_lightmap, 0, sizeof craft_world_lightmap);
-    for (int lz = 0; lz < CRAFT_WORLD_Z; lz++) {
-        for (int lx = 0; lx < CRAFT_WORLD_X; lx++) {
-            for (int wy = 0; wy < CRAFT_WORLD_Y; wy++) {
-                uint8_t b = craft_world_blocks[local_idx(lx, wy, lz)];
-                /* Torches, lava and lit portals all emit light. (These
-                 * use a full-byte compare — their ids are above the
-                 * legacy 6-bit mask that the torch check still relies on.) */
-                if ((b & 0x3F) == BLK_TORCH || craft_is_lava_id(b) || b == BLK_PORTAL ||
-                    b == BLK_LAMP_ON) {
+    if (s_lightsrc_valid) {
+        /* Fast path — flood from the maintained registry. */
+        int ox = craft_world_origin_x, oz = craft_world_origin_z;
+        for (int i = 0; i < s_lightsrc_n; i++) {
+            int lx = s_lightsrc[i].wx - ox;
+            int lz = s_lightsrc[i].wz - oz;
+            if ((unsigned)lx < CRAFT_WORLD_X && (unsigned)lz < CRAFT_WORLD_Z)
+                light_flood_from(lx, s_lightsrc[i].wy, lz);
+        }
+        return;
+    }
+    /* Slow path — full scan; also rebuild the registry as we go (if it
+     * fits, the next rebuild takes the fast path). */
+    int ox = craft_world_origin_x, oz = craft_world_origin_z;
+    s_lightsrc_n = 0;
+    bool fits = true;
+    /* wy→lz→lx: innermost step walks contiguous buffer bytes. */
+    for (int wy = 0; wy < CRAFT_WORLD_Y; wy++) {
+        for (int lz = 0; lz < CRAFT_WORLD_Z; lz++) {
+            int b0 = (wy * CRAFT_WORLD_Z + lz) * CRAFT_WORLD_X;
+            for (int lx = 0; lx < CRAFT_WORLD_X; lx++) {
+                if (is_light_source(craft_world_blocks[b0 + lx])) {
                     light_flood_from(lx, wy, lz);
+                    if (fits && s_lightsrc_n < LIGHTSRC_MAX) {
+                        s_lightsrc[s_lightsrc_n].wx = lx + ox;
+                        s_lightsrc[s_lightsrc_n].wz = lz + oz;
+                        s_lightsrc[s_lightsrc_n].wy = (int16_t)wy;
+                        s_lightsrc_n++;
+                    } else fits = false;
                 }
             }
         }
     }
+    s_lightsrc_valid = fits;
 }
 
 BlockId craft_world_get(int wx, int wy, int wz) {
@@ -511,7 +618,16 @@ void craft_world_set_byte(int wx, int wy, int wz, uint8_t b) {
     int lz = wz - craft_world_origin_z;
     if ((unsigned)lx >= CRAFT_WORLD_X) return;
     if ((unsigned)lz >= CRAFT_WORLD_Z) return;
-    craft_world_blocks[local_idx(lx, wy, lz)] = b;
+    int idx = local_idx(lx, wy, lz);
+    uint8_t prev = craft_world_blocks[idx];
+    craft_world_blocks[idx] = b;
+    /* Keep the light-source registry current for flowing-lava edits
+     * (water isn't a source, so the common case is two cheap predicate
+     * checks and no list op). */
+    if (is_light_source(prev) != is_light_source(b)) {
+        if (is_light_source(b)) lightsrc_add(wx, wy, wz);
+        else                    lightsrc_remove(wx, wy, wz);
+    }
     /* No mod_set side effect — water flow changes are transient and
      * deliberately skip the player-edit chunk-store path. */
 }
@@ -546,6 +662,13 @@ void craft_world_set(int wx, int wy, int wz, BlockId blk) {
      * restart spreading on every reload. */
     if (!craft_is_water_id((uint8_t)blk)) {
         mod_set(wx, wy, wz, blk);
+    }
+    /* Keep the light-source registry current for player edits (place/
+     * break a torch, lamp toggle, water→lava→obsidian, etc.) so the
+     * shift's fast lightmap path stays valid across edits. */
+    if (is_light_source((uint8_t)prev) != is_light_source((uint8_t)blk)) {
+        if (is_light_source((uint8_t)blk)) lightsrc_add(wx, wy, wz);
+        else                               lightsrc_remove(wx, wy, wz);
     }
     int lx = wx - craft_world_origin_x;
     int lz = wz - craft_world_origin_z;
@@ -692,6 +815,7 @@ void craft_world_init(void) {
     craft_world_dirty = 0;
     craft_world_origin_x = 0;
     craft_world_origin_z = 0;
+    s_lightsrc_valid = false;   /* force a fresh source scan */
 }
 
 void craft_world_clear(void) {
@@ -749,6 +873,7 @@ static void window_load(uint32_t seed) {
 }
 
 void craft_world_load_around(int player_wx, int player_wz, uint32_t seed) {
+    s_lightsrc_valid = false;   /* new region — scan sources fresh */
     craft_world_origin_x = player_wx - CRAFT_WORLD_X / 2;
     craft_world_origin_z = player_wz - CRAFT_WORLD_Z / 2;
     /* Height cache is keyed on the window origin — drop it before
@@ -809,12 +934,29 @@ static void shift_x(int dx, uint32_t seed) {
             }
         }
     }
-    /* Slide the per-column biome map in lockstep (one Z-row of X bytes
-     * each) — the new strip's entries are rewritten by regen below. */
+    /* Slide the per-column biome + sky-height maps in lockstep (one
+     * Z-row of X bytes each); the new strip's entries are rewritten
+     * after regen. The lightmap (2 bits/cell, 4/byte) slides too so the
+     * overlap keeps its lighting — CRAFT_SHIFT is a multiple of 4 so the
+     * per-row byte shift stays aligned. */
     for (int lz = 0; lz < CRAFT_WORLD_Z; lz++) {
         uint8_t *brow = &craft_world_biome[lz * CRAFT_WORLD_X];
-        if (dx > 0) memmove(brow, brow + dx, CRAFT_WORLD_X - dx);
-        else        memmove(brow + (-dx), brow, CRAFT_WORLD_X + dx);
+        uint8_t *srow = &craft_world_skyheight[lz * CRAFT_WORLD_X];
+        if (dx > 0) {
+            memmove(brow, brow + dx, CRAFT_WORLD_X - dx);
+            memmove(srow, srow + dx, CRAFT_WORLD_X - dx);
+        } else {
+            memmove(brow + (-dx), brow, CRAFT_WORLD_X + dx);
+            memmove(srow + (-dx), srow, CRAFT_WORLD_X + dx);
+        }
+    }
+    {
+        int bx = dx / 4, rowb = CRAFT_WORLD_X / 4;
+        for (int r = 0; r < CRAFT_WORLD_Y * CRAFT_WORLD_Z; r++) {
+            uint8_t *lrow = &craft_world_lightmap[r * rowb];
+            if (dx > 0) memmove(lrow, lrow + bx, rowb - bx);
+            else        memmove(lrow + (-bx), lrow, rowb + bx);
+        }
     }
     craft_world_origin_x += dx;
     /* Height cache anchors on origin — drop and re-anchor before
@@ -852,15 +994,26 @@ static void shift_z(int dz, uint32_t seed) {
                     (CRAFT_WORLD_Z + dz) * row_bytes);
         }
     }
-    /* Slide the per-column biome map in Z (whole rows of X bytes). */
+    /* Slide the per-column biome + sky-height maps in Z (whole rows of
+     * X bytes), and the lightmap per Y-layer (dz rows × X/4 bytes). */
     if (dz > 0) {
-        memmove(craft_world_biome,
-                craft_world_biome + dz * CRAFT_WORLD_X,
+        memmove(craft_world_biome, craft_world_biome + dz * CRAFT_WORLD_X,
+                (size_t)(CRAFT_WORLD_Z - dz) * CRAFT_WORLD_X);
+        memmove(craft_world_skyheight, craft_world_skyheight + dz * CRAFT_WORLD_X,
                 (size_t)(CRAFT_WORLD_Z - dz) * CRAFT_WORLD_X);
     } else {
-        memmove(craft_world_biome + (-dz) * CRAFT_WORLD_X,
-                craft_world_biome,
+        memmove(craft_world_biome + (-dz) * CRAFT_WORLD_X, craft_world_biome,
                 (size_t)(CRAFT_WORLD_Z + dz) * CRAFT_WORLD_X);
+        memmove(craft_world_skyheight + (-dz) * CRAFT_WORLD_X, craft_world_skyheight,
+                (size_t)(CRAFT_WORLD_Z + dz) * CRAFT_WORLD_X);
+    }
+    {
+        int rowb = CRAFT_WORLD_X / 4, layerb = CRAFT_WORLD_Z * (CRAFT_WORLD_X / 4);
+        for (int wy = 0; wy < CRAFT_WORLD_Y; wy++) {
+            uint8_t *layer = &craft_world_lightmap[wy * layerb];
+            if (dz > 0) memmove(layer, layer + dz * rowb, (CRAFT_WORLD_Z - dz) * rowb);
+            else        memmove(layer + (-dz) * rowb, layer, (CRAFT_WORLD_Z + dz) * rowb);
+        }
     }
     craft_world_origin_z += dz;
     /* Re-anchor the height cache to the new origin before regen. */
@@ -914,18 +1067,21 @@ void craft_world_maybe_shift(int player_wx, int player_wz, uint32_t seed) {
         craft_world_chunks_restore_window();
         window_load(seed);
         craft_gen_stamp_features(seed);
+        s_lightsrc_valid = false;   /* whole window replaced — rescan */
         compute_skyheight_all();
         craft_torches_rebuild();
         craft_world_rebuild_lightmap();
         return;
     }
 
+    uint32_t _p0 = prof_now();
     /* Partial regen: memmove the overlap, regen only the new strip.
      * X and Z handled independently. Each shift_* function updates
      * the origin and then refreshes the height cache before regen
      * so the lazy fill lands at the right coords. */
     if (dx != 0) shift_x(dx, seed);
     if (dz != 0) shift_z(dz, seed);
+    uint32_t _p1 = prof_now();
 
     /* After shift: pull in mods for chunks that newly overlap the
      * window AND back-stamp any in-hash mods onto the buffer (some
@@ -944,6 +1100,7 @@ void craft_world_maybe_shift(int player_wx, int player_wz, uint32_t seed) {
         int idx = (e->wy * CRAFT_WORLD_Z + lzi) * CRAFT_WORLD_X + lxi;
         craft_world_blocks[idx] = e->blk;
     }
+    uint32_t _p2 = prof_now();
 
     yield_now();   /* pump audio after the regen + mod restore */
 
@@ -955,27 +1112,59 @@ void craft_world_maybe_shift(int player_wx, int player_wz, uint32_t seed) {
      * idempotent (AIR-only writes / mod-skip), and the X/Z corner is
      * harmlessly stamped twice. */
     const int R = CRAFT_GEN_MAX_TREE_RADIUS;
+    int sxa = 0, sxb = 0, sza = 0, szb = 0;   /* stamped/dirty strip bounds */
     if (dx != 0) {
         int s0 = (dx > 0) ? (CRAFT_WORLD_X - dx) : 0;
         int s1 = (dx > 0) ? CRAFT_WORLD_X : -dx;
-        craft_gen_stamp_features_region(seed, s0 - R, s1 + R, 0, CRAFT_WORLD_Z);
+        sxa = s0 - R; sxb = s1 + R;
+        craft_gen_stamp_features_region(seed, sxa, sxb, 0, CRAFT_WORLD_Z);
     }
     if (dz != 0) {
         int s0 = (dz > 0) ? (CRAFT_WORLD_Z - dz) : 0;
         int s1 = (dz > 0) ? CRAFT_WORLD_Z : -dz;
-        craft_gen_stamp_features_region(seed, 0, CRAFT_WORLD_X, s0 - R, s1 + R);
+        sza = s0 - R; szb = s1 + R;
+        craft_gen_stamp_features_region(seed, 0, CRAFT_WORLD_X, sza, szb);
     }
     yield_now();
+    uint32_t _p3 = prof_now();
 
-    /* Sky-height, lightmap, and torch list are all local-indexed —
-     * rebuild from the contents of the new window. Few ms total, and
-     * the yields above/below keep audio flowing across the burst. (An
-     * incremental band-relight was tried and reverted: the max-BFS
-     * light flood can't propagate through already-lit overlap cells
-     * into a freshly-cleared band, so it diverged from a full rebuild.
-     * The regen above dominates the shift cost regardless.) */
-    compute_skyheight_all();
+    /* Sky-height: overlap slid with the window, so only the regenerated
+     * + feature-stamped strip (widened by canopy radius) needs
+     * recomputing. Per-column and independent → identical to a full
+     * recompute over these columns. */
+    if (dx != 0) compute_skyheight_region(sxa, sxb, 0, CRAFT_WORLD_Z);
+    if (dz != 0) compute_skyheight_region(0, CRAFT_WORLD_X, sza, szb);
+    uint32_t _p4 = prof_now();
+
+    /* Light-source registry: drop sources that scrolled out, add the
+     * new strip's (slide-invariant world coords mean the overlap's
+     * sources stay valid in place). The lightmap rebuild below then
+     * floods from the registry — no 64³ source scan. If the registry is
+     * invalid (overflowed / a recent edit), rebuild full-scans and
+     * re-validates it. */
+    lightsrc_compact();
+    if (dx != 0) lightsrc_scan_strip((dx > 0) ? CRAFT_WORLD_X - dx : 0,
+                                     (dx > 0) ? CRAFT_WORLD_X : -dx,
+                                     0, CRAFT_WORLD_Z);
+    if (dz != 0) lightsrc_scan_strip(0, CRAFT_WORLD_X,
+                                     (dz > 0) ? CRAFT_WORLD_Z - dz : 0,
+                                     (dz > 0) ? CRAFT_WORLD_Z : -dz);
+
+    /* Torch list stays a full rebuild for now (bit-identical); regen,
+     * sky-height and the lightmap source-scan are the strip-scaled wins. */
     craft_torches_rebuild();
     craft_redstone_rescan();   /* registry is local-indexed — rebuild for the new window */
+    uint32_t _p5 = prof_now();
     craft_world_rebuild_lightmap();
+    uint32_t _p6 = prof_now();
+
+    if (craft_world_clock_us_cb) {
+        craft_world_shift_us[0] = _p1 - _p0;   /* regen + slide */
+        craft_world_shift_us[1] = _p2 - _p1;   /* mod restore   */
+        craft_world_shift_us[2] = _p3 - _p2;   /* features      */
+        craft_world_shift_us[3] = _p4 - _p3;   /* sky-height    */
+        craft_world_shift_us[4] = _p5 - _p4;   /* torch+redstone+lightsrc */
+        craft_world_shift_us[5] = _p6 - _p5;   /* lightmap flood */
+        craft_world_shift_us[6] = _p6 - _p0;   /* TOTAL          */
+    }
 }

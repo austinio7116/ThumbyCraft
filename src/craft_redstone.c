@@ -119,29 +119,49 @@ static int     s_rs_n;
 static bool    s_rs_dirty;
 static bool    s_in_tick;
 
+/* Block-id → {relevant, active} bit flags. Replaces two big switch/
+ * comparison chains run per cell over all 64³ in rs_full_scan (the
+ * window-shift / dirty rebuild) — one table read per cell instead.
+ * bit 0 = relevant (belongs in the registry), bit 1 = active (counts
+ * toward the s_active "something is live" fast-path gate). */
+#define RS_F_RELEVANT 1u
+#define RS_F_ACTIVE   2u
+static const uint8_t s_rs_flags[256] = {
+    [BLK_REDSTONE_WIRE]      = RS_F_RELEVANT,
+    [BLK_REDSTONE_WIRE_ON]   = RS_F_RELEVANT | RS_F_ACTIVE,
+    [BLK_LEVER_OFF]          = RS_F_RELEVANT,
+    [BLK_LEVER_ON]           = RS_F_RELEVANT | RS_F_ACTIVE,
+    [BLK_REDSTONE_BLOCK]     = RS_F_RELEVANT | RS_F_ACTIVE,
+    [BLK_NOT_GATE]           = RS_F_RELEVANT | RS_F_ACTIVE,
+    [BLK_NOT_GATE_ON]        = RS_F_RELEVANT | RS_F_ACTIVE,
+    [BLK_DELAY]              = RS_F_RELEVANT | RS_F_ACTIVE,
+    [BLK_DELAY_ON]           = RS_F_RELEVANT | RS_F_ACTIVE,
+    [BLK_LAMP]               = RS_F_RELEVANT | RS_F_ACTIVE,
+    [BLK_LAMP_ON]            = RS_F_RELEVANT | RS_F_ACTIVE,
+    [BLK_NOTE_BLOCK]         = RS_F_RELEVANT | RS_F_ACTIVE,
+    [BLK_NOTE_BLOCK_ON]      = RS_F_RELEVANT | RS_F_ACTIVE,
+    [BLK_OBSERVER]           = RS_F_RELEVANT | RS_F_ACTIVE,
+    [BLK_OBSERVER_ON]        = RS_F_RELEVANT | RS_F_ACTIVE,
+    [BLK_DISPENSER]          = RS_F_RELEVANT,
+    [BLK_DISPENSER_ON]       = RS_F_RELEVANT | RS_F_ACTIVE,
+    [BLK_TARGET]             = RS_F_RELEVANT,
+    [BLK_TARGET_ON]          = RS_F_RELEVANT | RS_F_ACTIVE,
+    [BLK_PISTON_OFF]         = RS_F_RELEVANT,
+    [BLK_PISTON_ON]          = RS_F_RELEVANT,
+    [BLK_STICKY_PISTON_OFF]  = RS_F_RELEVANT,
+    [BLK_STICKY_PISTON_ON]   = RS_F_RELEVANT,
+    [BLK_DOOR_OFF]           = RS_F_RELEVANT,
+    [BLK_DOOR_ON]            = RS_F_RELEVANT,
+    [BLK_TRAPDOOR_OFF]       = RS_F_RELEVANT,
+    [BLK_TRAPDOOR_ON]        = RS_F_RELEVANT,
+    [BLK_TNT]                = RS_F_RELEVANT,
+    [BLK_TNT_FUSED]          = RS_F_RELEVANT,
+};
+
 /* A cell belongs in the registry if it is any redstone-interacting
  * block — sources, wire, gates, sinks, observers, and driven blocks. */
 static inline bool rs_relevant(BlockId b) {
-    switch (b) {
-        case BLK_REDSTONE_WIRE:     case BLK_REDSTONE_WIRE_ON:
-        case BLK_LEVER_OFF:         case BLK_LEVER_ON:
-        case BLK_REDSTONE_BLOCK:
-        case BLK_NOT_GATE:          case BLK_NOT_GATE_ON:
-        case BLK_DELAY:             case BLK_DELAY_ON:
-        case BLK_LAMP:              case BLK_LAMP_ON:
-        case BLK_NOTE_BLOCK:        case BLK_NOTE_BLOCK_ON:
-        case BLK_OBSERVER:          case BLK_OBSERVER_ON:
-        case BLK_DISPENSER:         case BLK_DISPENSER_ON:
-        case BLK_TARGET:            case BLK_TARGET_ON:
-        case BLK_PISTON_OFF:        case BLK_PISTON_ON:
-        case BLK_STICKY_PISTON_OFF: case BLK_STICKY_PISTON_ON:
-        case BLK_DOOR_OFF:          case BLK_DOOR_ON:
-        case BLK_TRAPDOOR_OFF:      case BLK_TRAPDOOR_ON:
-        case BLK_TNT:               case BLK_TNT_FUSED:
-            return true;
-        default:
-            return false;
-    }
+    return (s_rs_flags[(uint8_t)b] & RS_F_RELEVANT) != 0;
 }
 
 /* True if a cell counts toward s_active — the "something is live"
@@ -149,14 +169,7 @@ static inline bool rs_relevant(BlockId b) {
  * the purely reactive DISPENSER/TARGET only count in their _ON state
  * (so an idle one doesn't keep the sim awake). */
 static inline bool rs_active_block(BlockId b) {
-    return b == BLK_LEVER_ON || b == BLK_REDSTONE_WIRE_ON ||
-           b == BLK_REDSTONE_BLOCK ||
-           b == BLK_NOT_GATE   || b == BLK_NOT_GATE_ON   ||
-           b == BLK_DELAY      || b == BLK_DELAY_ON      ||
-           b == BLK_LAMP       || b == BLK_LAMP_ON       ||
-           b == BLK_NOTE_BLOCK || b == BLK_NOTE_BLOCK_ON ||
-           b == BLK_OBSERVER   || b == BLK_OBSERVER_ON   ||
-           b == BLK_DISPENSER_ON || b == BLK_TARGET_ON;
+    return (s_rs_flags[(uint8_t)b] & RS_F_ACTIVE) != 0;
 }
 
 /* One full-window scan: rebuild the cell registry and recompute
@@ -166,12 +179,12 @@ static void rs_full_scan(void) {
     int active = 0;
     for (int wy = 0; wy < CRAFT_WORLD_Y; wy++) {
         for (int lz = 0; lz < CRAFT_WORLD_Z; lz++) {
+            int b0 = (wy * CRAFT_WORLD_Z + lz) * CRAFT_WORLD_X;
             for (int lx = 0; lx < CRAFT_WORLD_X; lx++) {
-                BlockId b = (BlockId)craft_world_blocks[
-                    (wy * CRAFT_WORLD_Z + lz) * CRAFT_WORLD_X + lx];
-                if (rs_active_block(b)) active++;
-                if (!rs_relevant(b)) continue;
-                if (s_rs_n < RS_MAX) {
+                uint8_t f = s_rs_flags[craft_world_blocks[b0 + lx]];
+                if (!f) continue;                 /* not redstone — the common case */
+                if (f & RS_F_ACTIVE) active++;
+                if ((f & RS_F_RELEVANT) && s_rs_n < RS_MAX) {
                     s_rs_lx[s_rs_n] = (uint8_t)lx;
                     s_rs_wy[s_rs_n] = (uint8_t)wy;
                     s_rs_lz[s_rs_n] = (uint8_t)lz;

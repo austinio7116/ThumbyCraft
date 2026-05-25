@@ -92,6 +92,15 @@ bool craft_world_end_batch(void);
  * flowing across the hitch. No-op if unset (host build). */
 void craft_world_set_yield_cb(void (*cb)(void));
 
+/* Shift-profiling hook (device debug). Set craft_world_clock_us_cb to a
+ * microsecond clock and craft_world_maybe_shift records the last shift's
+ * per-stage durations (µs) into craft_world_shift_us[] so the HUD can
+ * display where the time goes. Stages: 0 regen, 1 mods, 2 features,
+ * 3 sky-height, 4 torch+redstone, 5 lightmap, 6 = TOTAL. No-op if the
+ * clock is unset. */
+extern uint32_t (*craft_world_clock_us_cb)(void);
+extern volatile uint32_t craft_world_shift_us[7];
+
 /* Initialise the world to an empty buffer at origin (0, 0). */
 void craft_world_init(void);
 
