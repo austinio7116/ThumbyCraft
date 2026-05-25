@@ -102,6 +102,9 @@ const char *craft_main_scheme_label(int scheme);    /* short label per scheme */
 void        craft_main_set_master_volume(float vol);
 float       craft_main_get_master_volume(void);
 
+/* FPS-display toggle state (read by the menu to draw ON/OFF). */
+bool        craft_main_get_show_fps(void);
+
 
 /* Accessor for the player (HUD draw + save). */
 const CraftPlayer *craft_main_player(void);

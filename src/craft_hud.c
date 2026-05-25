@@ -235,11 +235,10 @@ void craft_hud_draw(uint16_t *fb, const CraftPlayer *p, int fps) {
         }
         snprintf(buf, sizeof buf, "%c %d", bl, fps);
         craft_font_draw(fb, buf, CRAFT_FB_W - craft_font_width(buf) - 2, 1, 0xFFE0);
-    }
-    /* World position coords (top-right, under the FPS counter).
-     * Show X, Y, Z so the player can see how deep they are. */
-    {
-        char buf[24];
+
+        /* World position coords (top-right, under the FPS counter).
+         * Show X, Y, Z so the player can see how deep they are. Gated
+         * with the FPS counter so the FPS-display toggle hides both. */
         snprintf(buf, sizeof buf, "%d,%d,%d",
                  (int)p->cam.pos.x, (int)p->cam.pos.y, (int)p->cam.pos.z);
         craft_font_draw(fb, buf,

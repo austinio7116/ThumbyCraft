@@ -75,9 +75,6 @@ static void audio_pump(void) {
     }
 }
 
-/* Microsecond clock for the shift profiler (HUD readout). */
-static uint32_t shift_clock_us(void) { return (uint32_t)time_us_64(); }
-
 /* --- Splash ------------------------------------------------------- */
 static void fb_fill(uint16_t c) {
     for (int i = 0; i < CRAFT_FB_W * CRAFT_FB_H; i++) g_fb[i] = c;
@@ -207,8 +204,6 @@ int main(void) {
     craft_audio_pwm_init();
     /* Keep audio flowing through the multi-ms chunk-load shift. */
     craft_world_set_yield_cb(audio_pump);
-    /* Shift profiler clock — HUD shows per-stage µs of the last shift. */
-    craft_world_clock_us_cb = shift_clock_us;
 
 #ifdef THUMBYONE_SLOT_MODE
     thumbyone_slot_init_brightness_and_led(true);
@@ -355,23 +350,6 @@ int main(void) {
         /* Phase 3: HUD overlay — single-core, after both strips done,
          * since the hotbar straddles the seam. */
         craft_main_draw_hud(fps_value);
-
-        /* Shift profiler readout — last window-shift per-stage µs.
-         * regen / mods / feat / sky / torch+rs / light / TOTAL. */
-        {
-            char buf[40];
-            snprintf(buf, sizeof buf, "%lu %lu %lu %lu %lu %lu",
-                (unsigned long)craft_world_shift_us[0],
-                (unsigned long)craft_world_shift_us[1],
-                (unsigned long)craft_world_shift_us[2],
-                (unsigned long)craft_world_shift_us[3],
-                (unsigned long)craft_world_shift_us[4],
-                (unsigned long)craft_world_shift_us[5]);
-            craft_font_draw(g_fb, buf, 1, 1, 0xFFE0);   /* yellow, top-left */
-            snprintf(buf, sizeof buf, "shift us TOT=%lu",
-                (unsigned long)craft_world_shift_us[6]);
-            craft_font_draw(g_fb, buf, 1, 9, 0xFFE0);
-        }
 
 #ifdef THUMBYONE_SLOT_MODE
         /* Front LED: green at noon, blue at midnight, lerp through

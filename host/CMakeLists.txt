@@ -80,6 +80,42 @@ target_include_directories(thumbycraft_host PRIVATE
     ${SDL2_INCLUDE_DIRS}
 )
 
+# Headless streaming-equivalence harness — same engine sources, no SDL
+# window. Swaps host_main.c for the verifier. Run: ./build_host/stream_verify
+add_executable(stream_verify
+    ${CMAKE_CURRENT_LIST_DIR}/stream_verify.c
+    ${CMAKE_CURRENT_LIST_DIR}/craft_chunk_store_stub.c
+    ${SRC}/craft_world.c
+    ${SRC}/craft_blocks.c
+    ${SRC}/craft_gen.c
+    ${SRC}/craft_render.c
+    ${SRC}/craft_player.c
+    ${SRC}/craft_hud.c
+    ${SRC}/craft_audio.c
+    ${SRC}/craft_save.c
+    ${SRC}/craft_font.c
+    ${SRC}/craft_menu.c
+    ${SRC}/craft_mobs.c
+    ${SRC}/craft_particles.c
+    ${SRC}/craft_torches.c
+    ${SRC}/craft_drops.c
+    ${SRC}/craft_tool_models.c
+    ${SRC}/craft_furnace.c
+    ${SRC}/craft_chests.c
+    ${SRC}/craft_water.c
+    ${SRC}/craft_lava.c
+    ${SRC}/craft_redstone.c
+    ${SRC}/craft_title.c
+    ${SRC}/craft_main.c
+    ${CRAFT_BAKED_C}
+)
+add_dependencies(stream_verify generate_craft_textures)
+target_compile_definitions(stream_verify PRIVATE CRAFT_TEXTURES_BAKED=1)
+target_include_directories(stream_verify PRIVATE ${SRC} ${SDL2_INCLUDE_DIRS})
+target_compile_options(stream_verify PRIVATE
+    -O2 -g -Wall -Wextra -Wno-unused-parameter -Wno-unused-function -ffast-math)
+target_link_libraries(stream_verify PRIVATE ${SDL2_LIBRARIES} m)
+
 target_compile_options(thumbycraft_host PRIVATE
     -O2 -g -Wall -Wextra -Wno-unused-parameter -Wno-unused-function
     -ffast-math

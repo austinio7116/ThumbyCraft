@@ -262,6 +262,12 @@ static bool s_load_req;
 static bool s_new_world_req;
 static bool s_quit_to_lobby_req;
 
+/* FPS-display toggle. When off, craft_hud_draw is passed fps=0 so the
+ * FPS counter + biome letter + world coords debug readout all hide.
+ * Default off — clean HUD; players enable it to measure framerate. */
+static bool s_show_fps = false;
+bool craft_main_get_show_fps(void) { return s_show_fps; }
+
 /* Held-item swing animation — 1.0 right after the player swings,
  * decays linearly back to 0 at ~5/sec. Ticked in craft_main_step /
  * craft_main_tick so both host and device paths stay in sync. */
@@ -600,6 +606,11 @@ static void handle_menu_result(CraftMenuResult r) {
             craft_menu_toast(on ? "Torch light ON" : "Torch light OFF");
             break;
         }
+        case CRAFT_MENU_RESULT_SHOW_FPS: {
+            s_show_fps = !s_show_fps;
+            craft_menu_toast(s_show_fps ? "FPS ON" : "FPS OFF");
+            break;
+        }
         case CRAFT_MENU_RESULT_QUIT_TO_LOBBY:
             s_quit_to_lobby_req = true;
             break;
@@ -704,7 +715,7 @@ void craft_main_step(const CraftInput *in, float dt, int fps) {
         craft_torches_render(&s_player.cam, s_fb);
         craft_particles_render(&s_player.cam, s_fb);
         craft_render_pick_outline(&s_player.cam, s_fb);
-        craft_hud_draw(s_fb, &s_player, fps);
+        craft_hud_draw(s_fb, &s_player, s_show_fps ? fps : 0);
         craft_menu_draw(s_fb, &s_player);
         s_player.cam.pos.y += s_player.step_lag;
         return;
@@ -796,7 +807,7 @@ void craft_main_step(const CraftInput *in, float dt, int fps) {
      * you can see which slot you're holding. */
     craft_render_held_item(s_player.hotbar[s_player.hotbar_idx],
                            s_fb, s_held_swing_t, s_player.bow_draw_t);
-    craft_hud_draw(s_fb, &s_player, fps);
+    craft_hud_draw(s_fb, &s_player, s_show_fps ? fps : 0);
     s_player.cam.pos.y += s_player.step_lag;
 }
 
@@ -919,7 +930,7 @@ void craft_main_draw_hud(int fps) {
      * indicator must stay visible on top of the viewport. */
     craft_render_held_item(s_player.hotbar[s_player.hotbar_idx],
                            s_fb, s_held_swing_t, s_player.bow_draw_t);
-    craft_hud_draw(s_fb, &s_player, fps);
+    craft_hud_draw(s_fb, &s_player, s_show_fps ? fps : 0);
     if (craft_menu_is_open()) craft_menu_draw(s_fb, &s_player);
     /* Restore logical cam y so next tick's physics is correct. */
     s_player.cam.pos.y += s_player.step_lag;

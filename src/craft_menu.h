@@ -40,7 +40,8 @@ typedef enum {
     CRAFT_MENU_RESULT_FAR_LOD,     /* toggle far-distance texture LOD */
     CRAFT_MENU_RESULT_INTERLACE,   /* toggle interlaced row rendering */
     CRAFT_MENU_RESULT_LOWRES,      /* toggle 64×64 low-res perf mode */
-    CRAFT_MENU_RESULT_TORCH_LIGHT  /* toggle held-torch lighting */
+    CRAFT_MENU_RESULT_TORCH_LIGHT, /* toggle held-torch lighting */
+    CRAFT_MENU_RESULT_SHOW_FPS     /* toggle FPS + coords debug readout */
 } CraftMenuResult;
 
 /* Open the menu. `in` is the current input snapshot — used to seed

@@ -60,13 +60,6 @@ static void (*s_yield_cb)(void) = NULL;
 static inline void yield_now(void) { if (s_yield_cb) s_yield_cb(); }
 void craft_world_set_yield_cb(void (*cb)(void)) { s_yield_cb = cb; }
 
-/* Shift profiler (device debug) — see header. */
-uint32_t (*craft_world_clock_us_cb)(void) = NULL;
-volatile uint32_t craft_world_shift_us[7];
-static inline uint32_t prof_now(void) {
-    return craft_world_clock_us_cb ? craft_world_clock_us_cb() : 0;
-}
-
 /* --- Dirty-chunk queue ------------------------------------------ *
  * Every block edit marks its chunk dirty. Persist paths consult
  * this list instead of scanning the whole window, so unmodified
@@ -1105,33 +1098,44 @@ static void backstamp_mods(void) {
     }
 }
 
-/* One streaming step: slide the window by exactly one column (dx,dz is
- * one of ±1, the other 0) and bring that column fully up to date —
- * regen, mods, features (+canopy margin), sky-height, lighting, sprite
- * list, redstone. Everything is strip-scaled, so a step is a few ms
- * rather than the ~140 ms a full chunk-shift cost. Called per frame as
- * the player walks, so terrain streams in column-by-column with no
- * batch hitch. */
-static void do_shift_step(int dx, int dz, uint32_t seed) {
-    if (dx) shift_x(dx, seed);
-    if (dz) shift_z(dz, seed);
+/* One streaming RUN: slide the window by `n` columns along a single
+ * axis (dx,dz is one of ±1, the other 0; n >= 1) and finalise the whole
+ * newly-exposed n-column strip in ONE pass.
+ *
+ * The slide itself is done column-by-column (the tested shift_x/shift_z
+ * ±1 path keeps the lightmap's 2-bit per-cell slide aligned), so each
+ * new column's raw terrain + mods are laid down. But the EXPENSIVE
+ * finalisation — feature stamping, sky-height, the BFS relight of the
+ * leading + trailing strips, the sprite-list rebuild, the mod backstamp
+ * and chunk-store restore — runs once over the combined strip instead of
+ * once per column. That's the whole point: those fixed per-step costs
+ * (and the ±R canopy-margin re-scan, which overlaps between adjacent
+ * columns) were being paid every single block the player walked. Batched
+ * over n columns they amortise down, trading the constant per-block tax
+ * for one fatter run every n blocks. */
+static void do_shift_run(int dx, int dz, int n, uint32_t seed) {
+    if (n < 1) return;
+    for (int i = 0; i < n; i++) {
+        if (dx) shift_x(dx, seed);
+        else    shift_z(dz, seed);
+    }
     craft_world_chunks_restore_window();
     backstamp_mods();
 
-    /* Region to finalise = the new column widened by the canopy radius
-     * so trees whose trunk is just off-window still stamp their canopy
-     * in (stamp_features_region handles out-of-range trunk columns). */
+    /* Region to finalise = the n newly-exposed columns widened by the
+     * canopy radius so trees whose trunk is just off-window still stamp
+     * their canopy in (the region helpers clamp out-of-range indices). */
     const int R = CRAFT_GEN_MAX_TREE_RADIUS;
     int la, lb, za, zb;       /* feature / sky / relight region */
-    int nx0, nx1, nz0, nz1;   /* the single newly-exposed column */
-    if (dx > 0)      { la = CRAFT_WORLD_X - 1 - R; lb = CRAFT_WORLD_X + R; za = 0; zb = CRAFT_WORLD_Z;
-                       nx0 = CRAFT_WORLD_X - 1; nx1 = CRAFT_WORLD_X; nz0 = 0; nz1 = CRAFT_WORLD_Z; }
-    else if (dx < 0) { la = -R; lb = 1 + R; za = 0; zb = CRAFT_WORLD_Z;
-                       nx0 = 0; nx1 = 1; nz0 = 0; nz1 = CRAFT_WORLD_Z; }
-    else if (dz > 0) { la = 0; lb = CRAFT_WORLD_X; za = CRAFT_WORLD_Z - 1 - R; zb = CRAFT_WORLD_Z + R;
-                       nx0 = 0; nx1 = CRAFT_WORLD_X; nz0 = CRAFT_WORLD_Z - 1; nz1 = CRAFT_WORLD_Z; }
-    else             { la = 0; lb = CRAFT_WORLD_X; za = -R; zb = 1 + R;
-                       nx0 = 0; nx1 = CRAFT_WORLD_X; nz0 = 0; nz1 = 1; }
+    int nx0, nx1, nz0, nz1;   /* the n newly-exposed columns (no margin) */
+    if (dx > 0)      { la = CRAFT_WORLD_X - n - R; lb = CRAFT_WORLD_X + R; za = 0; zb = CRAFT_WORLD_Z;
+                       nx0 = CRAFT_WORLD_X - n; nx1 = CRAFT_WORLD_X; nz0 = 0; nz1 = CRAFT_WORLD_Z; }
+    else if (dx < 0) { la = -R; lb = n + R; za = 0; zb = CRAFT_WORLD_Z;
+                       nx0 = 0; nx1 = n; nz0 = 0; nz1 = CRAFT_WORLD_Z; }
+    else if (dz > 0) { la = 0; lb = CRAFT_WORLD_X; za = CRAFT_WORLD_Z - n - R; zb = CRAFT_WORLD_Z + R;
+                       nx0 = 0; nx1 = CRAFT_WORLD_X; nz0 = CRAFT_WORLD_Z - n; nz1 = CRAFT_WORLD_Z; }
+    else             { la = 0; lb = CRAFT_WORLD_X; za = -R; zb = n + R;
+                       nx0 = 0; nx1 = CRAFT_WORLD_X; nz0 = 0; nz1 = n; }
 
     craft_gen_stamp_features_region(seed, la, lb, za, zb);
     compute_skyheight_region(la, lb, za, zb);
@@ -1160,23 +1164,31 @@ static void do_shift_step(int dx, int dz, uint32_t seed) {
     yield_now();
 }
 
-/* Columns streamed per frame. 1 keeps pace with a walk (~1 block/frame);
- * a small budget lets diagonal motion and minor catch-up resolve without
- * the window ever lagging the player. */
-#define STREAM_BUDGET 2
+/* Columns per streaming run. The window only re-centres once the player
+ * has drifted this far from centre (a deadzone), and then slides this
+ * many columns in one run. Bigger = fewer, fatter hitches with the fixed
+ * per-run overhead amortised harder; smaller = smoother but more total
+ * overhead. 4 is the compromise between the old 1-column-per-block tax
+ * (constant overhead) and a full 16-column batch (one big hitch). */
+#ifndef CRAFT_SHIFT_CHUNK
+#define CRAFT_SHIFT_CHUNK 4
+#endif
+
+static inline int imin(int a, int b) { return a < b ? a : b; }
 
 void craft_world_maybe_shift(int player_wx, int player_wz, uint32_t seed) {
-    /* The window continuously re-centres on the player by streaming one
-     * column at a time toward a player-centred origin — no batch shift. */
+    /* Ideal origin keeps the player centred; dxneed/dzneed is how far the
+     * window currently lags that ideal. */
     int tox = player_wx - CRAFT_WORLD_X / 2;
     int toz = player_wz - CRAFT_WORLD_Z / 2;
-    if (craft_world_origin_x == tox && craft_world_origin_z == toz) return;
+    int dxneed = tox - craft_world_origin_x;
+    int dzneed = toz - craft_world_origin_z;
+    if (dxneed == 0 && dzneed == 0) return;
 
-    uint32_t _p0 = prof_now();
+    int adx = dxneed < 0 ? -dxneed : dxneed;
+    int adz = dzneed < 0 ? -dzneed : dzneed;
 
     /* Huge teleport (no overlap) — nothing to stream into, full regen. */
-    int adx = tox - craft_world_origin_x; if (adx < 0) adx = -adx;
-    int adz = toz - craft_world_origin_z; if (adz < 0) adz = -adz;
     if (adx >= CRAFT_WORLD_X || adz >= CRAFT_WORLD_Z) {
         craft_world_origin_x = tox;
         craft_world_origin_z = toz;
@@ -1189,26 +1201,40 @@ void craft_world_maybe_shift(int player_wx, int player_wz, uint32_t seed) {
         craft_torches_rebuild();
         craft_redstone_rescan();
         craft_world_rebuild_lightmap();
-        if (craft_world_clock_us_cb) craft_world_shift_us[6] = prof_now() - _p0;
         return;
     }
 
-    /* Normally stream STREAM_BUDGET columns; if the player is about to
-     * reach a window edge (sustained sprint outran the stream) catch up
-     * fully this frame so they never see off-window — a rare blip. */
+    /* Emergency: the player is within 8 cells of a window edge — a
+     * sustained sprint outran the deadzone. Catch the window all the way
+     * up this frame (in chunk-sized runs so each finalise stays bounded)
+     * so they never see off-window. Rare. */
     int plx = player_wx - craft_world_origin_x;
     int plz = player_wz - craft_world_origin_z;
     bool emergency = plx < 8 || plx >= CRAFT_WORLD_X - 8 ||
                      plz < 8 || plz >= CRAFT_WORLD_Z - 8;
-    int budget = emergency ? (CRAFT_WORLD_X + CRAFT_WORLD_Z) : STREAM_BUDGET;
-    while (budget > 0 &&
-           (craft_world_origin_x != tox || craft_world_origin_z != toz)) {
-        if (craft_world_origin_x != tox)
-            do_shift_step((tox > craft_world_origin_x) ? 1 : -1, 0, seed);
-        else
-            do_shift_step(0, (toz > craft_world_origin_z) ? 1 : -1, seed);
-        budget--;
+    if (emergency) {
+        while (craft_world_origin_x != tox) {
+            int d = tox - craft_world_origin_x;
+            do_shift_run(d > 0 ? 1 : -1, 0,
+                         imin(d < 0 ? -d : d, CRAFT_SHIFT_CHUNK), seed);
+        }
+        while (craft_world_origin_z != toz) {
+            int d = toz - craft_world_origin_z;
+            do_shift_run(0, d > 0 ? 1 : -1,
+                         imin(d < 0 ? -d : d, CRAFT_SHIFT_CHUNK), seed);
+        }
+        return;
     }
 
-    if (craft_world_clock_us_cb) craft_world_shift_us[6] = prof_now() - _p0;
+    /* Normal: only shift once the drift reaches a full chunk (deadzone),
+     * then slide exactly one chunk along the more-lagged axis. The other
+     * axis (and any remainder) catches up on later frames. This bounds
+     * the work to a single CRAFT_SHIFT_CHUNK run per frame. */
+    if (adx >= adz) {
+        if (adx >= CRAFT_SHIFT_CHUNK)
+            do_shift_run(dxneed > 0 ? 1 : -1, 0, CRAFT_SHIFT_CHUNK, seed);
+    } else {
+        if (adz >= CRAFT_SHIFT_CHUNK)
+            do_shift_run(0, dzneed > 0 ? 1 : -1, CRAFT_SHIFT_CHUNK, seed);
+    }
 }
