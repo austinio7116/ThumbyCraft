@@ -203,6 +203,30 @@ target_compile_options(craft_profile PRIVATE
     -O2 -g -Wall -Wextra -Wno-unused-parameter -Wno-unused-function -ffast-math)
 target_link_libraries(craft_profile PRIVATE ${SDL2_LIBRARIES} m)
 
+# Headless flowering-vine + blossom-leaf chooser.
+add_executable(craft_blossom
+    ${CMAKE_CURRENT_LIST_DIR}/craft_blossom.c
+    ${SRC}/craft_blocks.c ${CRAFT_BAKED_C}
+)
+add_dependencies(craft_blossom generate_craft_textures)
+target_compile_definitions(craft_blossom PRIVATE CRAFT_TEXTURES_BAKED=1)
+target_include_directories(craft_blossom PRIVATE ${SRC} ${SDL2_INCLUDE_DIRS})
+target_compile_options(craft_blossom PRIVATE
+    -O2 -g -Wall -Wextra -Wno-unused-parameter -Wno-unused-function -ffast-math)
+target_link_libraries(craft_blossom PRIVATE m)
+
+# Headless grass-top candidate chooser.
+add_executable(craft_grass
+    ${CMAKE_CURRENT_LIST_DIR}/craft_grass.c
+    ${SRC}/craft_blocks.c ${CRAFT_BAKED_C}
+)
+add_dependencies(craft_grass generate_craft_textures)
+target_compile_definitions(craft_grass PRIVATE CRAFT_TEXTURES_BAKED=1)
+target_include_directories(craft_grass PRIVATE ${SRC} ${SDL2_INCLUDE_DIRS})
+target_compile_options(craft_grass PRIVATE
+    -O2 -g -Wall -Wextra -Wno-unused-parameter -Wno-unused-function -ffast-math)
+target_link_libraries(craft_grass PRIVATE m)
+
 # Headless leaf-density chooser.
 add_executable(craft_leaves
     ${CMAKE_CURRENT_LIST_DIR}/craft_leaves.c

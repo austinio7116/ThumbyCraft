@@ -17,6 +17,7 @@
 #include "craft_world.h"
 #include "craft_blocks.h"
 #include "craft_torches.h"
+#include "craft_gen.h"
 
 void craft_main_init(uint16_t *fb, uint32_t seed);
 void craft_torches_record_orient(int wx, int wy, int wz, int face);
@@ -94,6 +95,90 @@ int main(int argc, char **argv) {
             printf("palm at (%d,%d,%d)\n", pwx, pwy, pwz);
             cam.pos.x = (float)pwx - 14.0f; cam.pos.y = (float)pwy + 4.0f;
             cam.pos.z = (float)pwz + 0.5f; cam.yaw = 1.5708f; cam.pitch = 0.30f;
+        }
+    }
+
+    /* DUNDUMP: print an ASCII cross-section of the dungeon band so the
+     * corridors/walls can be verified without an underground render.
+     * '.'=air  '#'=cobble  ' '=stone/other. Exits after printing. */
+    if (getenv("DUNDUMP")) {
+        static const int ys[] = {28, 24, 20, 17, 16, 15, 14, 13};
+        for (unsigned i = 0; i < sizeof ys / sizeof ys[0]; i++) {
+            int yy = ys[i];
+            printf("--- y=%d ---\n", yy);
+            for (int lz = 0; lz < CRAFT_WORLD_Z; lz++) {
+                for (int lx = 0; lx < CRAFT_WORLD_X; lx++) {
+                    BlockId b = craft_world_get(craft_world_origin_x + lx, yy,
+                                                craft_world_origin_z + lz);
+                    putchar(b == BLK_AIR ? '.' : b == BLK_COBBLE ? '#' :
+                            b == BLK_CHEST ? 'C' : ' ');
+                }
+                putchar('\n');
+            }
+        }
+        return 0;
+    }
+
+    /* FORTVIEW: locate the nearest forest fort and frame it at a low
+     * 3/4 angle so the keep + compound + skeletons read against sky. */
+    if (getenv("FORTVIEW")) {
+        int fx, fy, fz;
+        if (craft_gen_nearest_fort(cx, cz, seed, &fx, &fy, &fz)) {
+            printf("fort at (%d,%d,%d)\n", fx, fy, fz);
+            if (getenv("FORTDUMP")) {
+                int ox = fx - 4, oz = fz - 4;   /* origin corner of 9×9 */
+                for (int rel = 1; rel <= 10; rel++) {
+                    printf("-- dy=%d --\n", rel);
+                    for (int lz = 0; lz < 9; lz++) {
+                        for (int lx = 0; lx < 9; lx++) {
+                            BlockId b = craft_world_get(ox+lx, fy+rel, oz+lz);
+                            putchar(b==BLK_STONE?'S':b==BLK_COBBLE?'#':
+                                    b==BLK_GLASS?'o':b==BLK_CHEST?'C':
+                                    b==BLK_AIR?'.':'?');
+                        }
+                        putchar('\n');
+                    }
+                }
+            }
+            /* High 3/4 aerial looking down at the fort, clamped to the
+             * loaded window so the camera never leaves generated space. */
+            float px = (float)fx - 9.0f, pz = (float)fz - 9.0f;
+            float lo_x = craft_world_origin_x + 2.0f;
+            float hi_x = craft_world_origin_x + CRAFT_WORLD_X - 2.0f;
+            float lo_z = craft_world_origin_z + 2.0f;
+            float hi_z = craft_world_origin_z + CRAFT_WORLD_Z - 2.0f;
+            if (px < lo_x) px = lo_x; if (px > hi_x) px = hi_x;
+            if (pz < lo_z) pz = lo_z; if (pz > hi_z) pz = hi_z;
+            cam.pos.x = px; cam.pos.y = (float)fy + 17.0f;
+            cam.pos.z = pz; cam.yaw = 0.785f; cam.pitch = -0.62f;
+            cam.fov = 1.45f;
+        } else {
+            printf("no fort near (%d,%d)\n", cx, cz);
+        }
+    }
+
+    /* VINEVIEW: find the vine block nearest the window centre and frame
+     * its tree's canopy from a short distance, looking slightly up so the
+     * hanging vines + canopy underside read clearly against sky. */
+    if (getenv("VINEVIEW")) {
+        int best = 1 << 30, vwx = 0, vwy = 0, vwz = 0; bool found = false;
+        for (int llz = 0; llz < CRAFT_WORLD_Z; llz++)
+            for (int llx = 0; llx < CRAFT_WORLD_X; llx++)
+                for (int y = CRAFT_WORLD_Y - 2; y >= 1; y--) {
+                    int wx = craft_world_origin_x + llx, wz = craft_world_origin_z + llz;
+                    BlockId b = craft_world_get(wx, y, wz);
+                    if (b == BLK_VINE || b == BLK_FLOWER_VINE) {
+                        int d = (llx - CRAFT_WORLD_X/2)*(llx - CRAFT_WORLD_X/2) +
+                                (llz - CRAFT_WORLD_Z/2)*(llz - CRAFT_WORLD_Z/2);
+                        if (d < best) { best = d; vwx = wx; vwy = y; vwz = wz; found = true; }
+                        break;
+                    }
+                }
+        if (found) {
+            printf("vine at (%d,%d,%d)\n", vwx, vwy, vwz);
+            cam.pos.x = (float)vwx - 11.0f; cam.pos.y = (float)vwy + 3.0f;
+            cam.pos.z = (float)vwz + 0.5f; cam.yaw = 1.5708f; cam.pitch = -0.08f;
+            cam.fov = 1.1f;
         }
     }
 
