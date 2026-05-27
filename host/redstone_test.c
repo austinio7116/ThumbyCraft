@@ -63,5 +63,31 @@ int main(void) {
 
     printf("[redstone_test] %s\n", (ok_on && ok_off) ? "PASS — repeater works"
                                                       : "FAIL");
+
+    /* --- 2-tall door sync test ------------------------------------- */
+    int DZ = Z0 + 6;
+    craft_world_set(X, Y,   DZ,     BLK_LEVER_OFF);
+    craft_world_set(X, Y,   DZ + 1, BLK_REDSTONE_WIRE);
+    craft_world_set(X, Y,   DZ + 2, BLK_DOOR_OFF);    /* bottom (wire-adjacent) */
+    craft_world_set(X, Y+1, DZ + 2, BLK_DOOR_OFF);    /* top */
+    craft_world_set(X, Y,   DZ,     BLK_LEVER_ON);
+    ticks(10);
+    BlockId db = craft_world_get(X, Y,   DZ + 2);
+    BlockId dt = craft_world_get(X, Y+1, DZ + 2);
+    printf("  lever ON  -> bottom=%s top=%s\n",
+           db == BLK_DOOR_ON ? "OPEN" : "shut", dt == BLK_DOOR_ON ? "OPEN" : "shut");
+    /* Now release and tick — both halves should close. */
+    craft_world_set(X, Y, DZ, BLK_LEVER_OFF);
+    ticks(10);
+    BlockId cb = craft_world_get(X, Y,   DZ + 2);
+    BlockId ct = craft_world_get(X, Y+1, DZ + 2);
+    printf("  lever OFF -> bottom=%s top=%s\n",
+           cb == BLK_DOOR_ON ? "OPEN" : "shut", ct == BLK_DOOR_ON ? "OPEN" : "shut");
+
+    int door_ok = (db == BLK_DOOR_ON && dt == BLK_DOOR_ON)
+               && (cb != BLK_DOOR_ON && ct != BLK_DOOR_ON);
+    printf("[door_test] %s — both halves track redstone\n",
+           door_ok ? "PASS" : "FAIL — desync");
+
     return (ok_on && ok_off) ? 0 : 1;
 }

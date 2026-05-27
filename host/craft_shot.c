@@ -83,9 +83,10 @@ int main(int argc, char **argv) {
                 if (dx == 0 && dy <= 2) continue;        /* doorway gap */
                 craft_world_set(cx + dx, gy + dy, wz, BLK_STONE);
             }
-        craft_world_set(cx, gy + 1, wz, BLK_DOOR_OFF);   /* closed door */
+        BlockId dstate = getenv("DOOROPEN") ? BLK_DOOR_ON : BLK_DOOR_OFF;
+        craft_world_set(cx, gy + 1, wz, dstate);   /* door */
         craft_torches_record_orient(cx, gy + 1, wz, FACE_PZ);
-        craft_world_set(cx, gy + 2, wz, BLK_DOOR_OFF);
+        craft_world_set(cx, gy + 2, wz, dstate);
         craft_torches_record_orient(cx, gy + 2, wz, FACE_PZ);
         /* a trapdoor sitting on a block to the right */
         craft_world_set(cx + 3, gy + 1, cz + 2, BLK_STONE);

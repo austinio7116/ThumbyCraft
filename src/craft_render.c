@@ -710,11 +710,11 @@ INLINE_HOT TraceHit trace_ray(Vec3 origin, Vec3 dir, bool stop_at_water) {
                     uint8_t m = craft_torches_wire_connect_at(vx, vy, vz);
                     float du = u - 0.5f, dv = v - 0.5f;
                     float adu = du < 0 ? -du : du, adv = dv < 0 ? -dv : dv;
-                    solid = (adu < 0.16f && adv < 0.16f)
-                         || ((m & 1) && du > 0 && adv < 0.11f)
-                         || ((m & 2) && du < 0 && adv < 0.11f)
-                         || ((m & 4) && dv > 0 && adu < 0.11f)
-                         || ((m & 8) && dv < 0 && adu < 0.11f);
+                    solid = (adu < 0.11f && adv < 0.11f)
+                         || ((m & 1) && du > 0 && adv < 0.07f)
+                         || ((m & 2) && du < 0 && adv < 0.07f)
+                         || ((m & 4) && dv > 0 && adu < 0.07f)
+                         || ((m & 8) && dv < 0 && adu < 0.07f);
                 } else {
                     const uint16_t *ptex = craft_block_texture(blk, pface);
                     int tu = (int)(u * CRAFT_TEX_SIZE), tv = (int)(v * CRAFT_TEX_SIZE);
