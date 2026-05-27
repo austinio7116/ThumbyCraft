@@ -1622,7 +1622,9 @@ static inline int dun_imax(int a, int b) { return a > b ? a : b; }
 
 /* A 40-block region (4×4 grid cells) is a dungeon zone — ~1/3 of them. */
 static inline bool dun_zone_cell(int gx, int gz, uint32_t seed) {
-    return (hash3(gx >> 2, gz >> 2, seed ^ 0xD002047Eu) % 3u) == 0u;
+    /* ~1/24 of 40-block regions host a dungeon — a rare find you have to
+     * explore for, not something near every spawn. */
+    return (hash3(gx >> 2, gz >> 2, seed ^ 0xD002047Eu) % 24u) == 0u;
 }
 /* Room for grid cell (gx,gz): jittered centre, varied half-size, ~1/8
  * carry a chest. Returns false where there's a gap (no room). */

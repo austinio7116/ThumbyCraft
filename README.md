@@ -59,6 +59,9 @@ and there's somewhere to delve.
   inside the DDA itself, instead of post-pass cuboids — crisper and
   cheaper. A **closed door blocks the ray** (it stops at the slab),
   saving all the work behind it.
+- **Doors look like doors** — framed wooden doors with stiles, rails and
+  a recessed panel (two cells stack into a 2-panel door); redstone-wire
+  dust is thinner and cleaner.
 - **See-through "fancy leaves"** — tree canopies have airy gaps you can
   see sky/terrain through.
 - **Natural flowers** (tulip + daisy silhouettes, not lollipops),
@@ -92,6 +95,8 @@ and there's somewhere to delve.
 **Other.**
 - New **spawn**: you start at the world origin on the first solid ground
   below — never in a treetop or a lake.
+- A **ground-cover toggle** in the pause menu hides flowers/grass; both
+  flowers and tall grass are **placeable** blocks.
 - Raycaster moved into **SRAM** for a steadier framerate.
 
 ---
