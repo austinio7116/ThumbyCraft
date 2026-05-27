@@ -407,9 +407,12 @@ static int find_ground(int x, int z) {
  * are gated on the latch — first-day grace. Reset on new world. */
 static float s_last_sun_y = -1.0f;
 static bool  s_first_night_seen = false;
+static uint32_t s_world_seed = 0;   /* for fort lookups */
+static float s_fort_t = 0.0f;       /* fort skeleton top-up timer */
 
 void craft_mobs_spawn_around(Vec3 centre, uint32_t seed) {
     s_rng ^= seed;
+    s_world_seed = seed;
     for (int i = 0; i < CRAFT_MAX_MOBS; i++) craft_mobs[i].alive = false;
     craft_arrows_clear();
     int placed = 0;
@@ -470,6 +473,9 @@ static int find_dark_cave_air(int x, int z) {
 
 void craft_mobs_spawn_hostile(CraftPlayer *p, int n) {
     bool is_day = s_last_sun_y > 0.0f;
+    /* Underground (in the cave/dungeon depths) every spawn goes
+     * cave-spelunking, so dungeons stay well-populated with baddies. */
+    bool underground = p->cam.pos.y < (float)(CRAFT_WATER_LEVEL - 2);
     int placed = 0;
     for (int tries = 0; tries < 80 && placed < n; tries++) {
         /* Spawn beyond visible range so they emerge instead of popping
@@ -481,12 +487,14 @@ void craft_mobs_spawn_hostile(CraftPlayer *p, int n) {
         /* Half the attempts go cave-spelunking — pick a dark unlit
          * air pocket somewhere below the surface. Falls through to
          * the surface path if no cave cell qualifies. */
-        bool try_cave = (xs() & 1) != 0;
+        bool try_cave = underground || ((xs() & 1) != 0);
+        bool from_cave = false;
         int y = -1;
         if (try_cave) {
             int cy = find_dark_cave_air(x, z);
             if (cy >= 0) {
                 y = cy - 1;   /* surface code uses y+1 for feet; align */
+                from_cave = true;
             }
         }
         if (y < 0) {
@@ -505,8 +513,11 @@ void craft_mobs_spawn_hostile(CraftPlayer *p, int n) {
             if (craft_mobs[i].alive) continue;
             CraftMob *m = &craft_mobs[i];
             /* Pick a random hostile type. SLIME/SKELETON/SPIDER/CREEPER
-             * are 4 contiguous enum values starting at MOB_SLIME. */
-            MobType t = (MobType)(MOB_SLIME + (xs() & 3));
+             * are 4 contiguous enum values starting at MOB_SLIME. Deep
+             * cave/dungeon spawns drop the creeper (the 4th) so dungeons
+             * read as skeleton/spider/slime lairs. */
+            MobType t = from_cave ? (MobType)(MOB_SLIME + (xs() % 3u))
+                                  : (MobType)(MOB_SLIME + (xs() & 3));
             m->alive    = true;
             m->type     = t;
             m->pos      = v3((float)x + 0.5f, (float)(y + 1), (float)z + 0.5f);
@@ -617,22 +628,75 @@ int craft_mobs_pick(const CraftCamera *cam, float max_dist) {
     return best;
 }
 
+static int count_hostiles(void) {
+    int n = 0;
+    for (int i = 0; i < CRAFT_MAX_MOBS; i++)
+        if (craft_mobs[i].alive && mob_is_hostile(craft_mobs[i].type)) n++;
+    return n;
+}
+
+/* Spawn one skeleton on solid ground within ~9 blocks of (cx,cz) — the
+ * fort courtyard and its surrounds. Ignores the day/night light gate:
+ * forts are haunted around the clock. Returns true if placed. */
+static bool spawn_fort_skeleton(int cx, int cz) {
+    for (int tries = 0; tries < 24; tries++) {
+        int x = cx + (int)(xs() % 19u) - 9;
+        int z = cz + (int)(xs() % 19u) - 9;
+        int y = find_ground(x, z);
+        if (y < 0) continue;
+        for (int i = 0; i < CRAFT_MAX_MOBS; i++) {
+            if (craft_mobs[i].alive) continue;
+            CraftMob *m = &craft_mobs[i];
+            m->alive = true;
+            m->type  = MOB_SKELETON;
+            m->pos   = v3((float)x + 0.5f, (float)(y + 1), (float)z + 0.5f);
+            m->yaw   = frand() * 6.2831853f;
+            m->vel   = v3(0, 0, 0);
+            m->ai_timer      = 0.5f;
+            m->hp            = mob_hp_table[MOB_SKELETON];
+            m->hurt_flash    = 0.0f;
+            m->fire_cooldown = 1.0f + frand() * 1.5f;
+            m->fuse_t        = 0.0f;
+            return true;
+        }
+        return false;   /* no free slot */
+    }
+    return false;
+}
+
 void craft_mobs_day_night_tick(float dt, float sun_y, CraftPlayer *p) {
     if (p->mode != CRAFT_MODE_SURVIVAL) return;
     s_last_sun_y = sun_y;
     if (!s_first_night_seen && sun_y < -0.10f) s_first_night_seen = true;
+
+    /* Forest skeleton fort — when the player is near one, swarm it with
+     * skeletons day OR night, on a faster timer than the wild spawner.
+     * Shares the CRAFT_HOSTILE_MAX budget. */
+    s_fort_t += dt;
+    if (s_fort_t >= 2.0f) {
+        s_fort_t = 0.0f;
+        int fx, fy, fz;
+        if (craft_gen_nearest_fort((int)p->cam.pos.x, (int)p->cam.pos.z,
+                                   s_world_seed, &fx, &fy, &fz)) {
+            (void)fy;
+            float ddx = p->cam.pos.x - (float)fx;
+            float ddz = p->cam.pos.z - (float)fz;
+            if (ddx * ddx + ddz * ddz < 38.0f * 38.0f &&
+                count_hostiles() < CRAFT_HOSTILE_MAX)
+                spawn_fort_skeleton(fx, fz);
+        }
+    }
+
     s_day_night_t += dt;
     /* Top up hostile count toward CRAFT_HOSTILE_MAX. Faster at night
-     * (sun below horizon), slower during the day. No daylight
-     * despawn — slimes are tough enough to roam in sunlight. */
-    bool night = sun_y < -0.10f;
-    float gap  = night ? NIGHT_SPAWN_GAP : DAY_SPAWN_GAP;
+     * (sun below horizon), slower during the day, fastest underground
+     * so dungeons swarm with baddies. No daylight despawn. */
+    bool night       = sun_y < -0.10f;
+    bool underground = p->cam.pos.y < (float)(CRAFT_WATER_LEVEL - 2);
+    float gap  = underground ? 1.5f : (night ? NIGHT_SPAWN_GAP : DAY_SPAWN_GAP);
     if (s_day_night_t < gap) return;
     s_day_night_t = 0.0f;
-    int alive_h = 0;
-    for (int i = 0; i < CRAFT_MAX_MOBS; i++)
-        if (craft_mobs[i].alive && craft_mobs[i].type == MOB_SLIME) alive_h++;
-    if (alive_h < CRAFT_HOSTILE_MAX) craft_mobs_spawn_hostile(p, 1);
+    if (count_hostiles() < CRAFT_HOSTILE_MAX) craft_mobs_spawn_hostile(p, 1);
 }
 
 /* --- AI ----------------------------------------------------------- */

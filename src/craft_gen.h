@@ -27,6 +27,11 @@ void craft_gen_world(uint32_t seed);
  * a few blocks above the ground. Call after craft_gen_world. */
 Vec3 craft_gen_spawn(void);
 
+/* Nearest forest skeleton-fort origin to (px,pz) within scan range —
+ * fills courtyard centre + floor y. Returns false if none near. */
+bool craft_gen_nearest_fort(int px, int pz, uint32_t seed,
+                            int *ox, int *oy, int *oz);
+
 /* Pure function — what *would* block (x, y, z) be in a fresh world
  * for `seed`? Used by the save layer to diff the current world
  * against the base without holding a second world buffer in SRAM. */
@@ -72,6 +77,9 @@ void craft_gen_invalidate_height_cache(void);
  * for this seed. Used at chest-open time so the loot table fires
  * exactly once per hut. */
 bool craft_gen_is_hut_chest(int wx, int wy, int wz, uint32_t seed);
+
+/* True if (wx,wy,wz) is an underground dungeon treasure-chest cell. */
+bool craft_gen_is_dungeon_chest(int wx, int wy, int wz, uint32_t seed);
 
 /* Populate `c` (assumed freshly-created and zeroed) with deterministic
  * random loot for the hut at (wx, wy, wz). Same seed + coords always

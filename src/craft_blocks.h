@@ -168,6 +168,8 @@ typedef enum {
     BLK_FLOWER_RED      = 100,  /* red bloom */
     BLK_FLOWER_YELLOW   = 101,  /* yellow bloom */
     BLK_PALM_LEAF       = 102,  /* palm frond — cutout, NOT biome-tinted */
+    BLK_FLOWER_VINE     = 103,  /* jungle dangling vine + blossoms (CROSS) */
+    BLK_BLOSSOM_LEAVES  = 104,  /* warm-climate blossoming leaves (CUBE) */
     BLK_COUNT
 } BlockId;
 
@@ -253,6 +255,10 @@ void craft_blocks_animate_water(float t);
  * texture data. Hot path — keep this small. */
 const uint16_t *craft_block_texture(BlockId blk, Face face);
 
+/* Direct atlas-slot accessor (slot 0/1/2 = top/side/bottom) — for blocks
+ * that pack multiple sprite variants across their slots (tall grass). */
+const uint16_t *craft_block_texture_slot(BlockId blk, int slot);
+
 /* Whether this block is opaque (stops a ray). Water and air are
  * non-opaque; everything else is. */
 static inline bool craft_block_opaque(BlockId blk) {
@@ -279,7 +285,7 @@ static inline bool craft_block_opaque(BlockId blk) {
     /* Cross-sprite plants — the DDA cutout path traces through their
      * transparent texels, so they must not read as opaque cubes. */
     if (blk == BLK_TALL_GRASS || blk == BLK_FLOWER_RED ||
-        blk == BLK_FLOWER_YELLOW) return false;
+        blk == BLK_FLOWER_YELLOW || blk == BLK_FLOWER_VINE) return false;
     return blk != BLK_AIR && !craft_is_water_id((uint8_t)blk) && blk != BLK_GLASS;
 }
 

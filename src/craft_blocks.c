@@ -80,6 +80,17 @@ const uint16_t *craft_block_texture(BlockId blk, Face face) {
 #endif
 }
 
+/* Direct atlas-slot accessor (slot 0/1/2). Used by the tall-grass
+ * cutout renderer, which packs three sprite variants into a block's
+ * three slots. Ordinary baked blocks only — not animated water/lava. */
+const uint16_t *craft_block_texture_slot(BlockId blk, int slot) {
+#ifdef CRAFT_TEXTURES_BAKED
+    return &craft_textures_baked[(blk * 3 + slot) * CRAFT_TEX_PIXELS];
+#else
+    return &craft_textures[(blk * 3 + slot) * CRAFT_TEX_PIXELS];
+#endif
+}
+
 const char *craft_block_name(BlockId blk) {
     switch (blk) {
         case BLK_AIR:           return "air";
@@ -1781,21 +1792,44 @@ void craft_blocks_build_textures(void) {
         const uint16_t KEY = rgb565(255, 0, 255);
         const int S = CRAFT_TEX_SIZE;
 
-        /* TALL GRASS — a fan of blades rising from the base. */
-        const int g_bx[5]   = { 3, 6, 8, 10, 13 };
-        const int g_lean[5] = { -1, 0, 0, 1, -1 };
-        const int g_top[5]  = { 6, 2, 1, 4, 7 };
-        for (int f = 0; f < 3; f++) {
-            uint16_t *t = &craft_textures[(BLK_TALL_GRASS * 3 + f) * CRAFT_TEX_PIXELS];
-            for (int i = 0; i < S * S; i++) t[i] = KEY;
-            for (int bi = 0; bi < 5; bi++)
-                for (int y = S - 1; y >= g_top[bi]; y--) {
-                    int up = (S - 1) - y;
-                    int x = g_bx[bi] + (g_lean[bi] * up) / 6;
-                    if (x < 0 || x >= S) continue;
-                    int g = 120 - up * 2; if (g < 70) g = 70;
-                    t[y * S + x] = rgb565(40, g, 38);
+        /* TALL GRASS — three blade-tuft variants baked into the 3 slots
+         * (0 = light-tips, 1 = seed-heads, 2 = half-height). The cutout
+         * renderer picks a slot per cell, weighted by biome temperature
+         * (warmer → seedier). Clean single-px vertical blades that fan
+         * out and brighten toward the tips; magenta = transparent. */
+        {
+            static const int vbx[3][6] = {{3,6,8,10,13,0},{4,6,8,10,12,0},{3,5,7,9,11,13}};
+            static const int vln[3][6] = {{-2,-1,0,1,2,0},{-2,-1,0,1,2,0},{-3,-2,-1,1,2,3}};
+            static const int vtp[3][6] = {{6,3,1,3,6,0},{7,4,3,4,7,0},{10,8,7,8,9,11}};
+            static const int vnb[3]    = {5,5,6};
+            for (int slot = 0; slot < 3; slot++) {
+                uint16_t *t = &craft_textures[(BLK_TALL_GRASS * 3 + slot) * CRAFT_TEX_PIXELS];
+                for (int i = 0; i < S * S; i++) t[i] = KEY;
+                for (int b = 0; b < vnb[slot]; b++) {
+                    int top = vtp[slot][b];
+                    for (int y = S - 1; y >= top; y--) {
+                        int up = (S - 1) - y;
+                        int x = vbx[slot][b] + (vln[slot][b] * up) / 6;
+                        if (x < 0 || x >= S) continue;
+                        float f = 0.78f + 0.025f * up; if (f > 1.25f) f = 1.25f;
+                        int g = (int)(140 * f); if (g > 200) g = 200;
+                        t[y * S + x] = rgb565((int)(44 * f), g, (int)(40 * f));
+                    }
+                    /* seed head on the inner blades of variant 1 */
+                    if (slot == 1 && b != 0 && b != 4) {
+                        int x = vbx[slot][b] + (vln[slot][b] * (S - 1 - top)) / 6;
+                        if (x >= 0 && x < S) {
+                            uint16_t hi = rgb565(210,215,70), md = rgb565(180,190,60);
+                            if (top-1 >= 0) t[(top-1)*S + x] = hi;
+                            if (top-2 >= 0) t[(top-2)*S + x] = hi;
+                            if (top-3 >= 0) t[(top-3)*S + x] = hi;
+                            if (top-4 >= 0) t[(top-4)*S + x] = md;
+                            if (x-1 >= 0 && top-2 >= 0) t[(top-2)*S + x-1] = md;
+                            if (x+1 <  S && top-3 >= 0) t[(top-3)*S + x+1] = md;
+                        }
+                    }
                 }
+            }
         }
 
         /* FLOWERS — hand-placed, natural silhouettes (no lollypop discs).
@@ -1861,6 +1895,64 @@ void craft_blocks_build_textures(void) {
             }
         }
         #undef PX
+    }
+
+    /* FLOWER_VINE — jungle dangling vine: two winding green stems +
+     * leaves (biome-tinted at render) with white blossom blobs. The
+     * cutout CROSS renderer recolours the white texels per-cluster to
+     * one of four bloom colours (pink/red/purple/orange). Tiles
+     * vertically so a hanging run flows unbroken. */
+    {
+        const uint16_t KEY = rgb565(255, 0, 255);
+        const uint16_t WHT = rgb565(255, 255, 255);
+        const int S = CRAFT_TEX_SIZE;
+        const float vcx[2] = { 4.0f, 11.0f }, vph[2] = { 0.0f, 2.0f };
+        const float vamp = 1.5f;
+        for (int f = 0; f < 3; f++) {
+            uint16_t *t = &craft_textures[(BLK_FLOWER_VINE * 3 + f) * CRAFT_TEX_PIXELS];
+            for (int i = 0; i < S * S; i++) t[i] = KEY;
+            #define FVP(xx,yy,cc) do { int _x=(xx), _y=((((yy))%S)+S)%S; \
+                if (_x>=0 && _x<S) t[_y*S+_x]=(cc); } while(0)
+            for (int s = 0; s < 2; s++) {
+                for (int y = 0; y < S; y++) {
+                    int x = (int)(vcx[s] + vamp * sinf(6.2831853f*(float)y/(float)S + vph[s]) + 0.5f);
+                    FVP(x, y, rgb565(40,110,40)); FVP(x, y+1, rgb565(40,110,40));
+                }
+                for (int y = 1; y < S; y += 4) {
+                    int x = (int)(vcx[s] + vamp * sinf(6.2831853f*(float)y/(float)S + vph[s]) + 0.5f);
+                    int side = ((y/4)&1) ? 1 : -1;
+                    FVP(x+side, y, rgb565(60,135,55)); FVP(x+side*2, y, rgb565(60,135,55));
+                }
+            }
+            for (int s = 0; s < 2; s++)
+                for (int y = 2; y < S; y += 5) {
+                    int x = (int)(vcx[s] + vamp * sinf(6.2831853f*(float)y/(float)S + vph[s]) + 0.5f);
+                    int bx = x + ((y&1) ? 2 : -2);
+                    FVP(bx, y, WHT); FVP(bx+1, y, WHT); FVP(bx, y+1, WHT);
+                    FVP(bx+1, y+1, WHT); FVP(bx-1, y, WHT); FVP(bx, y-1, WHT);
+                }
+            #undef FVP
+        }
+    }
+
+    /* BLOSSOM_LEAVES — leafy green cutout (like leaves) with white
+     * blossom clusters; the CUBE cutout renderer recolours white texels
+     * per-tree to a bloom colour, green is biome-tinted. */
+    {
+        const uint16_t WHT = rgb565(255, 255, 255);
+        const int S = CRAFT_TEX_SIZE;
+        for (int f = 0; f < 3; f++) {
+            uint16_t *t = &craft_textures[(BLK_BLOSSOM_LEAVES * 3 + f) * CRAFT_TEX_PIXELS];
+            leaves_pattern(t, 0xB105u + (uint32_t)f);
+            for (int k = 0; k < 5; k++) {
+                uint32_t h = leaf_hash(k + 7, f * 13 + 3);
+                int cx = (int)(h % (uint32_t)S), cy = (int)((h >> 8) % (uint32_t)S);
+                #define BLP(xx,yy) do { int _x=((((xx))%S)+S)%S, _y=((((yy))%S)+S)%S; t[_y*S+_x]=WHT; } while(0)
+                BLP(cx, cy); BLP(cx+1, cy); BLP(cx, cy+1);
+                BLP(cx+1, cy+1); BLP(cx-1, cy); BLP(cx, cy-1);
+                #undef BLP
+            }
+        }
     }
 }
 #endif /* CRAFT_TEXTURES_BAKED */

@@ -280,6 +280,23 @@ static const uint16_t s_biome_tint[8] = {
     RGB565C( 35, 140,  38),   /* jungle    — deep canopy green   */
     RGB565C(195, 175,  70),   /* savanna   — dry tan-yellow      */
 };
+/* Bloom palettes — flowering vines / blossom leaves bake their flower
+ * texels as white; the renderer recolours them per-cluster to one of
+ * these so a hanging run / tree canopy tends to a single bloom colour
+ * (coarse cell hash). Foliage texels are biome-tinted as usual. */
+static const uint16_t s_vine_bloom[4] = {
+    RGB565C(235, 120, 180),   /* pink   */
+    RGB565C(225,  60,  60),   /* red    */
+    RGB565C(170,  90, 210),   /* purple */
+    RGB565C(245, 150,  60),   /* orange */
+};
+static const uint16_t s_leaf_bloom[4] = {
+    RGB565C(240, 150, 190),   /* pink    */
+    RGB565C(245, 240, 250),   /* white   */
+    RGB565C(245, 220,  90),   /* yellow  */
+    RGB565C(230, 110, 210),   /* magenta */
+};
+
 #define BIOME_TINT_T 165       /* ~64% blend — clearly visible */
 
 INLINE_HOT uint16_t biome_tint(uint16_t c, uint16_t tgt) {
@@ -358,6 +375,8 @@ static const uint8_t s_block_class[BLK_COUNT] = {
     [BLK_FLOWER_RED]         = BCLASS_CROSS,
     [BLK_FLOWER_YELLOW]      = BCLASS_CROSS,
     [BLK_VINE]               = BCLASS_CROSS,
+    [BLK_FLOWER_VINE]        = BCLASS_CROSS,
+    [BLK_BLOSSOM_LEAVES]     = BCLASS_CUBE,
     [BLK_TORCH]              = BCLASS_SPRITE3D,
     [BLK_REDSTONE_WIRE]      = BCLASS_PANEL,   /* flat floor, analytic shape */
     [BLK_REDSTONE_WIRE_ON]   = BCLASS_PANEL,
@@ -420,6 +439,26 @@ static void panel_slab(BlockId blk, int orient,
             else      { *cz = (orient == FACE_PZ) ? 0.05f : 0.95f; *hz = 0.05f; *hx = 0.46f; }
         }
     }
+}
+
+/* Tall-grass variant slot (0 light-tips, 1 seed-heads, 2 half-height)
+ * for a cell — a position hash weighted by biome so hot biomes (desert,
+ * jungle, savanna) show more seed-heads and cooler ones lean to the
+ * plain/short tufts. Called by BOTH the cutout hit test and the colour
+ * sample so they pick the same variant. */
+static inline int tallgrass_slot(int wx, int wy, int wz) {
+    int lx = wx - craft_world_origin_x, lz = wz - craft_world_origin_z;
+    int biome = ((unsigned)lx < CRAFT_WORLD_X && (unsigned)lz < CRAFT_WORLD_Z)
+              ? craft_world_biome[lz * CRAFT_WORLD_X + lx] : 0;
+    uint32_t h = (uint32_t)(wx * 73856093) ^ (uint32_t)(wy * 19349663)
+               ^ (uint32_t)(wz * 83492791);
+    h ^= h >> 13; h *= 0x9E3779B1u; h ^= h >> 16;
+    int r = (int)(h % 10);
+    if (biome == 2 || biome == 7)        /* desert / savanna — dry, seedy */
+        return (r < 2) ? 0 : (r < 7) ? 1 : 2;   /* ~20% A, 50% B, 30% C */
+    if (biome == 6)                      /* jungle — lush, dark, no seeds */
+        return (r < 5) ? 0 : 2;                 /* ~50% A, 50% C */
+    return (r < 5) ? 0 : (r < 6) ? 1 : 2;       /* temperate: ~50% A, 10% B, 40% C */
 }
 
 INLINE_HOT TraceHit trace_ray(Vec3 origin, Vec3 dir, bool stop_at_water) {
@@ -600,9 +639,12 @@ INLINE_HOT TraceHit trace_ray(Vec3 origin, Vec3 dir, bool stop_at_water) {
          * cell stays aimable. */
         /* Ground cover toggled off → flowers/grass are invisible and
          * not aimable. Vines are exempt (climbable, functional). */
-        if (cls == BCLASS_CROSS && !s_groundcover && blk != BLK_VINE) continue;
+        if (cls == BCLASS_CROSS && !s_groundcover &&
+            blk != BLK_VINE && blk != BLK_FLOWER_VINE) continue;
         if (cls == BCLASS_CROSS && !stop_at_water) {
-            const uint16_t *ct = craft_block_texture(blk, FACE_PZ);
+            const uint16_t *ct = (blk == BLK_TALL_GRASS)
+                ? craft_block_texture_slot(BLK_TALL_GRASS, tallgrass_slot(vx, vy, vz))
+                : craft_block_texture(blk, FACE_PZ);
             float best_ct = 1e30f; int best_face = -1;
             float best_u = 0.0f, best_v = 0.0f;
             /* Plane A — world X = vx + 0.5, spans the cell's Y,Z. */
@@ -1105,12 +1147,21 @@ void craft_render_strip(const CraftCamera *cam, uint16_t *fb,
                 if (s_clouds_enabled) out = cloud_overlay(out, cam->pos, dir);
                 /* zbuf sky = far sentinel (255 default). */
             } else {
-                if (h.blk != last_blk || h.face != last_face) {
-                    last_tex = craft_block_texture(h.blk, h.face);
-                    last_blk = h.blk;
-                    last_face = h.face;
+                const uint16_t *tex;
+                if (h.blk == BLK_TALL_GRASS) {
+                    /* Per-cell variant — must match trace_ray's pick;
+                     * bypass the (blk,face) cache. */
+                    tex = craft_block_texture_slot(BLK_TALL_GRASS,
+                              tallgrass_slot(h.bx, h.by, h.bz));
+                    last_blk = BLK_COUNT;
+                } else {
+                    if (h.blk != last_blk || h.face != last_face) {
+                        last_tex = craft_block_texture(h.blk, h.face);
+                        last_blk = h.blk;
+                        last_face = h.face;
+                    }
+                    tex = last_tex;
                 }
-                const uint16_t *tex = last_tex;
                 uint16_t c;
                 if (s_far_lod_enabled && h.t > CRAFT_FAR_LOD_T_THRESHOLD) {
                     c = tex[(CRAFT_TEX_SIZE / 2) * CRAFT_TEX_SIZE
@@ -1197,6 +1248,29 @@ void craft_render_strip(const CraftCamera *cam, uint16_t *fb,
                             do_tint = ((gg >> 1) > rr && (gg >> 1) >= bb);
                         }
                         if (do_tint) c = biome_tint(c, tgt);
+                    }
+                }
+                /* Flowering vine / blossom leaves: foliage (green-
+                 * dominant) texels biome-tint like leaves; blossom
+                 * texels (baked white) are recoloured to a per-cluster
+                 * bloom colour so a vine run / tree reads as one bloom
+                 * with cluster-to-cluster variety. */
+                if (h.blk == BLK_FLOWER_VINE || h.blk == BLK_BLOSSOM_LEAVES) {
+                    int gg = (c >> 5) & 0x3F, rr = (c >> 11) & 0x1F, bb = c & 0x1F;
+                    if ((gg >> 1) > rr && (gg >> 1) >= bb) {
+                        int blx = h.fx - craft_world_origin_x;
+                        int blz = h.fz - craft_world_origin_z;
+                        if ((unsigned)blx < CRAFT_WORLD_X &&
+                            (unsigned)blz < CRAFT_WORLD_Z)
+                            c = biome_tint(c, s_biome_tint[
+                                craft_world_biome[blz * CRAFT_WORLD_X + blx]]);
+                    } else {
+                        uint32_t bh = (uint32_t)((h.bx >> 2) * 73856093)
+                                    ^ (uint32_t)((h.by >> 2) * 19349663)
+                                    ^ (uint32_t)((h.bz >> 2) * 83492791);
+                        bh ^= bh >> 13; bh *= 0x9E3779B1u; bh ^= bh >> 16;
+                        c = (h.blk == BLK_FLOWER_VINE ? s_vine_bloom
+                                                      : s_leaf_bloom)[bh & 3];
                     }
                 }
                 /* Sky vs cave brightness, with torch overlay.

@@ -384,6 +384,15 @@ static bool tree_at(int x, int z, uint32_t seed) {
     return hh > CRAFT_WATER_LEVEL + 1;
 }
 
+/* Some warm-climate trees bloom: their canopy leaves become
+ * BLK_BLOSSOM_LEAVES, which the renderer recolours per-tree to a bloom
+ * colour (pink/white/yellow/magenta). ~1/3 of trees in warm climates. */
+static bool tree_blossoms_at(int x, int z, uint32_t seed) {
+    if (temperature_at(x, z, seed) <= 0.5f) return false;
+    uint32_t r = hash3(x, z, seed ^ 0x8105500Du);
+    return (r % 3u) == 0u;
+}
+
 typedef enum {
     TREE_OAK = 0,        /* Standard Minecraft small oak — 5-tall trunk */
     TREE_OAK_LARGE,      /* Minecraft big oak — 8-tall trunk with branches */
@@ -720,10 +729,17 @@ static BlockId tree_block_jungle(int variant, int dx, int dz, int y, int trunk_b
     if (ady == 1) {
         if (dx == 0 && dz == 0) return BLK_LEAVES;
     }
-    /* Dangling vines — dense (every other rim cell) and long (4 cells
-     * below the canopy), the jungle look. */
-    if (ady <= -3 && ady >= -6) {
-        if (chess == 2 && ((dx * 5 + dz * 11) & 1) == 0) return BLK_VINE;
+    /* Dangling vines — a canopy curtain: hung under any leaf cell across
+     * the whole underside (interior + edges, not the bare clipped
+     * corners), ~1/4 of them, each a hash-varied length (1..6 cells) so
+     * they drip out of the foliage rather than spiking off the corners.
+     * A whole run shares one type (flowers along its length, or plain). */
+    if (ady <= -3 && chess >= 1 && chess <= 2 && !(adx == 2 && adz == 2)) {
+        uint32_t lh = (uint32_t)(dx * 374761393) ^ (uint32_t)(dz * 668265263);
+        lh ^= lh >> 13; lh *= 0x9E3779B1u; lh ^= lh >> 15;
+        int len = 1 + (int)(lh % 6u);          /* 1..6 cells */
+        if ((lh & 3u) == 0u && ady >= -2 - len)
+            return (((dx * 7 + dz * 13) & 3) == 0) ? BLK_FLOWER_VINE : BLK_VINE;
     }
     return BLK_AIR;
 }
@@ -858,6 +874,8 @@ enum HutType {
     HUT_TYPE_CASTLE    = 7,
     HUT_TYPE_TEMPLE    = 8,   /* desert: stepped sandstone pyramid */
     HUT_TYPE_ZIGGURAT  = 9,   /* desert: sandstone walled keep */
+    HUT_TYPE_FORT      = 10,  /* forest: stone skeleton outpost (walled
+                                 compound + corner keep) */
 };
 
 static int hut_w(int type) {
@@ -867,6 +885,7 @@ static int hut_w(int type) {
         case HUT_TYPE_CASTLE:    return 7;
         case HUT_TYPE_TEMPLE:
         case HUT_TYPE_ZIGGURAT:  return 9;
+        case HUT_TYPE_FORT:      return 9;
         default:                 return 5;
     }
 }
@@ -877,6 +896,7 @@ static int hut_h(int type) {
         case HUT_TYPE_CASTLE:    return 7;
         case HUT_TYPE_TEMPLE:
         case HUT_TYPE_ZIGGURAT:  return 9;
+        case HUT_TYPE_FORT:      return 9;
         default:                 return 5;
     }
 }
@@ -887,6 +907,7 @@ static int hut_top(int type) {
         case HUT_TYPE_CASTLE:   return 6;
         case HUT_TYPE_TEMPLE:   return 7;   /* stepped pyramid cap */
         case HUT_TYPE_ZIGGURAT: return 5;   /* roof terrace + battlements */
+        case HUT_TYPE_FORT:     return 10;  /* corner keep rises tall */
         default:                return 5;
     }
 }
@@ -896,6 +917,7 @@ static int hut_chest_dx(int type) {
         case HUT_TYPE_CASTLE:    return 3;   /* centre of 7×7 keep */
         case HUT_TYPE_TEMPLE:
         case HUT_TYPE_ZIGGURAT:  return 4;   /* dir-invariant room centre */
+        case HUT_TYPE_FORT:      return 1;   /* inside the corner keep */
         default:                 return 1;
     }
 }
@@ -904,6 +926,7 @@ static int hut_chest_dz(int type) {
         case HUT_TYPE_CASTLE:    return 3;   /* centre of 7×7 keep */
         case HUT_TYPE_TEMPLE:
         case HUT_TYPE_ZIGGURAT:  return 4;   /* dir-invariant room centre */
+        case HUT_TYPE_FORT:      return 1;   /* inside the corner keep */
         default:                 return 1;
     }
 }
@@ -933,10 +956,20 @@ static bool hut_is_temple_site(int hx, int hz, uint32_t seed, CraftBiome b) {
     return false;
 }
 
+/* Forest skeleton outpost site — rare (~1/1024 forest columns), its
+ * own hash dimension so it doesn't compete with the village roll. */
+static bool hut_is_fort_site(int hx, int hz, uint32_t seed, CraftBiome b) {
+    return b == CBIOME_FOREST &&
+           (hash3(hx, hz, seed ^ 0x5CE1E70Eu) & 0x3FFu) == 0;
+}
+
 static int hut_type(int hx, int hz, uint32_t seed) {
+    CraftBiome b = biome_at_cached(hx, hz, seed);
+    /* Forest forts take precedence over a village roll on the same column. */
+    if (hut_is_fort_site(hx, hz, seed, b)) return HUT_TYPE_FORT;
     /* Temple sites (desert always, jungle rarely) yield a pyramid or
      * ziggurat — ~65% / ~35%. Everything else rolls a village design. */
-    if (hut_is_temple_site(hx, hz, seed, biome_at_cached(hx, hz, seed))) {
+    if (hut_is_temple_site(hx, hz, seed, b)) {
         uint32_t dr = hash3(hx, hz, seed ^ 0x7E3D17u) & 0xFFu;
         return (dr < 166) ? HUT_TYPE_TEMPLE : HUT_TYPE_ZIGGURAT;
     }
@@ -958,9 +991,11 @@ static bool hut_origin_at(int hx, int hz, uint32_t seed) {
      * or a village hash (1/4096) hits. */
     uint32_t rt = hash3(hx, hz, seed ^ 0xCAB1F00Du);
     uint32_t rv = hash3(hx, hz, seed ^ 0x5117A6E5u);
+    uint32_t rf = hash3(hx, hz, seed ^ 0x5CE1E70Eu);
     bool maybe_temple  = ((rt & 0x3FFu) == 0);
     bool maybe_village = ((rv & 0xFFFu) == 0);
-    if (!maybe_temple && !maybe_village) return false;
+    bool maybe_fort    = ((rf & 0x3FFu) == 0);
+    if (!maybe_temple && !maybe_village && !maybe_fort) return false;
     /* Lowland-only — mountain biome shrugs buildings off. */
     float m = mountain_factor(hx, hz, seed);
     if (m > 0.20f) return false;
@@ -972,8 +1007,9 @@ static bool hut_origin_at(int hx, int hz, uint32_t seed) {
      * only. Temples never appear outside desert/jungle. */
     CraftBiome b   = biome_at_cached(hx, hz, seed);
     bool temple    = hut_is_temple_site(hx, hz, seed, b);
+    bool fort      = maybe_fort && (b == CBIOME_FOREST);
     bool village   = (b != CBIOME_DESERT) && maybe_village;
-    if (!temple && !village) return false;
+    if (!temple && !village && !fort) return false;
     int type = hut_type(hx, hz, seed);
     int W = hut_w(type), H = hut_h(type);
     int min_h = ref_h, max_h = ref_h;
@@ -989,7 +1025,9 @@ static bool hut_origin_at(int hx, int hz, uint32_t seed) {
      * 1-cell step, and desert flats large enough for a 9×9 footprint
      * are scarce, so being too strict makes them near-impossible to
      * find. */
-    int flat_tol = (type == HUT_TYPE_TEMPLE || type == HUT_TYPE_ZIGGURAT) ? 2 : 1;
+    int flat_tol = (type == HUT_TYPE_FORT) ? 3
+                 : (type == HUT_TYPE_TEMPLE || type == HUT_TYPE_ZIGGURAT) ? 2
+                 : 1;
     if (max_h - min_h > flat_tol) return false;
     return true;
 }
@@ -1350,6 +1388,41 @@ static BlockId hut_block_castle(int dx, int dz, int dy, int dir, int W, int H) {
     return BLK_STONE;
 }
 
+/* T10: Forest skeleton outpost. 9×9 footprint. A crenellated stone
+ * compound wall (4 tall) around an open courtyard, with a 3×3 stone
+ * keep in the (0,0) corner rising to dy=9 and its own cobble
+ * battlement at dy=10. Hollow keep shaft (chest at its base), arrow
+ * slits in both. No torches — it stays dark and grim. Skeletons are
+ * spawned around it by the mob system, day and night. */
+static BlockId hut_block_fort(int dx, int dz, int dy, int dir, int W, int H) {
+    bool in_keep = (dx <= 2 && dz <= 2);          /* corner keep footprint */
+    if (in_keep) {
+        bool kperim = (dx == 0 || dx == 2 || dz == 0 || dz == 2);
+        if (dy == 10) {                            /* keep battlement */
+            return (kperim && ((dx + dz) & 1) == 0) ? BLK_COBBLE : BLK_AIR;
+        }
+        if (dy > 10) return BLK_AIR;
+        if (!kperim) return BLK_AIR;               /* hollow shaft */
+        /* Arrow slits on the keep's two outward faces. */
+        if ((dy == 5 || dy == 8) &&
+            ((dx == 1 && dz == 0) || (dx == 0 && dz == 1))) return BLK_GLASS;
+        return BLK_STONE;
+    }
+    /* Outer compound wall — 4 tall, open courtyard inside. */
+    if (dy >= 5) return BLK_AIR;
+    if (!hut_is_perim(dx, dz, W, H)) return BLK_AIR;   /* courtyard */
+    if (dy == 4) {                                 /* crenellation */
+        return (((dx + dz) & 1) == 0) ? BLK_COBBLE : BLK_AIR;
+    }
+    if (hut_is_door(dx, dz, dy, dir, W, H)) return BLK_AIR;   /* gate */
+    if (dy == 2) {                                 /* arrow slits mid-wall */
+        bool slit = (dx == W / 2 && (dz == 0 || dz == H - 1)) ||
+                    (dz == H / 2 && (dx == 0 || dx == W - 1));
+        if (slit && !hut_is_door(dx, dz, 2, dir, W, H)) return BLK_GLASS;
+    }
+    return BLK_STONE;
+}
+
 /* --- Desert temples (types 8 / 9) --------------------------------
  *
  * Both share a 7×7×2 hollow treasure room inside a 9×9 footprint, a
@@ -1497,6 +1570,7 @@ static BlockId hut_block_local(int dx, int dz, int dy, int dir, int type) {
         case HUT_TYPE_CASTLE:    return hut_block_castle   (dx, dz, dy, dir, W, H);
         case HUT_TYPE_TEMPLE:    return hut_block_temple   (dx, dz, dy, dir, false);
         case HUT_TYPE_ZIGGURAT:  return hut_block_temple   (dx, dz, dy, dir, true);
+        case HUT_TYPE_FORT:      return hut_block_fort     (dx, dz, dy, dir, W, H);
     }
     return BLK_AIR;
 }
@@ -1529,12 +1603,139 @@ static BlockId hut_cell(int x, int y, int z, uint32_t seed, bool *covered) {
     return BLK_AIR;
 }
 
+/* --- Underground roguelike dungeons ------------------------------
+ *
+ * Rooms of varied size and jittered position on a coarse grid, linked
+ * by L-shaped corridors to their +X / +Z neighbours, all confined to
+ * scattered "dungeon zones" near the lava band. Cobble floor + ceiling
+ * + side walls wrap the carved air; some room centres hold a treasure
+ * chest. Computed per COLUMN (one 3×3 room scan) then filled into the
+ * fixed y-band. Skeleton/spider/slime are spawned in them by the mob
+ * system. */
+#define DUN_FLOOR   (CRAFT_LAVA_LEVEL + 3)      /* 13: floor course   */
+#define DUN_CEIL    (DUN_FLOOR + 4)             /* 17: ceiling course */
+#define DUN_PITCH   10                          /* room grid spacing  */
+
+static inline int dun_fdiv(int a, int b) { return (a >= 0) ? a / b : -(((-a) + b - 1) / b); }
+static inline int dun_imin(int a, int b) { return a < b ? a : b; }
+static inline int dun_imax(int a, int b) { return a > b ? a : b; }
+
+/* A 40-block region (4×4 grid cells) is a dungeon zone — ~1/3 of them. */
+static inline bool dun_zone_cell(int gx, int gz, uint32_t seed) {
+    return (hash3(gx >> 2, gz >> 2, seed ^ 0xD002047Eu) % 3u) == 0u;
+}
+/* Room for grid cell (gx,gz): jittered centre, varied half-size, ~1/8
+ * carry a chest. Returns false where there's a gap (no room). */
+static bool dun_room(int gx, int gz, uint32_t seed,
+                     int *cx, int *cz, int *rw, int *rh, bool *chest) {
+    if (!dun_zone_cell(gx, gz, seed)) return false;
+    uint32_t h = hash3(gx, gz, seed ^ 0x0D006ED0u);
+    if ((h & 3u) == 0u) return false;                   /* ~1/4 gaps */
+    *cx    = gx * DUN_PITCH + 5 + (int)((h >> 2) & 3u) - 1;
+    *cz    = gz * DUN_PITCH + 5 + (int)((h >> 4) & 3u) - 1;
+    *rw    = 2 + (int)((h >> 6) % 3u);                  /* half-width 2..4 → 5-9 wide */
+    *rh    = 2 + (int)((h >> 8) % 3u);
+    *chest = ((h >> 10) & 7u) == 0u;                    /* ~1/8 rooms */
+    return true;
+}
+/* L-shaped corridor A→(bx,az)→B of width w (1..3); kept narrower than
+ * the rooms. The strip is [-(w/2) .. (w-1)/2] around the centreline. */
+static bool dun_on_lpath(int wx, int wz, int ax, int az, int bx, int bz, int w) {
+    int lo = -(w / 2), hi = (w - 1) / 2;
+    int dz = wz - az;
+    if (dz >= lo && dz <= hi && wx >= dun_imin(ax, bx) && wx <= dun_imax(ax, bx)) return true;
+    int dx = wx - bx;
+    if (dx >= lo && dx <= hi && wz >= dun_imin(az, bz) && wz <= dun_imax(az, bz)) return true;
+    return false;
+}
+/* Is column (wx,wz) inside a dungeon room or corridor? */
+static bool dun_interior(int wx, int wz, uint32_t seed) {
+    int cgx = dun_fdiv(wx, DUN_PITCH), cgz = dun_fdiv(wz, DUN_PITCH);
+    for (int dgz = -1; dgz <= 1; dgz++)
+        for (int dgx = -1; dgx <= 1; dgx++) {
+            int gx = cgx + dgx, gz = cgz + dgz;
+            int rcx, rcz, rw, rh; bool ch;
+            if (!dun_room(gx, gz, seed, &rcx, &rcz, &rw, &rh, &ch)) continue;
+            if (abs_i(wx - rcx) <= rw && abs_i(wz - rcz) <= rh) return true;
+            int nx, nz, nw, nh; bool nc;
+            /* Per-corridor width 1..3 — a mix of tight tunnels and
+             * wider passages between the chambers. */
+            int cwx = 1 + (int)(hash3(gx, gz, seed ^ 0xC0440001u) % 3u);
+            int cwz = 1 + (int)(hash3(gx, gz, seed ^ 0xC0440002u) % 3u);
+            if (dun_room(gx + 1, gz, seed, &nx, &nz, &nw, &nh, &nc) &&
+                dun_on_lpath(wx, wz, rcx, rcz, nx, nz, cwx)) return true;
+            if (dun_room(gx, gz + 1, seed, &nx, &nz, &nw, &nh, &nc) &&
+                dun_on_lpath(wx, wz, rcx, rcz, nx, nz, cwz)) return true;
+        }
+    return false;
+}
+/* Per-column dungeon class: 0 none, 1 interior, 2 wall. *chest set when
+ * this column is a chest-room centre. */
+static int dungeon_column(int wx, int wz, uint32_t seed, bool *chest) {
+    *chest = false;
+    if (dun_interior(wx, wz, seed)) {
+        int cgx = dun_fdiv(wx, DUN_PITCH), cgz = dun_fdiv(wz, DUN_PITCH);
+        int rcx, rcz, rw, rh; bool ch;
+        if (dun_room(cgx, cgz, seed, &rcx, &rcz, &rw, &rh, &ch) && ch &&
+            wx == rcx && wz == rcz) *chest = true;
+        return 1;
+    }
+    if (dun_interior(wx + 1, wz, seed) || dun_interior(wx - 1, wz, seed) ||
+        dun_interior(wx, wz + 1, seed) || dun_interior(wx, wz - 1, seed) ||
+        dun_interior(wx + 1, wz + 1, seed) || dun_interior(wx - 1, wz - 1, seed) ||
+        dun_interior(wx + 1, wz - 1, seed) || dun_interior(wx - 1, wz + 1, seed))
+        return 2;
+    return 0;
+}
+/* Per-cell variant (for craft_gen_block_at): 0 none, 1 air, 2 cobble,
+ * 3 chest. */
+static int dungeon_cell(int wx, int y, int wz, uint32_t seed) {
+    if (y < DUN_FLOOR || y > DUN_CEIL) return 0;
+    bool chest;
+    int dk = dungeon_column(wx, wz, seed, &chest);
+    if (dk == 0) return 0;
+    if (dk == 2) return 2;                          /* side wall */
+    if (y == DUN_FLOOR || y == DUN_CEIL) return 2;  /* floor / ceiling */
+    if (chest && y == DUN_FLOOR + 1) return 3;      /* treasure */
+    return 1;                                       /* air */
+}
+/* Some rooms (~1/4) open a 2×2 vertical shaft to the surface — the
+ * dungeon's discoverable entrance/exit. True if column (wx,wz) is in
+ * such a shaft's footprint. */
+static bool dun_shaft(int wx, int wz, uint32_t seed) {
+    int cgx = dun_fdiv(wx, DUN_PITCH), cgz = dun_fdiv(wz, DUN_PITCH);
+    for (int dgz = -1; dgz <= 1; dgz++)
+        for (int dgx = -1; dgx <= 1; dgx++) {
+            int gx = cgx + dgx, gz = cgz + dgz;
+            int rcx, rcz, rw, rh; bool ch;
+            if (!dun_room(gx, gz, seed, &rcx, &rcz, &rw, &rh, &ch)) continue;
+            uint32_t h = hash3(gx, gz, seed ^ 0x0D006ED0u);
+            if (((h >> 11) & 3u) != 0u) continue;       /* ~1/4 are entrances */
+            if (wx >= rcx && wx <= rcx + 1 && wz >= rcz && wz <= rcz + 1)
+                return true;                            /* 2×2 shaft mouth */
+        }
+    return false;
+}
+
+/* Is (wx,wy,wz) a dungeon treasure-chest cell? (for loot seeding) */
+bool craft_gen_is_dungeon_chest(int wx, int wy, int wz, uint32_t seed) {
+    if (wy != DUN_FLOOR + 1) return false;
+    bool chest;
+    dungeon_column(wx, wz, seed, &chest);
+    return chest;
+}
+
 BlockId craft_gen_block_at(int x, int y, int z, uint32_t seed) {
     /* Only Y is bounded — X and Z extend infinitely. */
     if ((unsigned)y >= CRAFT_WORLD_Y) return BLK_AIR;
     (void)x;
 
     int h = height_at(x, z, seed);
+
+    /* Dungeon entrance shaft — an open 2×2 well from the room ceiling up
+     * through the surface, so dungeons are discoverable + enterable. */
+    if (DUN_CEIL < h - 3 && y >= DUN_CEIL && y <= h && dun_shaft(x, z, seed))
+        return BLK_AIR;
 
     /* Underground / surface columns. Caves carve out the deep stone
      * layer only — never touches the topmost dirt or surface block,
@@ -1543,6 +1744,10 @@ BlockId craft_gen_block_at(int x, int y, int z, uint32_t seed) {
      * y<h-8 ceiling keeps the top 5 cells of stone solid so caves
      * stay genuinely subterranean (matches craft_gen_column). */
     if (y <  h - 3) {
+        int dc = dungeon_cell(x, y, z, seed);
+        if (dc == 1) return BLK_AIR;
+        if (dc == 2) return BLK_COBBLE;
+        if (dc == 3) return BLK_CHEST;
         if (y >= 2 && y < h - 8 && is_cave(x, y, z, seed)) return BLK_AIR;
         return BLK_STONE;
     }
@@ -1573,6 +1778,8 @@ BlockId craft_gen_block_at(int x, int y, int z, uint32_t seed) {
             int tv = (tt == TREE_PALM) ? palm_variant_at(tx, tz, seed)
                                        : tree_variant_at(tx, tz, seed);
             BlockId b = tree_block_at(tt, tv, -dx, -dz, y, th);
+            if (b == BLK_LEAVES && tree_blossoms_at(tx, tz, seed))
+                b = BLK_BLOSSOM_LEAVES;
             if (b != BLK_AIR) return b;
         }
     }
@@ -1641,25 +1848,16 @@ void craft_gen_column(int wx, int wz, uint32_t seed,
      * smoothing the cliff is mostly gone, but keeping caves
      * genuinely subterranean is the right default anyway. */
     int cave_top = h - 8;
-    /* Cave noise is the single biggest cost of terrain regen (~3 3D-noise
-     * evals per underground cell). The cave fields are low-frequency in Y
-     * (wavelengths ~6-12 cells), so sampling every cell oversamples — we
-     * evaluate is_cave only on EVEN y and reuse the result for the odd
-     * cell above it. Halves the cave cost; caves become very slightly
-     * 2-tall-quantised vertically, which is barely visible at 1-block
-     * resolution. The lava/air choice still uses the real per-cell y. */
-    bool cave_even = false;
+    /* Cave carve is evaluated per cell (was 2-tall-quantised for perf,
+     * but the vertical blockiness was too visible — reverted). */
     for (int y = 0; y < h - 3; y++) {
         /* Cave carve before ore placement — caves remove a cell
          * entirely so ore doesn't get assigned to it. y<2 stays
          * solid as a "bedrock" floor. */
-        if (y >= 2 && y < cave_top) {
-            if (!(y & 1)) cave_even = is_cave(wx, y, wz, seed);
-            if (cave_even) {
-                /* Deep caverns pool lava; higher caves are open air. */
-                out[y] = (y <= CRAFT_LAVA_LEVEL) ? BLK_LAVA : BLK_AIR;
-                continue;
-            }
+        if (y >= 2 && y < cave_top && is_cave(wx, y, wz, seed)) {
+            /* Deep caverns pool lava; higher caves are open air. */
+            out[y] = (y <= CRAFT_LAVA_LEVEL) ? BLK_LAVA : BLK_AIR;
+            continue;
         }
         /* Lava pockets — ~4×4×4 magma blobs embedded in solid stone
          * ABOVE the deep lava line, so lava also turns up higher in the
@@ -1689,6 +1887,20 @@ void craft_gen_column(int wx, int wz, uint32_t seed,
         else if ((r & coal_mask) == 0)       b = BLK_COAL_ORE;
         else if ((r & iron_mask) == 0)       b = BLK_IRON_ORE;
         out[y] = b;
+    }
+    /* Carve dungeon rooms/corridors into the deep rock (overrides
+     * cave/stone but stays subterranean). One room scan per column. */
+    if (DUN_CEIL < h - 3) {
+        bool dchest;
+        int dk = dungeon_column(wx, wz, seed, &dchest);
+        if (dk == 1) {                       /* room / corridor interior */
+            out[DUN_FLOOR] = BLK_COBBLE;
+            for (int y = DUN_FLOOR + 1; y < DUN_CEIL; y++) out[y] = BLK_AIR;
+            out[DUN_CEIL] = BLK_COBBLE;
+            if (dchest) out[DUN_FLOOR + 1] = BLK_CHEST;
+        } else if (dk == 2) {                /* side wall */
+            for (int y = DUN_FLOOR; y <= DUN_CEIL; y++) out[y] = BLK_COBBLE;
+        }
     }
     bool mtn_sub = (biome == CBIOME_MOUNTAINS);
     for (int y = h - 3; y < h; y++) {
@@ -1725,12 +1937,14 @@ void craft_gen_column(int wx, int wz, uint32_t seed,
 
     /* Meadow ground cover — tall grass + flowers on grass surfaces.
      * Cross-sprite cutout plants placed in the cell above the surface.
-     * Density by biome: plains is lush (and the only one with many
-     * flowers), forest is patchier, swamp is grass-only. Skipped on a
+     * Density by biome: plains lush (+flowers), forest patchier, swamp
+     * grass-only; savanna + jungle are the warm grassy biomes (their
+     * tufts render seedier via the variant weighting). Skipped on a
      * tree-trunk column so the trunk (which fills AIR only) isn't
      * blocked at its base. */
     if (surface == BLK_GRASS && h + 1 < CRAFT_WORLD_Y && out[h + 1] == BLK_AIR &&
-        (biome == CBIOME_PLAINS || biome == CBIOME_FOREST || biome == CBIOME_SWAMP)) {
+        (biome == CBIOME_PLAINS || biome == CBIOME_FOREST || biome == CBIOME_SWAMP ||
+         biome == CBIOME_SAVANNA || biome == CBIOME_JUNGLE)) {
         uint32_t dr = hash3(wx, wz, seed ^ 0x0F10E12Du);
         int roll = (int)(dr & 0xFF);
         BlockId deco = BLK_AIR;
@@ -1740,10 +1954,23 @@ void craft_gen_column(int wx, int wz, uint32_t seed,
         } else if (biome == CBIOME_FOREST) {     /* ~2% flower, ~25% grass */
             if      (roll < 6)   deco = (dr & 0x100) ? BLK_FLOWER_RED : BLK_FLOWER_YELLOW;
             else if (roll < 70)  deco = BLK_TALL_GRASS;
+        } else if (biome == CBIOME_SAVANNA) {    /* dry, seedy ~40% grass */
+            if (roll < 100)      deco = BLK_TALL_GRASS;
+        } else if (biome == CBIOME_JUNGLE) {     /* lush ~45% grass, no flowers */
+            if (roll < 115)      deco = BLK_TALL_GRASS;
         } else {                                 /* swamp — ~23% grass */
             if (roll < 60)       deco = BLK_TALL_GRASS;
         }
         if (deco != BLK_AIR && !tree_at(wx, wz, seed)) out[h + 1] = deco;
+    }
+
+    /* Dungeon entrance shaft — carved LAST so it punches through the
+     * surface/dirt just placed, leaving an open 2×2 well from the room
+     * ceiling up to the surface (and clears any plant on the hole). */
+    if (DUN_CEIL < h - 3 && dun_shaft(wx, wz, seed)) {
+        for (int y = DUN_CEIL; y <= h && y < CRAFT_WORLD_Y; y++)
+            out[y] = BLK_AIR;
+        if (h + 1 < CRAFT_WORLD_Y) out[h + 1] = BLK_AIR;
     }
 
     /* Trees and huts are NOT stamped per-column any more — they're
@@ -1891,68 +2118,54 @@ void craft_gen_world(uint32_t seed) {
     craft_world_dirty = 0;
 }
 
+/* Blocks a spawn plumb-line passes straight through when seeking the
+ * ground surface — air, tree canopy/trunk and ground plants are not
+ * "solid ground" to stand on. */
+static inline bool spawn_passthrough(BlockId b) {
+    return b == BLK_AIR || b == BLK_LEAVES || b == BLK_WOOD ||
+           b == BLK_VINE || b == BLK_FLOWER_VINE || b == BLK_BLOSSOM_LEAVES ||
+           b == BLK_PALM_LEAF || b == BLK_TALL_GRASS ||
+           b == BLK_FLOWER_RED || b == BLK_FLOWER_YELLOW;
+}
+
 Vec3 craft_gen_spawn(void) {
-    /* Search outward from the window centre for a grass/sand column
-     * with two clear cells of headroom — that's what the player AABB
-     * needs (PLAYER_HEIGHT=1.7 m, so feet at gy+1 and y0..y1 range
-     * covers cells gy+1 and gy+2). Previously we returned the first
-     * grass we found, which let the player spawn under a tree trunk
-     * or inside a hut wall and be permanently stuck. */
-    int cx = craft_world_origin_x + CRAFT_WORLD_X / 2;
-    int cz = craft_world_origin_z + CRAFT_WORLD_Z / 2;
-    /* Two-tier search outward from centre. A candidate must have a
-     * grass/sand top with two clear non-water cells of headroom above
-     * the waterline. We PREFER the closest such spot that also sits in
-     * the middle of one biome (every column within ±BIOME_PAD shares
-     * its biome id) so the player doesn't land on a 4-biome junction.
-     * The first plain valid spot is kept as a fallback if no uniform
-     * spot turns up. */
-    const int BIOME_PAD = 6;
-    int fb_x = -1, fb_y = 0, fb_z = 0;
+    /* Spawn at world origin (0,0): drop a plumb line from the top of the
+     * world down to the first ground block (passing through canopy and
+     * plants). If that surface is water/lava, the column is no good —
+     * spiral outward to the nearest column whose surface is solid ground
+     * with two clear cells of headroom, and stand on top of it. The
+     * window is centred on (0,0), so the spiral stays in bounds. */
     for (int radius = 0; radius < CRAFT_WORLD_X / 2; radius++) {
         for (int dz = -radius; dz <= radius; dz++) {
             for (int dx = -radius; dx <= radius; dx++) {
-                int x = cx + dx, z = cz + dz;
+                /* Ring only — interior cells were covered by smaller radii. */
+                if (radius > 0 && abs_i(dx) != radius && abs_i(dz) != radius)
+                    continue;
+                int x = dx, z = dz;          /* world coords, centred on (0,0) */
                 int gy = -1;
                 for (int y = CRAFT_WORLD_Y - 2; y > 0; y--) {
                     BlockId blk = craft_world_get(x, y, z);
-                    if (blk == BLK_GRASS || blk == BLK_SAND) { gy = y; break; }
+                    if (spawn_passthrough(blk)) continue;
+                    /* First real surface block. Water/lava → reject this
+                     * column (try a new location). */
+                    if (!craft_is_water_id((uint8_t)blk) &&
+                        !craft_is_lava_id((uint8_t)blk))
+                        gy = y;
+                    break;
                 }
-                if (gy < 0) continue;
+                if (gy < 0) continue;        /* empty, or water/lava surface */
                 BlockId head1 = craft_world_get(x, gy + 1, z);
                 BlockId head2 = craft_world_get(x, gy + 2, z);
                 if (craft_block_solid(head1) || craft_block_solid(head2)) continue;
                 if (craft_is_water_id((uint8_t)head1) ||
                     craft_is_water_id((uint8_t)head2)) continue;
-                if (gy < CRAFT_WATER_LEVEL + 1) continue;
-                if (fb_x < 0) { fb_x = x; fb_y = gy; fb_z = z; }  /* fallback */
-                /* Biome-uniform neighbourhood check via the per-column
-                 * biome map (this column is inside the window). */
-                int lx = x - craft_world_origin_x;
-                int lz = z - craft_world_origin_z;
-                if ((unsigned)lx >= CRAFT_WORLD_X || (unsigned)lz >= CRAFT_WORLD_Z)
-                    continue;
-                uint8_t b0 = craft_world_biome[lz * CRAFT_WORLD_X + lx];
-                bool uniform = true;
-                for (int pz = -BIOME_PAD; pz <= BIOME_PAD && uniform; pz++) {
-                    for (int px = -BIOME_PAD; px <= BIOME_PAD; px++) {
-                        int nx = lx + px, nz = lz + pz;
-                        if ((unsigned)nx >= CRAFT_WORLD_X ||
-                            (unsigned)nz >= CRAFT_WORLD_Z) continue;
-                        if (craft_world_biome[nz * CRAFT_WORLD_X + nx] != b0) {
-                            uniform = false; break;
-                        }
-                    }
-                }
-                if (uniform)
-                    return v3((float)x + 0.5f, (float)gy + 1.0f + 1.6f,
-                              (float)z + 0.5f);
+                return v3((float)x + 0.5f, (float)gy + 1.0f + 1.6f,
+                          (float)z + 0.5f);
             }
         }
     }
-    if (fb_x >= 0)
-        return v3((float)fb_x + 0.5f, (float)fb_y + 1.0f + 1.6f, (float)fb_z + 0.5f);
-    return v3((float)cx + 0.5f, (float)CRAFT_WATER_LEVEL + 2.0f, (float)cz + 0.5f);
+    /* Fallback (should never trigger): stand above the waterline at origin. */
+    return v3(0.5f, (float)CRAFT_WATER_LEVEL + 2.0f, 0.5f);
 }
 
 bool craft_gen_is_hut_chest(int wx, int wy, int wz, uint32_t seed) {
@@ -2011,6 +2224,10 @@ void craft_gen_seed_hut_chest(CraftChest *c, int wx, int wy, int wz,
                 tier = ((r >> 28) & 3) == 0 ? 3 : 2;
         }
     }
+    /* Dungeon chests — the payoff for braving the deep lair. Never
+     * below T2, ~40% legendary T3 like temples. */
+    if (tier < 2 && craft_gen_is_dungeon_chest(wx, wy, wz, seed))
+        tier = ((r >> 24) & 3) == 0 ? 3 : 2;
 
     int slot = 0;
 
@@ -2091,4 +2308,31 @@ void craft_gen_seed_hut_chest(CraftChest *c, int wx, int wy, int wz,
         }
     }
     (void)slot;
+}
+
+/* Find the nearest forest skeleton-fort origin to world column (px,pz)
+ * within FORT_SCAN blocks. Returns its courtyard centre + floor y in
+ * *ox/*oy/*oz. Used by the mob system to swarm skeletons around forts.
+ * Cheap-gated on the fort hash before any heavier site validation. */
+bool craft_gen_nearest_fort(int px, int pz, uint32_t seed,
+                            int *ox, int *oy, int *oz) {
+    const int FORT_SCAN = 40;
+    int best = 1 << 30; bool found = false;
+    for (int dz = -FORT_SCAN; dz <= FORT_SCAN; dz++) {
+        for (int dx = -FORT_SCAN; dx <= FORT_SCAN; dx++) {
+            int hx = px + dx, hz = pz + dz;
+            if ((hash3(hx, hz, seed ^ 0x5CE1E70Eu) & 0x3FFu) != 0) continue;
+            if (!hut_origin_at(hx, hz, seed)) continue;
+            if (hut_type(hx, hz, seed) != HUT_TYPE_FORT) continue;
+            int d = dx * dx + dz * dz;
+            if (d < best) {
+                best = d;
+                *ox = hx + 4;                       /* 9×9 centre */
+                *oz = hz + 4;
+                *oy = hut_floor_y(hx, hz, seed);
+                found = true;
+            }
+        }
+    }
+    return found;
 }

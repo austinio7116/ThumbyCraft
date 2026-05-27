@@ -28,7 +28,7 @@
  * frees the SRAM the raycaster needs for CRAFT_HOT placement. Functional
  * sprites are scanned first, so an overflow only drops decorative lily
  * pads. Transient list, rebuilt each shift, ~20 bytes each. */
-#define CRAFT_MAX_TORCHES 160
+#define CRAFT_MAX_TORCHES 128
 
 typedef enum {
     TORCH_KIND_TORCH = 0,

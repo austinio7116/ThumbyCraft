@@ -224,6 +224,8 @@ static void inv_rebuild_visible(const CraftPlayer *p) {
             b == BLK_DISPENSER_ON       ||
             b == BLK_TARGET_ON          ||
             b == BLK_PALM_LEAF          ||
+            b == BLK_FLOWER_VINE        ||
+            b == BLK_BLOSSOM_LEAVES     ||
             b == BLK_REDSTONE_WIRE) {
             /* BLK_REDSTONE_WIRE also hidden because the inventory
              * item is BLK_REDSTONE dust — wire is the placed form.

@@ -364,7 +364,7 @@ static inline bool light_transparent(BlockId b) {
         b == BLK_PISTON_ARM) return true;
     if (b == BLK_VINE || b == BLK_LILY_PAD) return true;
     if (b == BLK_TALL_GRASS || b == BLK_FLOWER_RED ||
-        b == BLK_FLOWER_YELLOW) return true;
+        b == BLK_FLOWER_YELLOW || b == BLK_FLOWER_VINE) return true;
     return false;
 }
 
@@ -447,7 +447,7 @@ static inline bool blocks_sky(BlockId b) {
         b == BLK_PISTON_ARM) return false;
     if (b == BLK_VINE || b == BLK_LILY_PAD) return false;
     if (b == BLK_TALL_GRASS || b == BLK_FLOWER_RED ||
-        b == BLK_FLOWER_YELLOW) return false;
+        b == BLK_FLOWER_YELLOW || b == BLK_FLOWER_VINE) return false;
     return true;
 }
 

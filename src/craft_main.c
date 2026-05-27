@@ -786,7 +786,8 @@ void craft_main_step(const CraftInput *in, float dt, int fps) {
          * pre-create the record and populate it before handing off
          * to the menu so the player sees the loot on this open. */
         if (!craft_chest_find(cx, cy, cz) &&
-            craft_gen_is_hut_chest(cx, cy, cz, s_seed)) {
+            (craft_gen_is_hut_chest(cx, cy, cz, s_seed) ||
+             craft_gen_is_dungeon_chest(cx, cy, cz, s_seed))) {
             CraftChest *hc = craft_chest_at(cx, cy, cz);
             if (hc) craft_gen_seed_hut_chest(hc, cx, cy, cz, s_seed);
         }
@@ -884,7 +885,8 @@ void craft_main_tick(const CraftInput *in, float dt) {
          * pre-create the record and populate it before handing off
          * to the menu so the player sees the loot on this open. */
         if (!craft_chest_find(cx, cy, cz) &&
-            craft_gen_is_hut_chest(cx, cy, cz, s_seed)) {
+            (craft_gen_is_hut_chest(cx, cy, cz, s_seed) ||
+             craft_gen_is_dungeon_chest(cx, cy, cz, s_seed))) {
             CraftChest *hc = craft_chest_at(cx, cy, cz);
             if (hc) craft_gen_seed_hut_chest(hc, cx, cy, cz, s_seed);
         }
