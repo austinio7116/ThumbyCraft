@@ -44,6 +44,12 @@ drifting clouds  ·  flash-backed worlds  ·  280 MHz dual-core M33 tile-stealin
 
 ## What's new in 1.17
 
+> ℹ️ **Saves carry over.** The save format is unchanged (the loader
+> still dual-reads every version back to v5), so your existing worlds
+> load with all your edits intact — and because the world is stored as
+> a diff over the generator, the new dungeons, forts and foliage appear
+> in your world as the terrain around you regenerates.
+
 A **biome-detail, structures & dungeons** release — the world is denser
 and there's somewhere to delve.
 
@@ -77,8 +83,9 @@ and there's somewhere to delve.
 - Stone/cobble **dungeon complexes near the lava** — rooms of varied
   size linked by a mix of tight 1-wide and wider 2–3-wide corridors.
 - **Treasure chests** with rare/legendary loot reward the delve.
-- **Open 2×2 entrance shafts** punch up to the surface so dungeons are
-  discoverable and enterable.
+- **Trapdoor hatches** — a trapdoor set in an 8-block stone surround at
+  ground level caps a 1-wide well down into a room, so dungeons are
+  discoverable and enterable from the surface (and light spills in).
 - **Skeletons, spiders and slimes** lair down there — they spawn more
   often and more thickly underground (and never creepers in the deep).
 

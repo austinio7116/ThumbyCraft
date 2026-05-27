@@ -119,6 +119,38 @@ int main(int argc, char **argv) {
         return 0;
     }
 
+    /* SHAFTPROBE: find a dungeon trapdoor and print the vertical column
+     * through it + the 3×3 surface surround. */
+    if (getenv("SHAFTPROBE")) {
+        for (int lz = 0; lz < CRAFT_WORLD_Z; lz++)
+        for (int lx = 0; lx < CRAFT_WORLD_X; lx++) {
+            int wx = craft_world_origin_x + lx, wz = craft_world_origin_z + lz;
+            int ty = -1;
+            for (int y = CRAFT_WORLD_Y - 1; y > 18; y--)
+                if (craft_world_get(wx, y, wz) == BLK_TRAPDOOR_OFF) { ty = y; break; }
+            if (ty < 0) continue;
+            printf("trapdoor at (%d,%d,%d)\n", wx, ty, wz);
+            printf("vertical column under it (top->dungeon):\n");
+            for (int y = ty + 1; y >= 12; y--) {
+                BlockId b = craft_world_get(wx, y, wz);
+                printf(" y=%2d %c\n", y, b==BLK_AIR?'.':b==BLK_TRAPDOOR_OFF?'T':
+                       b==BLK_COBBLE?'#':b==BLK_STONE?'S':b==BLK_CHEST?'C':'?');
+            }
+            printf("3x3 surface ring at y=%d:\n", ty);
+            for (int dz = -1; dz <= 1; dz++) {
+                for (int dx = -1; dx <= 1; dx++) {
+                    BlockId b = craft_world_get(wx+dx, ty, wz+dz);
+                    putchar(b==BLK_TRAPDOOR_OFF?'T':b==BLK_STONE?'S':
+                            b==BLK_AIR?'.':b==BLK_GRASS?'g':'?');
+                }
+                putchar('\n');
+            }
+            return 0;
+        }
+        printf("no trapdoor found\n");
+        return 0;
+    }
+
     /* FORTVIEW: locate the nearest forest fort and frame it at a low
      * 3/4 angle so the keep + compound + skeletons read against sky. */
     if (getenv("FORTVIEW")) {

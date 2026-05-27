@@ -1699,11 +1699,14 @@ static int dungeon_cell(int wx, int y, int wz, uint32_t seed) {
     if (chest && y == DUN_FLOOR + 1) return 3;      /* treasure */
     return 1;                                       /* air */
 }
-/* Some rooms (~1/4) open a 2×2 vertical shaft to the surface — the
- * dungeon's discoverable entrance/exit. True if column (wx,wz) is in
- * such a shaft's footprint. */
-static bool dun_shaft(int wx, int wz, uint32_t seed) {
+/* Some rooms (~1/4) open a 1-wide vertical shaft to the surface, capped
+ * by a trapdoor in an 8-block stone surround — the dungeon's
+ * discoverable hatch entrance/exit. Role of column (wx,wz): 0 none,
+ * 1 = shaft centre (the trapdoor + the well below it), 2 = stone frame
+ * (the 8 cells around the centre). */
+static int dun_shaft_role(int wx, int wz, uint32_t seed) {
     int cgx = dun_fdiv(wx, DUN_PITCH), cgz = dun_fdiv(wz, DUN_PITCH);
+    bool frame = false;
     for (int dgz = -1; dgz <= 1; dgz++)
         for (int dgx = -1; dgx <= 1; dgx++) {
             int gx = cgx + dgx, gz = cgz + dgz;
@@ -1711,10 +1714,10 @@ static bool dun_shaft(int wx, int wz, uint32_t seed) {
             if (!dun_room(gx, gz, seed, &rcx, &rcz, &rw, &rh, &ch)) continue;
             uint32_t h = hash3(gx, gz, seed ^ 0x0D006ED0u);
             if (((h >> 11) & 3u) != 0u) continue;       /* ~1/4 are entrances */
-            if (wx >= rcx && wx <= rcx + 1 && wz >= rcz && wz <= rcz + 1)
-                return true;                            /* 2×2 shaft mouth */
+            if (wx == rcx && wz == rcz) return 1;       /* shaft centre */
+            if (abs_i(wx - rcx) <= 1 && abs_i(wz - rcz) <= 1) frame = true;
         }
-    return false;
+    return frame ? 2 : 0;
 }
 
 /* Is (wx,wy,wz) a dungeon treasure-chest cell? (for loot seeding) */
@@ -1732,10 +1735,17 @@ BlockId craft_gen_block_at(int x, int y, int z, uint32_t seed) {
 
     int h = height_at(x, z, seed);
 
-    /* Dungeon entrance shaft — an open 2×2 well from the room ceiling up
-     * through the surface, so dungeons are discoverable + enterable. */
-    if (DUN_CEIL < h - 3 && y >= DUN_CEIL && y <= h && dun_shaft(x, z, seed))
-        return BLK_AIR;
+    /* Dungeon entrance hatch — a trapdoor at the surface over a 1-wide
+     * well down to the room, set in an 8-block stone surround. */
+    if (DUN_CEIL < h - 3) {
+        int role = dun_shaft_role(x, z, seed);
+        if (role == 1) {                            /* centre: well + lid */
+            if (y == h) return BLK_TRAPDOOR_OFF;
+            if (y >= DUN_CEIL && y < h) return BLK_AIR;
+        } else if (role == 2 && y == h) {           /* stone frame */
+            return BLK_STONE;
+        }
+    }
 
     /* Underground / surface columns. Caves carve out the deep stone
      * layer only — never touches the topmost dirt or surface block,
@@ -1964,13 +1974,21 @@ void craft_gen_column(int wx, int wz, uint32_t seed,
         if (deco != BLK_AIR && !tree_at(wx, wz, seed)) out[h + 1] = deco;
     }
 
-    /* Dungeon entrance shaft — carved LAST so it punches through the
-     * surface/dirt just placed, leaving an open 2×2 well from the room
-     * ceiling up to the surface (and clears any plant on the hole). */
-    if (DUN_CEIL < h - 3 && dun_shaft(wx, wz, seed)) {
-        for (int y = DUN_CEIL; y <= h && y < CRAFT_WORLD_Y; y++)
-            out[y] = BLK_AIR;
-        if (h + 1 < CRAFT_WORLD_Y) out[h + 1] = BLK_AIR;
+    /* Dungeon entrance hatch — carved LAST so it punches through the
+     * surface just placed. Centre column: a 1-wide well from the room
+     * ceiling up, capped by a trapdoor flush with the ground. The 8
+     * surrounding columns get a stone frame so the hatch reads as built. */
+    if (DUN_CEIL < h - 3) {
+        int role = dun_shaft_role(wx, wz, seed);
+        if (role == 1) {
+            for (int y = DUN_CEIL; y < h && y < CRAFT_WORLD_Y; y++)
+                out[y] = BLK_AIR;
+            if (h < CRAFT_WORLD_Y)     out[h]     = BLK_TRAPDOOR_OFF;
+            if (h + 1 < CRAFT_WORLD_Y) out[h + 1] = BLK_AIR;
+        } else if (role == 2) {
+            if (h < CRAFT_WORLD_Y)     out[h]     = BLK_STONE;
+            if (h + 1 < CRAFT_WORLD_Y) out[h + 1] = BLK_AIR;
+        }
     }
 
     /* Trees and huts are NOT stamped per-column any more — they're
