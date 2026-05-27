@@ -356,11 +356,12 @@ static const uint8_t s_block_class[BLK_COUNT] = {
     [BLK_TALL_GRASS]         = BCLASS_CROSS,
     [BLK_FLOWER_RED]         = BCLASS_CROSS,
     [BLK_FLOWER_YELLOW]      = BCLASS_CROSS,
+    [BLK_VINE]               = BCLASS_CROSS,
     [BLK_TORCH]              = BCLASS_SPRITE3D,
-    [BLK_REDSTONE_WIRE]      = BCLASS_SPRITE3D,
-    [BLK_REDSTONE_WIRE_ON]   = BCLASS_SPRITE3D,
-    [BLK_LADDER]             = BCLASS_SPRITE3D,
-    [BLK_PRESSURE_PAD]       = BCLASS_SPRITE3D,
+    [BLK_REDSTONE_WIRE]      = BCLASS_PANEL,   /* flat floor, analytic shape */
+    [BLK_REDSTONE_WIRE_ON]   = BCLASS_PANEL,
+    [BLK_LADDER]             = BCLASS_PANEL,   /* flat wall cutout */
+    [BLK_PRESSURE_PAD]       = BCLASS_PANEL,   /* flat floor plate */
     [BLK_DOOR_OFF]           = BCLASS_PANEL,
     [BLK_DOOR_ON]            = BCLASS_PANEL,
     [BLK_TRAPDOOR_OFF]       = BCLASS_PANEL,
@@ -383,6 +384,22 @@ static void panel_slab(BlockId blk, int orient,
                        float *cx, float *cy, float *cz,
                        float *hx, float *hy, float *hz) {
     *cx = *cy = *cz = 0.5f; *hx = *hy = *hz = 0.025f;
+    if (blk == BLK_LADDER) {                 /* full-height wall slab */
+        *cy = 0.5f; *hy = 0.5f;
+        switch (orient) {
+            case FACE_NZ: *cz = 0.94f; *hz = 0.04f; *hx = 0.46f; break;
+            case FACE_PX: *cx = 0.06f; *hx = 0.04f; *hz = 0.46f; break;
+            case FACE_NX: *cx = 0.94f; *hx = 0.04f; *hz = 0.46f; break;
+            case FACE_PZ: default: *cz = 0.06f; *hz = 0.04f; *hx = 0.46f; break;
+        }
+        return;
+    }
+    if (blk == BLK_PRESSURE_PAD) {            /* inset floor plate */
+        *cy = 0.08f; *hy = 0.05f; *hx = 0.42f; *hz = 0.42f; return;
+    }
+    if (blk == BLK_REDSTONE_WIRE || blk == BLK_REDSTONE_WIRE_ON) {
+        *cy = 0.05f; *hy = 0.03f; *hx = 0.5f; *hz = 0.5f; return;  /* full floor */
+    }
     bool open = (blk == BLK_DOOR_ON || blk == BLK_TRAPDOOR_ON);
     if (blk == BLK_DOOR_OFF || blk == BLK_DOOR_ON) {
         bool span_x = (orient == FACE_PZ || orient == FACE_NZ);
@@ -581,9 +598,9 @@ INLINE_HOT TraceHit trace_ray(Vec3 origin, Vec3 dir, bool stop_at_water) {
          * termination, no post-pass). The nearer opaque plane wins.
          * Pick rays fall through to the normal cube hit so the whole
          * cell stays aimable. */
-        /* Ground cover toggled off → plants are invisible and not
-         * aimable (the cells still exist but the ray skips them). */
-        if (cls == BCLASS_CROSS && !s_groundcover) continue;
+        /* Ground cover toggled off → flowers/grass are invisible and
+         * not aimable. Vines are exempt (climbable, functional). */
+        if (cls == BCLASS_CROSS && !s_groundcover && blk != BLK_VINE) continue;
         if (cls == BCLASS_CROSS && !stop_at_water) {
             const uint16_t *ct = craft_block_texture(blk, FACE_PZ);
             float best_ct = 1e30f; int best_face = -1;
@@ -684,11 +701,28 @@ INLINE_HOT TraceHit trace_ray(Vec3 origin, Vec3 dir, bool stop_at_water) {
                 }
             }
             if (pface >= 0) {
-                const uint16_t *ptex = craft_block_texture(blk, pface);
-                int tu = (int)(u * CRAFT_TEX_SIZE), tv = (int)(v * CRAFT_TEX_SIZE);
-                if (tu < 0) tu = 0; else if (tu >= CRAFT_TEX_SIZE) tu = CRAFT_TEX_SIZE - 1;
-                if (tv < 0) tv = 0; else if (tv >= CRAFT_TEX_SIZE) tv = CRAFT_TEX_SIZE - 1;
-                if (ptex[tv * CRAFT_TEX_SIZE + tu] != CRAFT_CUTOUT_KEY) {
+                bool solid;
+                if (blk == BLK_REDSTONE_WIRE || blk == BLK_REDSTONE_WIRE_ON) {
+                    /* Dust shape cut live from the connection mask: a
+                     * centre pad plus a narrow arm toward each connected
+                     * neighbour (u=X, v=Z across the floor cell). The
+                     * solid-red wire tile supplies the colour. */
+                    uint8_t m = craft_torches_wire_connect_at(vx, vy, vz);
+                    float du = u - 0.5f, dv = v - 0.5f;
+                    float adu = du < 0 ? -du : du, adv = dv < 0 ? -dv : dv;
+                    solid = (adu < 0.16f && adv < 0.16f)
+                         || ((m & 1) && du > 0 && adv < 0.11f)
+                         || ((m & 2) && du < 0 && adv < 0.11f)
+                         || ((m & 4) && dv > 0 && adu < 0.11f)
+                         || ((m & 8) && dv < 0 && adu < 0.11f);
+                } else {
+                    const uint16_t *ptex = craft_block_texture(blk, pface);
+                    int tu = (int)(u * CRAFT_TEX_SIZE), tv = (int)(v * CRAFT_TEX_SIZE);
+                    if (tu < 0) tu = 0; else if (tu >= CRAFT_TEX_SIZE) tu = CRAFT_TEX_SIZE - 1;
+                    if (tv < 0) tv = 0; else if (tv >= CRAFT_TEX_SIZE) tv = CRAFT_TEX_SIZE - 1;
+                    solid = (ptex[tv * CRAFT_TEX_SIZE + tu] != CRAFT_CUTOUT_KEY);
+                }
+                if (solid) {
                     PROF_INC(craft_prof_hits);
                     h.hit = true;
                     h.bx = vx; h.by = vy; h.bz = vz;

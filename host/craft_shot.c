@@ -91,8 +91,25 @@ int main(int argc, char **argv) {
         craft_world_set(cx + 3, gy + 1, cz + 2, BLK_STONE);
         craft_world_set(cx + 3, gy + 2, cz + 2, BLK_TRAPDOOR_OFF);
         craft_torches_record_orient(cx + 3, gy + 2, cz + 2, FACE_PY);
-        cam.pos.x = (float)cx + 0.5f; cam.pos.y = (float)gy + 2.0f;
-        cam.pos.z = (float)cz + 0.5f; cam.yaw = 0.0f; cam.pitch = -0.05f;
+        /* Ladder on the wall just left of the doorway (faces -Z, toward
+         * camera). */
+        craft_world_set(cx - 2, gy + 1, wz - 1, BLK_LADDER);
+        craft_world_set(cx - 2, gy + 2, wz - 1, BLK_LADDER);
+        craft_torches_record_orient(cx - 2, gy + 1, wz - 1, FACE_NZ);
+        craft_torches_record_orient(cx - 2, gy + 2, wz - 1, FACE_NZ);
+        /* Pressure pad on the floor ahead. */
+        craft_world_set(cx + 2, gy + 1, cz + 2, BLK_PRESSURE_PAD);
+        /* Redstone wire run on the floor with a T-junction. */
+        craft_world_set(cx - 1, gy + 1, cz + 1, BLK_REDSTONE_WIRE);
+        craft_world_set(cx - 1, gy + 1, cz + 2, BLK_REDSTONE_WIRE_ON);
+        craft_world_set(cx - 1, gy + 1, cz + 3, BLK_REDSTONE_WIRE);
+        craft_world_set(cx,     gy + 1, cz + 2, BLK_REDSTONE_WIRE_ON);
+        /* A hanging vine to the right. */
+        craft_world_set(cx + 3, gy + 3, cz + 2, BLK_STONE);
+        craft_world_set(cx + 3, gy + 2, cz + 2, BLK_VINE);
+        craft_world_set(cx + 3, gy + 1, cz + 2, BLK_VINE);
+        cam.pos.x = (float)cx + 0.5f; cam.pos.y = (float)gy + 2.2f;
+        cam.pos.z = (float)cz + 0.5f; cam.yaw = 0.0f; cam.pitch = -0.12f;
     }
     craft_render_begin(&cam);
     craft_render_strip(&cam, g_fb, 0, CRAFT_FB_H);

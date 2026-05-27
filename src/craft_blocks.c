@@ -1178,7 +1178,7 @@ void craft_blocks_build_textures(void) {
      * a 2D vertical sprite via craft_torches, like wire). */
     {
         uint16_t *side = &craft_textures[(BLK_LADDER * 3 + 1) * CRAFT_TEX_PIXELS];
-        for (int i = 0; i < CRAFT_TEX_PIXELS; i++) side[i] = rgb565(20, 20, 25);
+        for (int i = 0; i < CRAFT_TEX_PIXELS; i++) side[i] = rgb565(255, 0, 255); /* cutout */
         uint16_t rail = rgb565(140, 90, 40);
         uint16_t rung = rgb565(170, 115, 55);
         for (int y = 0; y < CRAFT_TEX_SIZE; y++) {
@@ -1257,7 +1257,7 @@ void craft_blocks_build_textures(void) {
      * torch system (same path as wires). */
     {
         uint16_t *side = &craft_textures[(BLK_PRESSURE_PAD * 3 + 1) * CRAFT_TEX_PIXELS];
-        for (int i = 0; i < CRAFT_TEX_PIXELS; i++) side[i] = rgb565(20, 20, 25);
+        for (int i = 0; i < CRAFT_TEX_PIXELS; i++) side[i] = rgb565(255, 0, 255); /* cutout */
         uint16_t pad = rgb565(150, 150, 160);
         uint16_t pad_d = rgb565(110, 110, 120);
         for (int y = 4; y < 13; y++) {
@@ -1358,27 +1358,16 @@ void craft_blocks_build_textures(void) {
                side, sizeof(uint16_t) * CRAFT_TEX_PIXELS);
     }
 
-    /* WIRE — thin red cross on a dark backdrop. WIRE_ON brightens
-     * the cross; WIRE off uses a dim red so unpowered wires are
-     * visually distinct from powered ones. */
+    /* WIRE — solid red fill (off=dim, on=bright). The DDA draws the
+     * dust as a flat floor slab and cuts the cross/arm SHAPE from the
+     * live connection mask (craft_render BCLASS_PANEL wire path), so
+     * this tile only needs to supply the colour, not the routing. */
     for (int on = 0; on < 2; on++) {
         BlockId blk = on ? BLK_REDSTONE_WIRE_ON : BLK_REDSTONE_WIRE;
-        uint16_t *side = &craft_textures[(blk * 3 + 1) * CRAFT_TEX_PIXELS];
-        for (int i = 0; i < CRAFT_TEX_PIXELS; i++) side[i] = rgb565(20, 20, 25);
-        uint16_t line = on ? rgb565(255, 60, 50) : rgb565(120, 30, 30);
-        uint16_t mid  = on ? rgb565(255, 100, 80) : rgb565(150, 50, 40);
-        for (int x = 1; x < 15; x++) {
-            side[7 * CRAFT_TEX_SIZE + x] = line;
-            side[8 * CRAFT_TEX_SIZE + x] = mid;
-        }
-        for (int y = 1; y < 15; y++) {
-            side[y * CRAFT_TEX_SIZE + 7] = line;
-            side[y * CRAFT_TEX_SIZE + 8] = mid;
-        }
-        memcpy(&craft_textures[(blk * 3 + 0) * CRAFT_TEX_PIXELS],
-               side, sizeof(uint16_t) * CRAFT_TEX_PIXELS);
-        memcpy(&craft_textures[(blk * 3 + 2) * CRAFT_TEX_PIXELS],
-               side, sizeof(uint16_t) * CRAFT_TEX_PIXELS);
+        uint16_t col = on ? rgb565(235, 60, 48) : rgb565(150, 40, 34);
+        for (int f = 0; f < 3; f++)
+            for (int i = 0; i < CRAFT_TEX_PIXELS; i++)
+                craft_textures[(blk * 3 + f) * CRAFT_TEX_PIXELS + i] = col;
     }
 
     /* OBSERVER — dark grey block, single bright "lens" eye on the
@@ -1687,16 +1676,51 @@ void craft_blocks_build_textures(void) {
         }
     }
 
-    /* VINE — drawn in-world as a 3-strand sprite cuboid; this atlas
-     * tile is only the hotbar icon, so it's a full image (dark
-     * backdrop + green strands, like the ladder). */
-    for (int f = 0; f < 3; f++) {
-        uint16_t *t = &craft_textures[(BLK_VINE * 3 + f) * CRAFT_TEX_PIXELS];
-        fill_solid(t, rgb565(20, 28, 18));
-        for (int x = 1; x < CRAFT_TEX_SIZE; x += 4)
-            for (int y = 0; y < CRAFT_TEX_SIZE; y++)
-                if (((x * 3 + y) & 7) != 0)
-                    t[y * CRAFT_TEX_SIZE + x] = rgb565(55, 120, 45);
+    /* VINE — leafy cutout (two winding stems + leaves, magenta = holes),
+     * vertically tiling so a multi-cell vine flows unbroken. Rendered by
+     * the DDA CROSS path now (crossed quads), not the post-pass. */
+    {
+        const int Sv = CRAFT_TEX_SIZE;
+        uint8_t tier[CRAFT_TEX_PIXELS];
+        for (int i = 0; i < Sv * Sv; i++) tier[i] = 0;
+        const float vcx[2] = { 4.0f, 11.0f }, vph[2] = { 0.0f, 2.0f };
+        const float vamp = 1.5f;
+        #define VPUT(xx,yy,vv) do { int _x=(xx), _y=(((yy)%Sv)+Sv)%Sv; \
+            if (_x>=0 && _x<Sv && (vv) > tier[_y*Sv+_x]) tier[_y*Sv+_x]=(vv); } while(0)
+        for (int s = 0; s < 2; s++) {
+            for (int y = 0; y < Sv; y++) {
+                float fx = vcx[s] + vamp * sinf(6.2831853f * (float)y / (float)Sv + vph[s]);
+                int x = (int)(fx + 0.5f);
+                VPUT(x, y, 2); VPUT(x, y + 1, 2);
+            }
+            for (int y = 0; y < Sv; y += 3) {
+                float fx = vcx[s] + vamp * sinf(6.2831853f * (float)y / (float)Sv + vph[s]);
+                int x = (int)(fx + 0.5f);
+                int side = ((y / 3) & 1) ? 1 : -1, lx = x + side * 2;
+                for (int dy = -2; dy <= 1; dy++)
+                    for (int dx = -2; dx <= 2; dx++) {
+                        int adx = dx < 0 ? -dx : dx, ady2 = (dy < 0 ? -dy : dy) * 2;
+                        if (adx + ady2 <= 2) VPUT(lx + dx, y + dy, 1);
+                    }
+        }
+        #undef VPUT
+        }
+        for (int f = 0; f < 3; f++) {
+            uint16_t *t = &craft_textures[(BLK_VINE * 3 + f) * CRAFT_TEX_PIXELS];
+            for (int i = 0; i < Sv * Sv; i++) {
+                if (tier[i] == 0) { t[i] = rgb565(255, 0, 255); continue; }
+                uint32_t h = (uint32_t)(((i % Sv) + 1) * 73856093) ^
+                             (uint32_t)(((i / Sv) + 1) * 19349663);
+                h ^= h >> 13; h *= 0x9E3779B1u; h ^= h >> 16;
+                int j = (int)(h & 7) - 3, r, g, b;
+                if (tier[i] == 2) { r = 40; g = 88; b = 34; }
+                else              { r = 66; g = 138; b = 52; }
+                r += j; g += j * 3; b += j;
+                if (r < 0) r = 0; if (b < 0) b = 0;
+                if (g < 0) g = 0; if (g > 200) g = 200;
+                t[i] = rgb565(r, g, b);
+            }
+        }
     }
 
     /* LILY PAD — drawn in-world as a flat sprite slab; this tile is

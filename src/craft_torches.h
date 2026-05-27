@@ -81,6 +81,10 @@ void craft_torches_record_orient(int wx, int wy, int wz, int face);
  * can determine piston facing for extend/retract. */
 int  craft_torches_lookup_orient(int wx, int wy, int wz);
 
+/* Redstone wire connection mask at a world cell (bits 0=+X 1=-X 2=+Z
+ * 3=-Z). Used by the DDA wire renderer to cut the dust shape. */
+uint8_t craft_torches_wire_connect_at(int wx, int wy, int wz);
+
 /* Forget orientation for a torch being removed. */
 void craft_torches_forget_orient(int wx, int wy, int wz);
 

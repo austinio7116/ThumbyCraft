@@ -164,16 +164,11 @@ static uint8_t orient_lookup(int wx, int wy, int wz) {
  * every comparison. One array read per cell instead. */
 static const uint8_t s_sprite_kind1[256] = {
     [BLK_TORCH]             = TORCH_KIND_TORCH + 1,
-    [BLK_REDSTONE_WIRE]     = TORCH_KIND_WIRE + 1,
-    [BLK_REDSTONE_WIRE_ON]  = TORCH_KIND_WIRE_ON + 1,
-    [BLK_LADDER]            = TORCH_KIND_LADDER + 1,
-    [BLK_VINE]              = TORCH_KIND_VINE + 1,
     [BLK_LILY_PAD]          = TORCH_KIND_LILY_PAD + 1,
-    [BLK_PRESSURE_PAD]      = TORCH_KIND_PRESSURE_PAD + 1,
-    /* Doors + trapdoors are now drawn by the DDA cutout-PANEL path
-     * (craft_render.c), not this post-pass — so they're intentionally
-     * NOT registered here. Their orient is still recorded at placement
-     * and read back via craft_torches_lookup_orient. */
+    /* Vine, ladder, pressure pad, redstone wire, doors + trapdoors are
+     * now drawn by the DDA cutout paths (craft_render.c CROSS/PANEL),
+     * not this post-pass — intentionally NOT registered here. Orient /
+     * wire-connect are still read back via craft_torches_*. */
     [BLK_PISTON_OFF]        = TORCH_KIND_PISTON_OFF + 1,
     [BLK_PISTON_ON]         = TORCH_KIND_PISTON_ON + 1,
     [BLK_STICKY_PISTON_OFF] = TORCH_KIND_PISTON_OFF + 1,
@@ -206,6 +201,12 @@ static uint8_t wire_connect_mask(int lx, int wy, int lz) {
             connect |= (1u << d);
     }
     return connect;
+}
+
+/* World-coord wrapper so the DDA wire renderer can query the same
+ * connection mask. Bits: 0=+X 1=-X 2=+Z 3=-Z. */
+uint8_t craft_torches_wire_connect_at(int wx, int wy, int wz) {
+    return wire_connect_mask(wx - craft_world_origin_x, wy, wz - craft_world_origin_z);
 }
 
 static void add_sprite_cell(int lx, int wy, int lz, uint8_t kind) {
