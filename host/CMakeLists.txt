@@ -73,7 +73,7 @@ add_executable(thumbycraft_host
     ${CRAFT_BAKED_C}
 )
 add_dependencies(thumbycraft_host generate_craft_textures)
-target_compile_definitions(thumbycraft_host PRIVATE CRAFT_TEXTURES_BAKED=1)
+target_compile_definitions(thumbycraft_host PRIVATE CRAFT_TEXTURES_BAKED=1 CRAFT_HOST=1)
 
 target_include_directories(thumbycraft_host PRIVATE
     ${SRC}
@@ -136,6 +136,64 @@ target_include_directories(render_bench PRIVATE ${SRC} ${SDL2_INCLUDE_DIRS})
 target_compile_options(render_bench PRIVATE
     -O2 -g -Wall -Wextra -Wno-unused-parameter -Wno-unused-function -ffast-math)
 target_link_libraries(render_bench PRIVATE ${SDL2_LIBRARIES} m)
+
+# Headless biome screenshot harness — renders one biome to a BMP.
+# Run: ./build_host/craft_shot <biome 0-7> [seed] [out.bmp]
+add_executable(craft_shot
+    ${CMAKE_CURRENT_LIST_DIR}/craft_shot.c
+    ${CMAKE_CURRENT_LIST_DIR}/craft_chunk_store_stub.c
+    ${SRC}/craft_world.c ${SRC}/craft_blocks.c ${SRC}/craft_gen.c
+    ${SRC}/craft_render.c ${SRC}/craft_player.c ${SRC}/craft_hud.c
+    ${SRC}/craft_audio.c ${SRC}/craft_save.c ${SRC}/craft_font.c
+    ${SRC}/craft_menu.c ${SRC}/craft_mobs.c ${SRC}/craft_particles.c
+    ${SRC}/craft_torches.c ${SRC}/craft_drops.c ${SRC}/craft_tool_models.c
+    ${SRC}/craft_furnace.c ${SRC}/craft_chests.c ${SRC}/craft_water.c
+    ${SRC}/craft_lava.c ${SRC}/craft_redstone.c ${SRC}/craft_title.c
+    ${SRC}/craft_main.c ${CRAFT_BAKED_C}
+)
+add_dependencies(craft_shot generate_craft_textures)
+target_compile_definitions(craft_shot PRIVATE CRAFT_TEXTURES_BAKED=1)
+target_include_directories(craft_shot PRIVATE ${SRC} ${SDL2_INCLUDE_DIRS})
+target_compile_options(craft_shot PRIVATE
+    -O2 -g -Wall -Wextra -Wno-unused-parameter -Wno-unused-function -ffast-math)
+target_link_libraries(craft_shot PRIVATE ${SDL2_LIBRARIES} m)
+
+# Headless texture-atlas dump — raw block tiles per biome (no render).
+# Run: ./build_host/craft_atlas <out_dir>
+add_executable(craft_atlas
+    ${CMAKE_CURRENT_LIST_DIR}/craft_atlas.c
+    ${SRC}/craft_blocks.c ${CRAFT_BAKED_C}
+)
+add_dependencies(craft_atlas generate_craft_textures)
+target_compile_definitions(craft_atlas PRIVATE CRAFT_TEXTURES_BAKED=1)
+target_include_directories(craft_atlas PRIVATE ${SRC} ${SDL2_INCLUDE_DIRS})
+target_compile_options(craft_atlas PRIVATE
+    -O2 -g -Wall -Wextra -Wno-unused-parameter -Wno-unused-function -ffast-math)
+target_link_libraries(craft_atlas PRIVATE m)
+
+# Headless greens-chooser — grass-top under candidate biome tints.
+add_executable(craft_greens
+    ${CMAKE_CURRENT_LIST_DIR}/craft_greens.c
+    ${SRC}/craft_blocks.c ${CRAFT_BAKED_C}
+)
+add_dependencies(craft_greens generate_craft_textures)
+target_compile_definitions(craft_greens PRIVATE CRAFT_TEXTURES_BAKED=1)
+target_include_directories(craft_greens PRIVATE ${SRC} ${SDL2_INCLUDE_DIRS})
+target_compile_options(craft_greens PRIVATE
+    -O2 -g -Wall -Wextra -Wno-unused-parameter -Wno-unused-function -ffast-math)
+target_link_libraries(craft_greens PRIVATE m)
+
+# Headless leaf-density chooser.
+add_executable(craft_leaves
+    ${CMAKE_CURRENT_LIST_DIR}/craft_leaves.c
+    ${SRC}/craft_blocks.c ${CRAFT_BAKED_C}
+)
+add_dependencies(craft_leaves generate_craft_textures)
+target_compile_definitions(craft_leaves PRIVATE CRAFT_TEXTURES_BAKED=1)
+target_include_directories(craft_leaves PRIVATE ${SRC} ${SDL2_INCLUDE_DIRS})
+target_compile_options(craft_leaves PRIVATE
+    -O2 -g -Wall -Wextra -Wno-unused-parameter -Wno-unused-function -ffast-math)
+target_link_libraries(craft_leaves PRIVATE m)
 
 target_compile_options(thumbycraft_host PRIVATE
     -O2 -g -Wall -Wextra -Wno-unused-parameter -Wno-unused-function

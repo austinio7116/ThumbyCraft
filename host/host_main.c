@@ -6,17 +6,18 @@
  * scaled SDL2 window, and sinks audio through SDL2's audio queue.
  * Save blobs persist to ./thumbycraft.sav in the working directory.
  *
- * Keyboard map (mirrors physical Thumby Color GPIO layout):
- *   Arrows / WSAD   D-pad (UP/DOWN/LEFT/RIGHT)
- *   Z               A button
- *   X               B button
- *   LShift          LB
- *   Return          RB
- *   Escape          MENU
- *   F1              Toggle fog
- *   F5              Save
- *   F9              Load
- *   F12             Quit
+ * Minecraft-style controls (host uses DPAD_STRAFE scheme + mouse-look):
+ *   Mouse           Look (yaw + pitch)
+ *   Arrow keys      Look (no-mouse fallback — always works)
+ *   W / A / S / D   Forward / strafe-left / back / strafe-right
+ *   Space           Jump
+ *   Left click / Z  Mine / attack
+ *   Right click / X Place / use
+ *   Mouse wheel     Cycle hotbar
+ *   1 – 8           Select hotbar slot
+ *   Escape          Pause menu (Inventory, Save, etc.)
+ *   G / `           Toggle mouse capture (to free the cursor)
+ *   F1 fog · F5 save · F9 load · F12 quit
  *
  * Window is 128×128 logical, scaled 5× to 640×640.
  */
@@ -148,8 +149,31 @@ int main(int argc, char **argv) {
     craft_main_init(g_fb, seed);
     try_load();
 
+    /* Host plays FPS-style: WASD move/strafe via the DPAD_STRAFE scheme,
+     * yaw/pitch from the mouse.
+     *
+     * Mouse-look method: we do NOT use SDL relative mode. Under
+     * WSLg/XWayland every relative path (warp fallback, raw XInput2)
+     * reports bogus deltas that spin the view uncontrollably. What IS
+     * reliable there is the absolute cursor position inside the window,
+     * so we compute our own delta = (pos - last_pos) each frame, clamp
+     * it hard against spurious jumps, then recentre the cursor only when
+     * it nears a window edge (rare warps → no per-frame round-trip lag).
+     * `need_reseed` makes the next sample seed last_pos WITHOUT applying
+     * a delta — set on launch, grab toggle, and window re-entry so a big
+     * entry jump can never whip the camera. */
+    craft_main_set_scheme(CRAFT_SCHEME_DPAD_STRAFE);
+    bool mouse_grab = true;
+    SDL_ShowCursor(SDL_DISABLE);
+    int  last_mx = 0, last_my = 0;
+    bool need_reseed = true;
+    const float LOOK_SENS = 0.0035f;   /* radians per pixel of cursor travel */
+    const float KEY_LOOK  = 2.2f;      /* arrow-key look rate, radians/sec */
+    const int   MOUSE_CLAMP = 40;      /* max px delta applied per frame */
+    const int   EDGE_MARGIN = 80;      /* recentre when cursor within this */
+
     EdgeState e_a = {0}, e_b = {0}, e_lb = {0}, e_rb = {0}, e_menu = {0};
-    EdgeState e_f1 = {0}, e_f5 = {0}, e_f9 = {0};
+    EdgeState e_f1 = {0}, e_f5 = {0}, e_f9 = {0}, e_grab = {0};
     bool fog_on = true;
 
     Uint32 last_ms = SDL_GetTicks();
@@ -163,23 +187,87 @@ int main(int argc, char **argv) {
             if (ev.type == SDL_QUIT) running = false;
             if (ev.type == SDL_KEYDOWN &&
                 ev.key.keysym.scancode == SDL_SCANCODE_F12) running = false;
+            /* Re-entering / refocusing the window can deliver one big
+             * position jump — reseed so it isn't applied as look. */
+            if (ev.type == SDL_WINDOWEVENT &&
+                (ev.window.event == SDL_WINDOWEVENT_ENTER ||
+                 ev.window.event == SDL_WINDOWEVENT_FOCUS_GAINED))
+                need_reseed = true;
+            if (ev.type == SDL_MOUSEWHEEL) {
+                /* Wheel up = previous slot, down = next (Minecraft feel). */
+                if (ev.wheel.y > 0)      craft_main_hotbar_cycle(-1);
+                else if (ev.wheel.y < 0) craft_main_hotbar_cycle(+1);
+            }
+            if (ev.type == SDL_KEYDOWN) {
+                SDL_Scancode sc = ev.key.keysym.scancode;
+                if (sc >= SDL_SCANCODE_1 && sc <= SDL_SCANCODE_8)
+                    craft_main_hotbar_select(sc - SDL_SCANCODE_1);
+            }
         }
         const Uint8 *k = SDL_GetKeyboardState(NULL);
+        int mx, my;
+        Uint32 mb = SDL_GetMouseState(&mx, &my);
+
+        /* Mouse-look from absolute-position delta. First sample after a
+         * reseed only stores last_pos (no look) so window-entry jumps
+         * never whip the camera. Deltas are clamped to ±MOUSE_CLAMP px to
+         * kill any residual spurious spike, then the cursor is recentred
+         * only when it strays near an edge (so warps are rare → no lag).
+         * Yaw right = +dx, look up = cursor up = -dy. */
+        if (mouse_grab) {
+            if (need_reseed) {
+                last_mx = mx; last_my = my;
+                need_reseed = false;
+            } else {
+                int dx = mx - last_mx;
+                int dy = my - last_my;
+                if (dx >  MOUSE_CLAMP) dx =  MOUSE_CLAMP;
+                else if (dx < -MOUSE_CLAMP) dx = -MOUSE_CLAMP;
+                if (dy >  MOUSE_CLAMP) dy =  MOUSE_CLAMP;
+                else if (dy < -MOUSE_CLAMP) dy = -MOUSE_CLAMP;
+                if (dx || dy) {
+                    float s = LOOK_SENS * craft_main_mouse_sens();
+                    craft_main_look((float)dx * s, -(float)dy * s);
+                }
+                if (mx < EDGE_MARGIN || mx > WIN_W - EDGE_MARGIN ||
+                    my < EDGE_MARGIN || my > WIN_H - EDGE_MARGIN) {
+                    SDL_WarpMouseInWindow(win, WIN_W / 2, WIN_H / 2);
+                    last_mx = WIN_W / 2; last_my = WIN_H / 2;
+                } else {
+                    last_mx = mx; last_my = my;
+                }
+            }
+        }
 
         Uint32 now_ms = SDL_GetTicks();
         float dt = (now_ms - last_ms) * 0.001f;
         if (dt > 0.1f) dt = 0.1f;
         last_ms = now_ms;
 
+        /* Keyboard look fallback — arrow keys, guaranteed to work even
+         * if the compositor mangles mouse motion. Rate-based so it's
+         * framerate-independent. */
+        {
+            float kl = KEY_LOOK * craft_main_mouse_sens() * dt;
+            float dyaw = 0.0f, dpitch = 0.0f;
+            if (k[SDL_SCANCODE_LEFT])  dyaw   -= kl;
+            if (k[SDL_SCANCODE_RIGHT]) dyaw   += kl;
+            if (k[SDL_SCANCODE_UP])    dpitch += kl;
+            if (k[SDL_SCANCODE_DOWN])  dpitch -= kl;
+            if (dyaw != 0.0f || dpitch != 0.0f) craft_main_look(dyaw, dpitch);
+        }
+
+        bool ml = (mb & SDL_BUTTON(SDL_BUTTON_LEFT))  != 0;
+        bool mr = (mb & SDL_BUTTON(SDL_BUTTON_RIGHT)) != 0;
         CraftInput in = {0};
-        in.up    = k[SDL_SCANCODE_UP]    || k[SDL_SCANCODE_W];
-        in.down  = k[SDL_SCANCODE_DOWN]  || k[SDL_SCANCODE_S];
-        in.left  = k[SDL_SCANCODE_LEFT]  || k[SDL_SCANCODE_A];
-        in.right = k[SDL_SCANCODE_RIGHT] || k[SDL_SCANCODE_D];
-        in.a     = k[SDL_SCANCODE_Z];
-        in.b     = k[SDL_SCANCODE_X];
-        in.lb    = k[SDL_SCANCODE_LSHIFT];
-        in.rb    = k[SDL_SCANCODE_RETURN];
+        in.up    = k[SDL_SCANCODE_W];   /* forward  (arrows = look) */
+        in.down  = k[SDL_SCANCODE_S];   /* back */
+        in.left  = k[SDL_SCANCODE_A];   /* strafe L */
+        in.right = k[SDL_SCANCODE_D];   /* strafe R */
+        in.a     = k[SDL_SCANCODE_Z] || ml;                      /* mine / attack */
+        in.b     = k[SDL_SCANCODE_X] || mr;                      /* place / use */
+        in.lb    = false;            /* unused — mouse handles look, no look-mod */
+        in.rb    = k[SDL_SCANCODE_SPACE] || k[SDL_SCANCODE_RETURN];  /* jump */
         in.menu  = k[SDL_SCANCODE_ESCAPE];
 
         bool dummy;
@@ -196,6 +284,15 @@ int main(int argc, char **argv) {
         if (press_f1) { fog_on = !fog_on; craft_render_set_fog(fog_on); }
         if (press_f5) try_save();
         if (press_f9) try_load();
+
+        bool press_grab;
+        edge_update(&e_grab, k[SDL_SCANCODE_G] || k[SDL_SCANCODE_GRAVE],
+                    now_ms, &press_grab, &long_dummy);
+        if (press_grab) {
+            mouse_grab = !mouse_grab;
+            SDL_ShowCursor(mouse_grab ? SDL_DISABLE : SDL_ENABLE);
+            need_reseed = true;   /* don't apply the gap as a look delta */
+        }
 
         craft_main_step(&in, dt, fps_value);
         /* Drain menu requests. */
