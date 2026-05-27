@@ -1223,30 +1223,39 @@ void craft_blocks_build_textures(void) {
 
     /* DOOR — vertical plank face with hinge band on one side.
      * Closed = solid wall; open = passable (same texture either way). */
+    /* DOOR — a classic framed wooden door: vertical stiles + a rail at
+     * the top and bottom of each cell, with a recessed bevelled panel in
+     * the middle. The two stacked cells of a 2-tall door tile into a
+     * proper 2-panel door (the cell-seam rails read as the mid-rail),
+     * and the full-height stiles stay continuous. No handle — any
+     * localised detail would duplicate on the two-cell door, and the
+     * frame + panels already read clearly as a door. */
     for (int variant = 0; variant < 2; variant++) {
         BlockId blk = (variant == 0) ? BLK_DOOR_OFF : BLK_DOOR_ON;
         uint16_t *side = &craft_textures[(blk * 3 + 1) * CRAFT_TEX_PIXELS];
-        uint16_t plank = rgb565(155, 110, 60);
-        uint16_t plank_d = rgb565(110, 75, 35);
-        uint16_t iron = rgb565(85, 85, 95);
-        uint16_t knob = rgb565(220, 200, 60);
-        for (int y = 0; y < CRAFT_TEX_SIZE; y++) {
-            for (int x = 0; x < CRAFT_TEX_SIZE; x++) {
-                uint16_t c = ((x / 3) & 1) ? plank : plank_d;
-                side[y * CRAFT_TEX_SIZE + x] = c;
+        uint16_t wood   = rgb565(170, 116, 58);   /* plank face        */
+        uint16_t grain  = rgb565(150, 100, 48);   /* grain line        */
+        uint16_t frame  = rgb565(96, 60, 28);     /* stiles + rails    */
+        uint16_t recess = rgb565(120, 78, 38);    /* panel shadow      */
+        uint16_t panel  = rgb565(158, 106, 52);   /* panel face        */
+        uint16_t bevel  = rgb565(202, 148, 84);   /* lit panel edge    */
+        const int S = CRAFT_TEX_SIZE;
+        for (int y = 0; y < S; y++)
+            for (int x = 0; x < S; x++)
+                side[y * S + x] = ((x & 3) == 2) ? grain : wood;   /* vertical grain */
+        /* Frame: 2px stiles (L/R, full height → continuous) + 1px rails. */
+        for (int y = 0; y < S; y++) {
+            side[y * S + 0] = frame; side[y * S + 1] = frame;
+            side[y * S + 14] = frame; side[y * S + 15] = frame;
+        }
+        for (int x = 0; x < S; x++) { side[0 * S + x] = frame; side[15 * S + x] = frame; }
+        /* Recessed panel [3..12] with a bevel: top/left lit, bottom/right shadow. */
+        for (int y = 3; y <= 12; y++)
+            for (int x = 3; x <= 12; x++) {
+                if (y == 3 || x == 3)        side[y * S + x] = bevel;
+                else if (y == 12 || x == 12) side[y * S + x] = recess;
+                else                          side[y * S + x] = panel;
             }
-        }
-        /* Hinge strap on left edge (full height — tiles cleanly across
-         * the two stacked cells of a 2-tall door). */
-        for (int y = 0; y < CRAFT_TEX_SIZE; y++) {
-            side[y * CRAFT_TEX_SIZE + 0] = iron;
-            side[y * CRAFT_TEX_SIZE + 1] = iron;
-        }
-        /* No knob: each cell of the 2-tall door samples the same
-         * texture, so any localised detail (a knob) duplicates. Only
-         * full-height detail like the hinge strap tiles cleanly, so the
-         * door is planks + strap. */
-        (void)knob;
         memcpy(&craft_textures[(blk * 3 + 0) * CRAFT_TEX_PIXELS],
                side, sizeof(uint16_t) * CRAFT_TEX_PIXELS);
         memcpy(&craft_textures[(blk * 3 + 2) * CRAFT_TEX_PIXELS],

@@ -371,7 +371,6 @@ static const uint8_t s_block_class[BLK_COUNT] = {
     [BLK_PISTON_ARM]         = BCLASS_SPRITE3D,
     [BLK_STICKY_PISTON_OFF]  = BCLASS_SPRITE3D,
     [BLK_STICKY_PISTON_ON]   = BCLASS_SPRITE3D,
-    [BLK_VINE]               = BCLASS_SPRITE3D,
     [BLK_LILY_PAD]           = BCLASS_SPRITE3D,
     [BLK_LEVER_OFF]          = BCLASS_SPRITE3D,
     [BLK_LEVER_ON]           = BCLASS_SPRITE3D,

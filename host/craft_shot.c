@@ -105,10 +105,11 @@ int main(int argc, char **argv) {
         craft_world_set(cx - 1, gy + 1, cz + 2, BLK_REDSTONE_WIRE_ON);
         craft_world_set(cx - 1, gy + 1, cz + 3, BLK_REDSTONE_WIRE);
         craft_world_set(cx,     gy + 1, cz + 2, BLK_REDSTONE_WIRE_ON);
-        /* A hanging vine to the right. */
-        craft_world_set(cx + 3, gy + 3, cz + 2, BLK_STONE);
-        craft_world_set(cx + 3, gy + 2, cz + 2, BLK_VINE);
-        craft_world_set(cx + 3, gy + 1, cz + 2, BLK_VINE);
+        /* A hanging vine column right in front of the wall, just right of
+         * the doorway — 3 cells tall against the grey stone so it's
+         * unmistakable. */
+        for (int vy = 1; vy <= 3; vy++)
+            craft_world_set(cx + 2, gy + vy, wz - 1, BLK_VINE);
         cam.pos.x = (float)cx + 0.5f; cam.pos.y = (float)gy + 2.2f;
         cam.pos.z = (float)cz + 0.5f; cam.yaw = 0.0f; cam.pitch = -0.12f;
     }
