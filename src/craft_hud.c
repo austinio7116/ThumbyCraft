@@ -101,7 +101,9 @@ static void block_swatch(uint16_t *fb, int x, int y, int size, BlockId blk) {
         for (int dx = 0; dx < size; dx++) {
             int tu = dx * CRAFT_TEX_SIZE / size;
             int tv = dy * CRAFT_TEX_SIZE / size;
-            put(fb, x + dx, y + dy, tex[tv * CRAFT_TEX_SIZE + tu]);
+            uint16_t c = tex[tv * CRAFT_TEX_SIZE + tu];
+            if (c == 0xF81Fu) continue;   /* cutout key — leave slot bg */
+            put(fb, x + dx, y + dy, c);
         }
     }
 }

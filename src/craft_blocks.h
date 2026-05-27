@@ -159,6 +159,14 @@ typedef enum {
     BLK_LAVA_L1         = 96,
     BLK_LAVA_L2         = 97,
     BLK_LAVA_L3         = 98,
+    /* --- Ambient surface decoration (save v17) --------------------- *
+     * Worldgen-only cross-sprite plants: non-solid (walk through),
+     * non-sky-blocking, rendered via the DDA cutout-CROSS path (two
+     * perpendicular leafy/petal quads). Hidden from the inventory and
+     * drop nothing when cleared — pure scenery for meadow biomes. */
+    BLK_TALL_GRASS      = 99,   /* biome-tinted grass tuft */
+    BLK_FLOWER_RED      = 100,  /* red bloom */
+    BLK_FLOWER_YELLOW   = 101,  /* yellow bloom */
     BLK_COUNT
 } BlockId;
 
@@ -267,6 +275,10 @@ static inline bool craft_block_opaque(BlockId blk) {
     /* Vines + lily pads are thin sprites — non-opaque so the
      * raycaster passes through and the sprite pass draws them. */
     if (blk == BLK_VINE || blk == BLK_LILY_PAD) return false;
+    /* Cross-sprite plants — the DDA cutout path traces through their
+     * transparent texels, so they must not read as opaque cubes. */
+    if (blk == BLK_TALL_GRASS || blk == BLK_FLOWER_RED ||
+        blk == BLK_FLOWER_YELLOW) return false;
     return blk != BLK_AIR && !craft_is_water_id((uint8_t)blk) && blk != BLK_GLASS;
 }
 
@@ -334,6 +346,8 @@ static inline bool craft_block_placeable(BlockId blk) {
     if (blk == BLK_SNOW || blk == BLK_SANDSTONE || blk == BLK_CACTUS ||
         blk == BLK_VINE || blk == BLK_LILY_PAD || blk == BLK_ICE ||
         blk == BLK_OBSIDIAN || blk == BLK_GRAVEL) return true;
+    if (blk == BLK_TALL_GRASS || blk == BLK_FLOWER_RED ||
+        blk == BLK_FLOWER_YELLOW) return true;
     if (blk >= BLK_SILVER_ORE && blk <= BLK_REDSTONE_ORE)   return true;
     if (blk >= BLK_SILVER_BLOCK && blk <= BLK_REDSTONE_BLOCK) return true;
     if (blk >= BLK_STICK) return false;

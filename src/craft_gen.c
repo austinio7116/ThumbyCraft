@@ -152,10 +152,16 @@ static float swamp_factor(int x, int z, uint32_t seed) {
                               humidity_at(x, z, seed));
 }
 
+/* Dev-only biome override (screenshot harness). When >= 0, every
+ * column classifies as this biome so we can render a clean per-biome
+ * comparison scene. -1 = normal noise-driven classification. */
+int craft_gen_force_biome = -1;
+
 /* Pure classifier from precomputed factors — lets callers that
  * already have the mountain factor (craft_gen_column) avoid a
  * redundant noise eval. */
 static CraftBiome biome_classify(float m, float t, float hu) {
+    if (craft_gen_force_biome >= 0) return (CraftBiome)craft_gen_force_biome;
     if (m > 0.5f) return CBIOME_MOUNTAINS;          /* elevation wins */
     if (t < 0.38f) return CBIOME_TAIGA;             /* cold */
     if (t > 0.66f) {                                 /* hot band */
@@ -1648,6 +1654,29 @@ void craft_gen_column(int wx, int wz, uint32_t seed,
             for (int c = 1; c <= ch && h + c < CRAFT_WORLD_Y; c++)
                 out[h + c] = BLK_CACTUS;
         }
+    }
+
+    /* Meadow ground cover — tall grass + flowers on grass surfaces.
+     * Cross-sprite cutout plants placed in the cell above the surface.
+     * Density by biome: plains is lush (and the only one with many
+     * flowers), forest is patchier, swamp is grass-only. Skipped on a
+     * tree-trunk column so the trunk (which fills AIR only) isn't
+     * blocked at its base. */
+    if (surface == BLK_GRASS && h + 1 < CRAFT_WORLD_Y && out[h + 1] == BLK_AIR &&
+        (biome == CBIOME_PLAINS || biome == CBIOME_FOREST || biome == CBIOME_SWAMP)) {
+        uint32_t dr = hash3(wx, wz, seed ^ 0x0F10E12Du);
+        int roll = (int)(dr & 0xFF);
+        BlockId deco = BLK_AIR;
+        if (biome == CBIOME_PLAINS) {            /* ~8% flower, ~35% grass */
+            if      (roll < 20)  deco = (dr & 0x100) ? BLK_FLOWER_RED : BLK_FLOWER_YELLOW;
+            else if (roll < 110) deco = BLK_TALL_GRASS;
+        } else if (biome == CBIOME_FOREST) {     /* ~2% flower, ~25% grass */
+            if      (roll < 6)   deco = (dr & 0x100) ? BLK_FLOWER_RED : BLK_FLOWER_YELLOW;
+            else if (roll < 70)  deco = BLK_TALL_GRASS;
+        } else {                                 /* swamp — ~23% grass */
+            if (roll < 60)       deco = BLK_TALL_GRASS;
+        }
+        if (deco != BLK_AIR && !tree_at(wx, wz, seed)) out[h + 1] = deco;
     }
 
     /* Trees and huts are NOT stamped per-column any more — they're

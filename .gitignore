@@ -1,6 +1,7 @@
 build_host/
 build_device/
 build_*/
+dist/
 *.uf2
 # …but DO ship the release firmware so anyone can clone + flash.
 !firmware_thumbycraft.uf2
@@ -8,6 +9,13 @@ build_*/
 *.bin
 *.dis
 *.sav
+
+# Dev texture/screenshot artifacts from the host tools (craft_shot /
+# craft_atlas / craft_greens / craft_leaves) — regenerate, don't ship.
+*_sheet.png
+*_closeup.png
+doortest.png
+forest_leaves.png
 
 # IDE
 .vscode/

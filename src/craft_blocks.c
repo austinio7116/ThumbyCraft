@@ -489,14 +489,38 @@ static void glass_pattern(uint16_t *dst, uint32_t seed) {
 }
 
 /* Leaves — clumpy green with sparse darker pixels for depth. */
+/* Leaf cutout: many small leaf-shaped stamps (a 2px teardrop, ~3px) on
+ * a 2px grid, ~10% of cells skipped → ~33% open canopy. Magenta texels
+ * are holes the DDA BCLASS_CUBE path traces through (see-through
+ * "fancy leaves"). Toroidally wrapped so adjacent leaf blocks tile
+ * seamlessly. Leaves are biome-tinted at render, so the base greens
+ * just need contrast. CRAFT_LEAF_FILL = % of grid cells that get a leaf. */
+#define CRAFT_LEAF_FILL 90
+static inline uint32_t leaf_hash(int a, int b) {
+    uint32_t n = (uint32_t)(a * 73856093) ^ (uint32_t)(b * 19349663);
+    n ^= n >> 13; n *= 0x9E3779B1u; n ^= n >> 16; return n;
+}
 static void leaves_pattern(uint16_t *dst, uint32_t seed) {
-    uint32_t s = seed;
-    for (int i = 0; i < CRAFT_TEX_PIXELS; i++) {
-        uint32_t r = xs32(&s);
-        int dark = (r & 0x7) == 0;
-        int g = dark ? 60 : 110 + (int)(r & 0x1f);
-        dst[i] = rgb565(20, g, 30);
-    }
+    (void)seed;   /* deterministic so all three face slots match */
+    const int Sz = CRAFT_TEX_SIZE;
+    for (int i = 0; i < CRAFT_TEX_PIXELS; i++) dst[i] = rgb565(255, 0, 255);
+    const uint16_t gr[4] = {
+        rgb565(40, 150, 52), rgb565(30, 128, 44),
+        rgb565(52, 165, 64), rgb565(22, 104, 36),
+    };
+    #define LPLOT(xx,yy,cc) dst[(((yy)%Sz+Sz)%Sz)*Sz + (((xx)%Sz+Sz)%Sz)] = (cc)
+    for (int gy = 0; gy < Sz; gy += 2)
+        for (int gx = 0; gx < Sz; gx += 2) {
+            uint32_t hh = leaf_hash(gx + 1, gy + 1);
+            if ((int)(hh % 100) >= CRAFT_LEAF_FILL) continue;   /* hole */
+            uint16_t base = gr[hh & 3], tip = gr[3];
+            int x = gx + (int)((hh >> 9) & 1), y = gy + (int)((hh >> 10) & 1);
+            LPLOT(x,     y,     base);
+            LPLOT(x + 1, y,     base);
+            LPLOT(x,     y + 1, tip);
+            if (hh & 0x10000) LPLOT(x + 1, y + 1, base);
+        }
+    #undef LPLOT
 }
 
 #ifdef CRAFT_TEXTURES_BAKED
@@ -1212,14 +1236,17 @@ void craft_blocks_build_textures(void) {
                 side[y * CRAFT_TEX_SIZE + x] = c;
             }
         }
-        /* Hinge strap on left edge. */
+        /* Hinge strap on left edge (full height — tiles cleanly across
+         * the two stacked cells of a 2-tall door). */
         for (int y = 0; y < CRAFT_TEX_SIZE; y++) {
             side[y * CRAFT_TEX_SIZE + 0] = iron;
             side[y * CRAFT_TEX_SIZE + 1] = iron;
         }
-        /* Knob. */
-        side[7 * CRAFT_TEX_SIZE + 13] = knob;
-        side[8 * CRAFT_TEX_SIZE + 13] = knob;
+        /* No knob: each cell of the 2-tall door samples the same
+         * texture, so any localised detail (a knob) duplicates. Only
+         * full-height detail like the hinge strap tiles cleanly, so the
+         * door is planks + strap. */
+        (void)knob;
         memcpy(&craft_textures[(blk * 3 + 0) * CRAFT_TEX_PIXELS],
                side, sizeof(uint16_t) * CRAFT_TEX_PIXELS);
         memcpy(&craft_textures[(blk * 3 + 2) * CRAFT_TEX_PIXELS],
@@ -1683,6 +1710,98 @@ void craft_blocks_build_textures(void) {
                 if (dx*dx + dy*dy <= 42 && !(dx > 0 && dy > 0 && dx + dy > 6))
                     t[y * CRAFT_TEX_SIZE + x] = rgb565(70, 150, 70);
             }
+    }
+
+    /* --- Cross-sprite plants (cutout) --------------------------------
+     * Magenta (rgb565 255,0,255) texels are transparent: the DDA
+     * cutout-CROSS path traces straight through them. Baked into all
+     * three face slots identically (the renderer samples the side
+     * slot). TALL_GRASS is neutral green and gets biome-tinted at
+     * render time; flowers keep their own bloom colours. */
+    {
+        const uint16_t KEY = rgb565(255, 0, 255);
+        const int S = CRAFT_TEX_SIZE;
+
+        /* TALL GRASS — a fan of blades rising from the base. */
+        const int g_bx[5]   = { 3, 6, 8, 10, 13 };
+        const int g_lean[5] = { -1, 0, 0, 1, -1 };
+        const int g_top[5]  = { 6, 2, 1, 4, 7 };
+        for (int f = 0; f < 3; f++) {
+            uint16_t *t = &craft_textures[(BLK_TALL_GRASS * 3 + f) * CRAFT_TEX_PIXELS];
+            for (int i = 0; i < S * S; i++) t[i] = KEY;
+            for (int bi = 0; bi < 5; bi++)
+                for (int y = S - 1; y >= g_top[bi]; y--) {
+                    int up = (S - 1) - y;
+                    int x = g_bx[bi] + (g_lean[bi] * up) / 6;
+                    if (x < 0 || x >= S) continue;
+                    int g = 120 - up * 2; if (g < 70) g = 70;
+                    t[y * S + x] = rgb565(40, g, 38);
+                }
+        }
+
+        /* FLOWERS — hand-placed, natural silhouettes (no lollypop discs).
+         * RED is a tulip: a cup that flares into three lobed petals.
+         * YELLOW is a daisy: petals radiating around an orange core with
+         * magenta gaps between them. Both sit on a thin stem with two
+         * small angled leaves, shaded with a few soft tones. */
+        #define PX(tt,xx,yy,cc) do { if ((xx)>=0 && (xx)<S && (yy)>=0 && (yy)<S) \
+                                       (tt)[(yy)*S+(xx)] = (cc); } while (0)
+        {
+            uint16_t stem  = rgb565(72, 122, 56), stemd = rgb565(52, 96, 44);
+            uint16_t leaf  = rgb565(86, 144, 62), leafd = rgb565(60, 112, 50);
+            /* Curved stems (x for each row 15..7) so flowers lean and
+             * arc rather than standing as a dead-straight stick. The two
+             * flowers curve opposite ways for variety. Index 0 = bottom
+             * row (y=15) up to index 8 (y=7); the bloom sits at the top. */
+            const int stemTulip[9] = { 8, 8, 7, 7, 6, 6, 6, 7, 7 }; /* arcs left */
+            const int stemDaisy[9] = { 8, 8, 9, 9, 9, 8, 8, 8, 8 }; /* leans right */
+            for (int pass = 0; pass < 2; pass++) {
+                BlockId blk = pass ? BLK_FLOWER_YELLOW : BLK_FLOWER_RED;
+                const int *sc = pass ? stemDaisy : stemTulip;
+                for (int f = 0; f < 3; f++) {
+                    uint16_t *t = &craft_textures[(blk * 3 + f) * CRAFT_TEX_PIXELS];
+                    for (int i = 0; i < S * S; i++) t[i] = KEY;
+                    /* Stem follows the curve; shade alternates for body. */
+                    for (int i = 0; i < 9; i++) {
+                        int y = 15 - i;
+                        PX(t, sc[i], y, (i & 1) ? stem : stemd);
+                    }
+                    if (!pass) {
+                        /* RED TULIP — cup centred on the stem top (x≈7),
+                         * tilted, flaring into three lobes. Leaves tuck
+                         * into the arc of the stem. */
+                        PX(t, 8, 12, leaf); PX(t, 9, 12, leafd);   /* leaf out of the bend */
+                        PX(t, 5, 9,  leaf); PX(t, 4, 9,  leafd);
+                        uint16_t br = rgb565(238, 96, 98);
+                        uint16_t md = rgb565(210, 58, 62);
+                        uint16_t dp = rgb565(165, 36, 46);
+                        PX(t,6,6,dp); PX(t,7,6,dp); PX(t,8,6,dp);                 /* base */
+                        PX(t,5,5,dp); PX(t,6,5,md); PX(t,7,5,md); PX(t,8,5,md); PX(t,9,5,dp);
+                        PX(t,5,4,md); PX(t,6,4,md); PX(t,7,4,md); PX(t,8,4,md); PX(t,9,4,md);
+                        PX(t,5,3,md); PX(t,6,3,br); PX(t,7,3,md); PX(t,8,3,br); PX(t,9,3,md);
+                        PX(t,5,2,br); PX(t,7,2,br); PX(t,9,2,br);                 /* 3 lobe tips */
+                    } else {
+                        /* YELLOW DAISY — radiating petals + orange core,
+                         * sitting atop the right-leaning stem (x≈8). */
+                        PX(t, 7, 12, leaf); PX(t, 6, 12, leafd);
+                        PX(t, 10, 10, leaf); PX(t, 11, 10, leafd);
+                        uint16_t pet = rgb565(250, 224, 92);
+                        uint16_t tip = rgb565(255, 244, 156);
+                        uint16_t c0  = rgb565(220, 146, 40);
+                        uint16_t cd  = rgb565(156, 96, 24);
+                        PX(t,8,1,tip);  PX(t,8,2,pet);                 /* N  */
+                        PX(t,6,2,pet);  PX(t,10,2,pet);                /* NW NE */
+                        PX(t,5,4,tip);  PX(t,6,4,pet);                 /* W  */
+                        PX(t,10,4,pet); PX(t,11,4,tip);                /* E  */
+                        PX(t,6,6,pet);  PX(t,10,6,pet);                /* SW SE */
+                        PX(t,8,6,pet);                                 /* S  */
+                        PX(t,8,3,pet);  PX(t,7,4,c0); PX(t,9,4,c0); PX(t,8,5,pet);
+                        PX(t,8,4,cd);                                  /* core */
+                    }
+                }
+            }
+        }
+        #undef PX
     }
 }
 #endif /* CRAFT_TEXTURES_BAKED */

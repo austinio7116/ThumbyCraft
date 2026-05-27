@@ -68,6 +68,11 @@ bool craft_render_get_clouds(void);
 void craft_render_set_far_lod(bool on);
 bool craft_render_get_far_lod(void);
 
+/* Toggle ground cover (flowers + tall grass). Off skips those cutout
+ * plant cells entirely in the raycaster. */
+void craft_render_set_groundcover(bool on);
+bool craft_render_get_groundcover(void);
+
 /* Empty-space skip toggle (default on). Off forces the raycaster to step
  * every cell — used by the render-equivalence harness to verify the skip
  * produces pixel-identical output. No reason to turn it off in the game. */

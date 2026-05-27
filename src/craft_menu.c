@@ -45,7 +45,11 @@ static const MenuItem ITEMS[] = {
     { "Interlace",     CRAFT_MENU_RESULT_INTERLACE,  false },
     { "Low-res",       CRAFT_MENU_RESULT_LOWRES,     false },
     { "Torch light",   CRAFT_MENU_RESULT_TORCH_LIGHT, false },
+    { "Ground cover",  CRAFT_MENU_RESULT_GROUND_COVER, false },
     { "FPS",           CRAFT_MENU_RESULT_SHOW_FPS,   false },
+#ifdef CRAFT_HOST
+    { "Mouse sens",    CRAFT_MENU_RESULT_MOUSE_SENS, false },
+#endif
     { "New world",     CRAFT_MENU_RESULT_NEW_WORLD,  true  },
 #ifdef THUMBYONE_SLOT_MODE
     /* Reboot into ThumbyOne lobby. Only present in slot builds —
@@ -253,7 +257,11 @@ static CraftMenuResult tick_main_page(const CraftInput *in, const CraftPlayer *p
      * have to thread direction info to the caller. */
     const MenuItem *cur = &ITEMS[s_sel];
     bool is_slider = (cur->result == CRAFT_MENU_RESULT_MUSIC_VOL) ||
-                     (cur->result == CRAFT_MENU_RESULT_VOLUME);
+                     (cur->result == CRAFT_MENU_RESULT_VOLUME)
+#ifdef CRAFT_HOST
+                     || (cur->result == CRAFT_MENU_RESULT_MOUSE_SENS)
+#endif
+                     ;
     bool nav_now    = in->up || in->down;
     bool adjust_now = is_slider && (in->left || in->right);
     bool dpad_now   = nav_now || adjust_now;
@@ -279,12 +287,18 @@ static CraftMenuResult tick_main_page(const CraftInput *in, const CraftPlayer *p
             if (v < 0.0f) v = 0.0f;
             if (v > 1.0f) v = 1.0f;
             craft_audio_music_set_volume(v);
-        } else { /* VOLUME — master, shared with lobby/other slots */
+        } else if (cur->result == CRAFT_MENU_RESULT_VOLUME) {
+            /* master, shared with lobby/other slots */
             float v = craft_main_get_master_volume() + 0.05f * slider_step;
             if (v < 0.0f) v = 0.0f;
             if (v > 1.0f) v = 1.0f;
             craft_main_set_master_volume(v);
         }
+#ifdef CRAFT_HOST
+        else { /* MOUSE_SENS — host-only mouse-look sensitivity */
+            craft_main_set_mouse_sens(craft_main_mouse_sens() + 0.1f * slider_step);
+        }
+#endif
     }
     s_dpad_was_pressed = dpad_now;
     scroll_to_keep_visible(s_sel, ITEM_COUNT, MAIN_VISIBLE_ITEMS, &s_scroll);
@@ -1435,6 +1449,13 @@ static void draw_main_page(uint16_t *fb, const CraftPlayer *p) {
             craft_font_draw(fb, st, x0 + panel_w - sw - 6, item_y,
                             on ? rgb565(120, 220, 255)
                                : rgb565(120, 120, 130));
+        } else if (ITEMS[i].result == CRAFT_MENU_RESULT_GROUND_COVER) {
+            bool on = craft_render_get_groundcover();
+            const char *st = on ? "ON" : "OFF";
+            int sw = craft_font_width(st);
+            craft_font_draw(fb, st, x0 + panel_w - sw - 6, item_y,
+                            on ? rgb565(120, 220, 255)
+                               : rgb565(120, 120, 130));
         } else if (ITEMS[i].result == CRAFT_MENU_RESULT_SHOW_FPS) {
             bool on = craft_main_get_show_fps();
             const char *st = on ? "ON" : "OFF";
@@ -1460,6 +1481,20 @@ static void draw_main_page(uint16_t *fb, const CraftPlayer *p) {
                             is_sel ? rgb565(120, 220, 255)
                                    : rgb565(180, 180, 200));
         }
+#ifdef CRAFT_HOST
+        else if (ITEMS[i].result == CRAFT_MENU_RESULT_MOUSE_SENS) {
+            int pct = (int)(craft_main_mouse_sens() * 100.0f + 0.5f);
+            char buf[8]; int n = 0;
+            if (pct >= 100) { buf[n++] = '0' + (pct / 100); pct %= 100; buf[n++] = '0' + (pct / 10); buf[n++] = '0' + (pct % 10); }
+            else if (pct >= 10) { buf[n++] = '0' + (pct / 10); buf[n++] = '0' + (pct % 10); }
+            else { buf[n++] = '0' + pct; }
+            buf[n++] = '%'; buf[n] = '\0';
+            int sw = craft_font_width(buf);
+            craft_font_draw(fb, buf, x0 + panel_w - sw - 6, item_y,
+                            is_sel ? rgb565(120, 220, 255)
+                                   : rgb565(180, 180, 200));
+        }
+#endif
         item_y += 10;
     }
     /* Scroll arrows on the right edge when items hidden above/below. */
@@ -1484,8 +1519,10 @@ static void block_swatch_at(uint16_t *fb, int x, int y, int size, BlockId blk) {
             int tu = dx * CRAFT_TEX_SIZE / size;
             int tv = dy * CRAFT_TEX_SIZE / size;
             int fx = x + dx, fy = y + dy;
+            uint16_t c = tex[tv * CRAFT_TEX_SIZE + tu];
+            if (c == 0xF81Fu) continue;   /* cutout key — leave slot bg */
             if ((unsigned)fx < CRAFT_FB_W && (unsigned)fy < CRAFT_FB_H)
-                fb[fy * CRAFT_FB_W + fx] = tex[tv * CRAFT_TEX_SIZE + tu];
+                fb[fy * CRAFT_FB_W + fx] = c;
         }
     }
 }

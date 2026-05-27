@@ -109,6 +109,19 @@ bool        craft_main_get_show_fps(void);
 /* Accessor for the player (HUD draw + save). */
 const CraftPlayer *craft_main_player(void);
 
+/* Host mouse-look: add yaw/pitch deltas (radians) to the player camera.
+ * No-op concept on device (no pointer). See craft_main.c. */
+void        craft_main_look(float dyaw, float dpitch);
+
+/* Host hotbar control (mouse wheel + number keys). */
+void        craft_main_hotbar_cycle(int dir);
+void        craft_main_hotbar_select(int slot);
+
+/* Host mouse-look sensitivity multiplier (0.2..3.0, default 1.0),
+ * driven by the host-only "Mouse sens" menu slider. */
+float       craft_main_mouse_sens(void);
+void        craft_main_set_mouse_sens(float s);
+
 /* True if the world has unsaved changes. */
 bool craft_main_dirty(void);
 

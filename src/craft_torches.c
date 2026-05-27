@@ -170,10 +170,10 @@ static const uint8_t s_sprite_kind1[256] = {
     [BLK_VINE]              = TORCH_KIND_VINE + 1,
     [BLK_LILY_PAD]          = TORCH_KIND_LILY_PAD + 1,
     [BLK_PRESSURE_PAD]      = TORCH_KIND_PRESSURE_PAD + 1,
-    [BLK_DOOR_OFF]          = TORCH_KIND_DOOR_CLOSED + 1,
-    [BLK_DOOR_ON]           = TORCH_KIND_DOOR_OPEN + 1,
-    [BLK_TRAPDOOR_OFF]      = TORCH_KIND_TRAPDOOR_CLOSED + 1,
-    [BLK_TRAPDOOR_ON]       = TORCH_KIND_TRAPDOOR_OPEN + 1,
+    /* Doors + trapdoors are now drawn by the DDA cutout-PANEL path
+     * (craft_render.c), not this post-pass — so they're intentionally
+     * NOT registered here. Their orient is still recorded at placement
+     * and read back via craft_torches_lookup_orient. */
     [BLK_PISTON_OFF]        = TORCH_KIND_PISTON_OFF + 1,
     [BLK_PISTON_ON]         = TORCH_KIND_PISTON_ON + 1,
     [BLK_STICKY_PISTON_OFF] = TORCH_KIND_PISTON_OFF + 1,
@@ -318,8 +318,87 @@ void craft_torches_refresh_connect(int lx0, int lx1, int lz0, int lz1) {
 typedef struct {
     float cx, cy, cz;   /* centre in cell-local coords (0..1) */
     float hx, hy, hz;   /* half-sizes */
-    uint16_t color;
+    uint16_t color;     /* flat fill, or fallback when tex != NULL */
+    /* Optional 16×16 RGB565 cutout texture mapped onto the slab's
+     * broad face. NULL = flat-colour part (the default for every
+     * model except vines). When set, the rasterizer samples the
+     * texel at the hit UV and treats magenta (0xF81F) as fully
+     * transparent — that's how leafy vines show the world behind
+     * their gaps. UV axes are derived from the slab's thin axis. */
+    const uint16_t *tex;
 } TorchCuboid;
+
+/* Transparent key for cutout sprite textures. rgb565(255,0,255). */
+#define SPRITE_CUTOUT_KEY  0xF81Fu
+
+/* Leafy vine cutout tile, built once (see build_vine_tex). Two winding
+ * stems in separate lanes with leaves hung off them, over a magenta
+ * (transparent) field. The stems are sine windings with period = tile
+ * height, so the column re-aligns top↔bottom and the tile STACKS
+ * SEAMLESSLY — a multi-cell-tall vine flows unbroken. */
+static uint16_t s_vine_tex[CRAFT_TEX_PIXELS];
+static bool     s_vine_tex_ready = false;
+
+/* Stamp a vine texel as tier 2 (stem) / 1 (leaf), keeping the higher
+ * tier where they overlap; y wraps for vertical seamlessness. */
+static void vine_put(uint8_t *tier, int x, int y, uint8_t v) {
+    const int S = CRAFT_TEX_SIZE;
+    y = ((y % S) + S) % S;
+    if (x < 0 || x >= S) return;
+    if (v > tier[y * S + x]) tier[y * S + x] = v;
+}
+
+static void build_vine_tex(void) {
+    const int S = CRAFT_TEX_SIZE;
+    uint8_t tier[CRAFT_TEX_PIXELS];
+    for (int i = 0; i < S * S; i++) tier[i] = 0;
+
+    /* Two stems, small amplitude so their lanes never cross. */
+    const float cx[2] = { 4.0f, 11.0f };
+    const float ph[2] = { 0.0f, 2.0f };
+    const float amp   = 1.5f;
+    for (int s = 0; s < 2; s++) {
+        for (int y = 0; y < S; y++) {
+            float fx = cx[s] + amp * sinf(6.2831853f * (float)y / (float)S + ph[s]);
+            int x = (int)(fx + 0.5f);
+            vine_put(tier, x, y,     2);
+            vine_put(tier, x, y + 1, 2);
+        }
+        /* Leaves every 3 rows, alternating side, anchored on the stem. */
+        for (int y = 0; y < S; y += 3) {
+            float fx = cx[s] + amp * sinf(6.2831853f * (float)y / (float)S + ph[s]);
+            int x = (int)(fx + 0.5f);
+            int side = ((y / 3) & 1) ? 1 : -1;
+            int lx = x + side * 2;
+            for (int dy = -2; dy <= 1; dy++)
+                for (int dx = -2; dx <= 2; dx++) {
+                    int adx  = dx < 0 ? -dx : dx;
+                    int ady2 = (dy < 0 ? -dy : dy) * 2;   /* taller than wide */
+                    if (adx + ady2 <= 2) vine_put(tier, lx + dx, y + dy, 1);
+                }
+        }
+    }
+
+    /* Colourise: transparent where empty, stem/leaf greens otherwise,
+     * with a small per-texel jitter so the foliage isn't flat. */
+    for (int y = 0; y < S; y++) {
+        for (int x = 0; x < S; x++) {
+            uint8_t t = tier[y * S + x];
+            if (t == 0) { s_vine_tex[y * S + x] = SPRITE_CUTOUT_KEY; continue; }
+            uint32_t h = (uint32_t)((x + 1) * 73856093) ^
+                         (uint32_t)((y + 1) * 19349663);
+            h ^= h >> 13; h *= 0x9E3779B1u; h ^= h >> 16;
+            int j = (int)(h & 7) - 3;                 /* -3..4 */
+            int r, g, b;
+            if (t == 2) { r = 40; g = 88;  b = 34; }  /* stem  — darker  */
+            else        { r = 66; g = 138; b = 52; }  /* leaf  — brighter */
+            r += j;  g += j * 3;  b += j;
+            if (r < 0) r = 0;  if (b < 0) b = 0;
+            if (g < 0) g = 0;  if (g > 200) g = 200;
+            s_vine_tex[y * S + x] = rgb565(r, g, b);
+        }
+    }
+}
 
 static int wire_parts_n(bool powered, uint8_t connect, TorchCuboid *out) {
     /* Lifted ~10 cm above the floor of the cell so it reads as wire
@@ -447,23 +526,30 @@ static void pad_parts(TorchCuboid out[2]) {
     out[1].color = edge;
 }
 
-/* VINE — three thin vertical strands hanging the full height of the
- * cell. Orient-independent so it reads as a dangling vine both under
- * a tree canopy and against a wall. */
+/* VINE — crossed X-quad: two perpendicular leafy planes through the
+ * cell centre. Both carry the magenta-keyed cutout texture
+ * (s_vine_tex), so the world shows through the gaps and the rasterizer
+ * does the per-texel transparency. The crossed form reads from every
+ * angle (never vanishes edge-on) and tiles vertically, which a single
+ * wall quad did not — so it works for both wall-clinging and free-
+ * hanging vines. `orient` is unused now (the cross is symmetric). */
 static int vine_parts_n(int orient, TorchCuboid *out) {
     (void)orient;
-    /* Mid-dark green; sprites are now lit per-cell (see render below)
-     * so this dims correctly in shadow rather than needing to be
-     * near-black. */
-    uint16_t v  = rgb565(42, 95, 34);
-    uint16_t vd = rgb565(30, 72, 26);
-    out[0].cx = 0.30f; out[0].cy = 0.5f; out[0].cz = 0.34f;
-    out[0].hx = 0.045f; out[0].hy = 0.5f; out[0].hz = 0.045f; out[0].color = v;
-    out[1].cx = 0.66f; out[1].cy = 0.5f; out[1].cz = 0.58f;
-    out[1].hx = 0.045f; out[1].hy = 0.5f; out[1].hz = 0.045f; out[1].color = vd;
-    out[2].cx = 0.48f; out[2].cy = 0.5f; out[2].cz = 0.70f;
-    out[2].hx = 0.04f; out[2].hy = 0.5f; out[2].hz = 0.04f; out[2].color = v;
-    return 3;
+    if (!s_vine_tex_ready) { build_vine_tex(); s_vine_tex_ready = true; }
+    const float T  = 0.04f;    /* half-thickness of each plane */
+    const float HW = 0.46f;    /* half-width across the cell */
+    const float HH = 0.48f;    /* half-height (nearly full cell) */
+    /* Plane A — spans X×Y, thin in Z. */
+    out[0].cx = 0.5f; out[0].cy = 0.5f; out[0].cz = 0.5f;
+    out[0].hx = HW;   out[0].hy = HH;   out[0].hz = T;
+    out[0].color = rgb565(55, 120, 45);   /* flat fallback (held-item preview) */
+    out[0].tex   = s_vine_tex;
+    /* Plane B — spans Z×Y, thin in X (perpendicular to A). */
+    out[1].cx = 0.5f; out[1].cy = 0.5f; out[1].cz = 0.5f;
+    out[1].hx = T;    out[1].hy = HH;   out[1].hz = HW;
+    out[1].color = rgb565(48, 110, 40);
+    out[1].tex   = s_vine_tex;
+    return 2;
 }
 
 /* LILY PAD — reuse the pressure pad's flat slab, recoloured green and
@@ -993,7 +1079,7 @@ int craft_torches_pick(const CraftCamera *cam, float max_dist) {
     for (int i = 0; i < CRAFT_MAX_TORCHES; i++) {
         CraftTorch *t = &craft_torches[i];
         if (!t->alive) continue;
-        TorchCuboid parts[MAX_SPRITE_PARTS];
+        TorchCuboid parts[MAX_SPRITE_PARTS] = {0};   /* tex defaults NULL */
         int n_parts = torch_parts_full(t->kind, t->orient,
                                        t->connect, torch_cell_sticky(t), parts);
         for (int p = 0; p < n_parts; p++) {
@@ -1083,7 +1169,7 @@ void craft_torches_render(const CraftCamera *cam, uint16_t *fb) {
         float dist2 = dxp*dxp + dyp*dyp + dzp*dzp;
         if (dist2 > 50.0f * 50.0f) continue;
 
-        TorchCuboid parts[MAX_SPRITE_PARTS];
+        TorchCuboid parts[MAX_SPRITE_PARTS] = {0};   /* tex defaults NULL */
         int n_parts = torch_parts_full(t->kind, t->orient,
                                        t->connect, torch_cell_sticky(t), parts);
 
@@ -1167,8 +1253,37 @@ void craft_torches_render(const CraftCamera *cam, uint16_t *fb) {
                                  bminx, bminy, bminz,
                                  bmaxx, bmaxy, bmaxz, &th)) {
                         if (th < best_t) {
+                            uint16_t col = parts[p].color;
+                            if (parts[p].tex) {
+                                /* Cutout-textured slab (vines): sample the
+                                 * texel at the hit point on the slab's broad
+                                 * face. Thin axis = smallest half-size →
+                                 * the other two cell-local axes are U/V.
+                                 * Magenta texels are transparent: skip this
+                                 * part so the world (or a farther part)
+                                 * shows through the gap. */
+                                float hlx = lo_x + wdx * th;
+                                float hly = lo_y + wdy * th;
+                                float hlz = lo_z + wdz * th;
+                                float u, v;
+                                if (parts[p].hz <= parts[p].hx &&
+                                    parts[p].hz <= parts[p].hy) {      /* thin Z */
+                                    u = hlx; v = hly;
+                                } else if (parts[p].hx <= parts[p].hy) { /* thin X */
+                                    u = hlz; v = hly;
+                                } else {                                 /* thin Y */
+                                    u = hlx; v = hlz;
+                                }
+                                int tu = (int)(u * CRAFT_TEX_SIZE);
+                                int tv = (int)((1.0f - v) * CRAFT_TEX_SIZE);
+                                if (tu < 0) tu = 0; else if (tu >= CRAFT_TEX_SIZE) tu = CRAFT_TEX_SIZE - 1;
+                                if (tv < 0) tv = 0; else if (tv >= CRAFT_TEX_SIZE) tv = CRAFT_TEX_SIZE - 1;
+                                uint16_t texel = parts[p].tex[tv * CRAFT_TEX_SIZE + tu];
+                                if (texel == SPRITE_CUTOUT_KEY) continue;  /* transparent */
+                                col = texel;
+                            }
                             best_t = th;
-                            best_color = parts[p].color;
+                            best_color = col;
                             /* p==1 is "flame" only for the torch
                              * model; for other sprites the second
                              * cuboid is just a detail accent. */
@@ -1249,7 +1364,7 @@ int craft_torches_block_model(uint8_t b, int orient,
         default:
             return 0;
     }
-    TorchCuboid local[MAX_SPRITE_PARTS];
+    TorchCuboid local[MAX_SPRITE_PARTS] = {0};
     int n = torch_parts(kind, orient, local);
     if (n > max_n) n = max_n;
     /* CraftToolPart and TorchCuboid share the layout — direct copy. */

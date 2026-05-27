@@ -121,6 +121,7 @@ static bool s_interlace_enabled = false;
 static int  s_interlace_phase   = 0;   /* 0 → render even rows, 1 → odd */
 static bool s_lowres_enabled    = false;  /* 64×64 perf mode: ¼ rays, 2×2 upscale */
 static bool s_torch_light       = false;  /* menu opt: a held torch lights the scene */
+static bool s_groundcover       = true;   /* menu opt: render flowers/tall grass */
 static bool s_player_light_on   = false;  /* per-frame: torch_light && holding a torch */
 static float s_sun_y = 1.0f;          /* sin(sun_angle): +1 noon, -1 midnight */
 static float s_cloud_drift = 0.0f;    /* world units of east drift since boot */
@@ -151,6 +152,8 @@ void craft_render_set_torch_light(bool on) {
     if (!on) s_player_light_on = false;
 }
 bool craft_render_get_torch_light(void) { return s_torch_light; }
+void craft_render_set_groundcover(bool on) { s_groundcover = on; }
+bool craft_render_get_groundcover(void) { return s_groundcover; }
 /* Set per-frame: the game loop passes (torch_light_opt && held==TORCH). */
 void craft_render_set_player_light(bool on) { s_player_light_on = on; }
 float craft_render_sun_y(void) { return s_sun_y; }
@@ -269,12 +272,12 @@ INLINE_HOT uint16_t shade(uint16_t c, int m) {
 #define RGB565C(r,g,b) (uint16_t)((((r)>>3)<<11)|(((g)>>2)<<5)|((b)>>3))
 static const uint16_t s_biome_tint[8] = {
     RGB565C(140, 200,  70),   /* plains    — bright yellow-green */
-    RGB565C( 60, 140,  55),   /* forest    — deep green          */
+    RGB565C( 50, 120,  48),   /* forest    — richer/darker green */
     RGB565C(190, 180, 120),   /* desert    — (unused)            */
-    RGB565C(140, 175, 165),   /* taiga     — cold blue-green     */
-    RGB565C( 95, 100,  40),   /* swamp     — murky brown-olive   */
-    RGB565C(130, 150, 120),   /* mountains — grey-green          */
-    RGB565C( 45, 175,  40),   /* jungle    — vivid green         */
+    RGB565C( 88, 140, 120),   /* taiga     — dark cold pine      */
+    RGB565C( 52,  74,  40),   /* swamp     — deep bog            */
+    RGB565C(100, 130, 100),   /* mountains — cool grey-green     */
+    RGB565C( 35, 140,  38),   /* jungle    — deep canopy green   */
     RGB565C(195, 175,  70),   /* savanna   — dry tan-yellow      */
 };
 #define BIOME_TINT_T 165       /* ~64% blend — clearly visible */
@@ -316,6 +319,91 @@ typedef struct {
     int    water_face;
     float  water_u, water_v;
 } TraceHit;
+
+/* --- Per-block render class --------------------------------------- *
+ * Indexed by BlockId, consumed by the DDA hot loop. Replaces the old
+ * ~18-compare is_sprite_cell OR-chain with one table load + compare —
+ * faster for ordinary terrain rays, and the extension point for the
+ * cutout-transparency work (CUBE/CROSS/PANEL classes land in later
+ * phases). Unlisted blocks default to BCLASS_NORMAL (opaque cube);
+ * water and glass keep their own dedicated handling below, so they
+ * stay NORMAL here. */
+/* Transparent key for cutout textures — rgb565(255,0,255). Texels of
+ * this value are "holes" the DDA traces through. */
+#define CRAFT_CUTOUT_KEY  0xF81Fu
+
+enum {
+    BCLASS_NORMAL   = 0,   /* opaque cube — DDA stops and samples a face */
+    BCLASS_SPRITE3D = 1,   /* post-pass cuboid sprite — DDA passes through
+                              on render, stops on pick (aimable cell) */
+    BCLASS_CROSS    = 2,   /* two perpendicular cutout quads through the
+                              cell centre (plants) — DDA intersects them
+                              per-texel; passes through the transparent
+                              gaps, stops on a solid petal/leaf texel */
+    BCLASS_PANEL    = 3,   /* door / trapdoor — a single textured slab
+                              (orient + open/closed). The DDA intersects
+                              it and STOPS (opaque texel blocks the ray =
+                              early termination), instead of the old
+                              7-cuboid post-pass sprite */
+    BCLASS_CUBE     = 4,   /* full cube with a cutout texture (leaves):
+                              sampled on the entry face; a magenta texel
+                              means the ray passes through that cell (the
+                              whole cell is skipped — cheap "fancy
+                              leaves" see-through canopy) */
+};
+static const uint8_t s_block_class[BLK_COUNT] = {
+    [BLK_LEAVES]             = BCLASS_CUBE,
+    [BLK_TALL_GRASS]         = BCLASS_CROSS,
+    [BLK_FLOWER_RED]         = BCLASS_CROSS,
+    [BLK_FLOWER_YELLOW]      = BCLASS_CROSS,
+    [BLK_TORCH]              = BCLASS_SPRITE3D,
+    [BLK_REDSTONE_WIRE]      = BCLASS_SPRITE3D,
+    [BLK_REDSTONE_WIRE_ON]   = BCLASS_SPRITE3D,
+    [BLK_LADDER]             = BCLASS_SPRITE3D,
+    [BLK_PRESSURE_PAD]       = BCLASS_SPRITE3D,
+    [BLK_DOOR_OFF]           = BCLASS_PANEL,
+    [BLK_DOOR_ON]            = BCLASS_PANEL,
+    [BLK_TRAPDOOR_OFF]       = BCLASS_PANEL,
+    [BLK_TRAPDOOR_ON]        = BCLASS_PANEL,
+    [BLK_PISTON_OFF]         = BCLASS_SPRITE3D,
+    [BLK_PISTON_ON]          = BCLASS_SPRITE3D,
+    [BLK_PISTON_ARM]         = BCLASS_SPRITE3D,
+    [BLK_STICKY_PISTON_OFF]  = BCLASS_SPRITE3D,
+    [BLK_STICKY_PISTON_ON]   = BCLASS_SPRITE3D,
+    [BLK_VINE]               = BCLASS_SPRITE3D,
+    [BLK_LILY_PAD]           = BCLASS_SPRITE3D,
+    [BLK_LEVER_OFF]          = BCLASS_SPRITE3D,
+    [BLK_LEVER_ON]           = BCLASS_SPRITE3D,
+};
+
+/* Main door/trapdoor panel slab in cell-local (0..1) coords — mirrors
+ * parts[0] of door_parts_n / trapdoor_parts_n in craft_torches.c. The
+ * DDA PANEL path treats this slab as a single textured plane. */
+static void panel_slab(BlockId blk, int orient,
+                       float *cx, float *cy, float *cz,
+                       float *hx, float *hy, float *hz) {
+    *cx = *cy = *cz = 0.5f; *hx = *hy = *hz = 0.025f;
+    bool open = (blk == BLK_DOOR_ON || blk == BLK_TRAPDOOR_ON);
+    if (blk == BLK_DOOR_OFF || blk == BLK_DOOR_ON) {
+        bool span_x = (orient == FACE_PZ || orient == FACE_NZ);
+        *hy = 0.5f;   /* full height so stacked door cells have no seam */
+        if (!open) {
+            if (span_x) { *hx = 0.45f;  *hz = 0.025f; }
+            else        { *hx = 0.025f; *hz = 0.45f;  }
+        } else {
+            if (span_x) { *cx = 0.05f; *hx = 0.025f; *hz = 0.45f; }
+            else        { *cz = 0.05f; *hz = 0.025f; *hx = 0.45f; }
+        }
+    } else {   /* trapdoor */
+        if (!open) { *cy = 0.94f; *hy = 0.05f; *hx = 0.46f; *hz = 0.46f; }
+        else {
+            bool on_x = (orient == FACE_PX || orient == FACE_NX);
+            *hy = 0.5f;
+            if (on_x) { *cx = (orient == FACE_PX) ? 0.05f : 0.95f; *hx = 0.05f; *hz = 0.46f; }
+            else      { *cz = (orient == FACE_PZ) ? 0.05f : 0.95f; *hz = 0.05f; *hx = 0.46f; }
+        }
+    }
+}
 
 INLINE_HOT TraceHit trace_ray(Vec3 origin, Vec3 dir, bool stop_at_water) {
     TraceHit h = (TraceHit){0};
@@ -478,27 +566,140 @@ INLINE_HOT TraceHit trace_ray(Vec3 origin, Vec3 dir, bool stop_at_water) {
          * top 2 bits, which carry the water-flow level field. */
         BlockId blk = (BlockId)craft_world_blocks[idx];
         if (blk == BLK_AIR) { PROF_INC(craft_prof_air); continue; }
-        /* Sprite blocks (torches, wires, ladders, pads, doors, trap-
-         * doors, pistons, levers) render via the craft_torches sprite
-         * post-pass — smaller-than-cube cuboid models drawn AFTER
-         * the world raycaster. During the render pass these cells
-         * pass through (the sprite paints over the cube area). During
-         * pick (stop_at_water=true) the rays STOP on these cells so
-         * the player can aim at them, place blocks on their faces,
-         * and select the whole cell with the picker outline. The
-         * sprite render gates picker highlight on h.bx/by/bz. */
-        bool is_sprite_cell =
-            (blk == BLK_TORCH) ||
-            (blk == BLK_REDSTONE_WIRE) || (blk == BLK_REDSTONE_WIRE_ON) ||
-            (blk == BLK_LADDER)        || (blk == BLK_PRESSURE_PAD) ||
-            (blk == BLK_DOOR_OFF)      || (blk == BLK_DOOR_ON) ||
-            (blk == BLK_TRAPDOOR_OFF)  || (blk == BLK_TRAPDOOR_ON) ||
-            (blk == BLK_PISTON_OFF)    || (blk == BLK_PISTON_ON) ||
-            (blk == BLK_PISTON_ARM) ||
-            (blk == BLK_STICKY_PISTON_OFF) || (blk == BLK_STICKY_PISTON_ON) ||
-            (blk == BLK_VINE)          || (blk == BLK_LILY_PAD) ||
-            (blk == BLK_LEVER_OFF)     || (blk == BLK_LEVER_ON);
-        if (is_sprite_cell && !stop_at_water) continue;
+        uint8_t cls = s_block_class[blk];
+        /* 3D post-pass sprite (torch/ladder/door/piston/etc): smaller-
+         * than-cube cuboid models drawn AFTER the world raycaster by
+         * the craft_torches pass. During render these cells pass
+         * through (the cuboid pass paints over the cube area). During
+         * pick (stop_at_water) the ray STOPS so the cell is aimable.
+         * One table load replaces the old per-id OR-chain. */
+        if (cls == BCLASS_SPRITE3D && !stop_at_water) continue;
+        /* Cross-sprite plant (flowers / tall grass): two perpendicular
+         * cutout quads through the cell centre. Intersect each plane,
+         * sample the cutout texel at the crossing; a magenta texel is a
+         * gap → keep tracing, a solid texel → hit right here (early ray
+         * termination, no post-pass). The nearer opaque plane wins.
+         * Pick rays fall through to the normal cube hit so the whole
+         * cell stays aimable. */
+        /* Ground cover toggled off → plants are invisible and not
+         * aimable (the cells still exist but the ray skips them). */
+        if (cls == BCLASS_CROSS && !s_groundcover) continue;
+        if (cls == BCLASS_CROSS && !stop_at_water) {
+            const uint16_t *ct = craft_block_texture(blk, FACE_PZ);
+            float best_ct = 1e30f; int best_face = -1;
+            float best_u = 0.0f, best_v = 0.0f;
+            /* Plane A — world X = vx + 0.5, spans the cell's Y,Z. */
+            if (dir.x != 0.0f) {
+                float ta = ((float)vx + 0.5f - origin.x) * inv_x;
+                if (ta > 0.0f) {
+                    float hy = origin.y + dir.y * ta;
+                    float hz = origin.z + dir.z * ta;
+                    if (hy >= (float)vy && hy <= (float)vy + 1.0f &&
+                        hz >= (float)vz && hz <= (float)vz + 1.0f) {
+                        float u = hz - (float)vz;
+                        float v = 1.0f - (hy - (float)vy);
+                        int tu = (int)(u * CRAFT_TEX_SIZE);
+                        int tv = (int)(v * CRAFT_TEX_SIZE);
+                        if (tu < 0) tu = 0; else if (tu >= CRAFT_TEX_SIZE) tu = CRAFT_TEX_SIZE - 1;
+                        if (tv < 0) tv = 0; else if (tv >= CRAFT_TEX_SIZE) tv = CRAFT_TEX_SIZE - 1;
+                        if (ct[tv * CRAFT_TEX_SIZE + tu] != CRAFT_CUTOUT_KEY) {
+                            best_ct = ta; best_u = u; best_v = v;
+                            best_face = (dir.x > 0.0f) ? FACE_NX : FACE_PX;
+                        }
+                    }
+                }
+            }
+            /* Plane B — world Z = vz + 0.5, spans the cell's X,Y. */
+            if (dir.z != 0.0f) {
+                float tb = ((float)vz + 0.5f - origin.z) * inv_z;
+                if (tb > 0.0f && tb < best_ct) {
+                    float hx = origin.x + dir.x * tb;
+                    float hy = origin.y + dir.y * tb;
+                    if (hx >= (float)vx && hx <= (float)vx + 1.0f &&
+                        hy >= (float)vy && hy <= (float)vy + 1.0f) {
+                        float u = hx - (float)vx;
+                        float v = 1.0f - (hy - (float)vy);
+                        int tu = (int)(u * CRAFT_TEX_SIZE);
+                        int tv = (int)(v * CRAFT_TEX_SIZE);
+                        if (tu < 0) tu = 0; else if (tu >= CRAFT_TEX_SIZE) tu = CRAFT_TEX_SIZE - 1;
+                        if (tv < 0) tv = 0; else if (tv >= CRAFT_TEX_SIZE) tv = CRAFT_TEX_SIZE - 1;
+                        if (ct[tv * CRAFT_TEX_SIZE + tu] != CRAFT_CUTOUT_KEY) {
+                            best_ct = tb; best_u = u; best_v = v;
+                            best_face = (dir.z > 0.0f) ? FACE_NZ : FACE_PZ;
+                        }
+                    }
+                }
+            }
+            if (best_face < 0) continue;     /* ray went through the gaps */
+            PROF_INC(craft_prof_hits);
+            h.hit = true;
+            h.bx = vx; h.by = vy; h.bz = vz;
+            h.fx = vx; h.fy = vy; h.fz = vz;   /* own cell → sky-exposed lighting */
+            h.face = best_face;
+            h.blk = blk;
+            h.t = best_ct;
+            h.u = best_u; h.v = best_v;
+            return h;
+        }
+        /* Door / trapdoor panel: intersect the single slab plane. An
+         * opaque texel STOPS the ray (the whole point — a closed door
+         * blocks the view, saving the steps behind it and the entire
+         * cuboid post-pass). A miss (ray through the doorway gap) or a
+         * transparent texel keeps tracing. Pick rays fall through to the
+         * normal cube hit so the door cell stays aimable. */
+        if (cls == BCLASS_PANEL && !stop_at_water) {
+            int orient = craft_torches_lookup_orient(vx, vy, vz);
+            float cx, cy, cz, hx, hy, hz;
+            panel_slab(blk, orient, &cx, &cy, &cz, &hx, &hy, &hz);
+            float pt = -1.0f, u = 0.0f, v = 0.0f; int pface = -1;
+            if (hx <= hy && hx <= hz) {                 /* thin X */
+                float tt = ((float)vx + cx - origin.x) * inv_x;
+                if (tt > 0.0f) {
+                    float a = origin.z + dir.z * tt, b = origin.y + dir.y * tt;
+                    float a0 = (float)vz + cz - hz, b0 = (float)vy + cy - hy;
+                    if (a >= a0 && a <= a0 + 2*hz && b >= b0 && b <= b0 + 2*hy) {
+                        u = (a - a0) / (2*hz); v = 1.0f - (b - b0) / (2*hy);
+                        pt = tt; pface = (dir.x > 0.0f) ? FACE_NX : FACE_PX;
+                    }
+                }
+            } else if (hz <= hy && hz <= hx) {          /* thin Z */
+                float tt = ((float)vz + cz - origin.z) * inv_z;
+                if (tt > 0.0f) {
+                    float a = origin.x + dir.x * tt, b = origin.y + dir.y * tt;
+                    float a0 = (float)vx + cx - hx, b0 = (float)vy + cy - hy;
+                    if (a >= a0 && a <= a0 + 2*hx && b >= b0 && b <= b0 + 2*hy) {
+                        u = (a - a0) / (2*hx); v = 1.0f - (b - b0) / (2*hy);
+                        pt = tt; pface = (dir.z > 0.0f) ? FACE_NZ : FACE_PZ;
+                    }
+                }
+            } else {                                    /* thin Y (trapdoor) */
+                float tt = ((float)vy + cy - origin.y) * inv_y;
+                if (tt > 0.0f) {
+                    float a = origin.x + dir.x * tt, b = origin.z + dir.z * tt;
+                    float a0 = (float)vx + cx - hx, b0 = (float)vz + cz - hz;
+                    if (a >= a0 && a <= a0 + 2*hx && b >= b0 && b <= b0 + 2*hz) {
+                        u = (a - a0) / (2*hx); v = (b - b0) / (2*hz);
+                        pt = tt; pface = (dir.y > 0.0f) ? FACE_NY : FACE_PY;
+                    }
+                }
+            }
+            if (pface >= 0) {
+                const uint16_t *ptex = craft_block_texture(blk, pface);
+                int tu = (int)(u * CRAFT_TEX_SIZE), tv = (int)(v * CRAFT_TEX_SIZE);
+                if (tu < 0) tu = 0; else if (tu >= CRAFT_TEX_SIZE) tu = CRAFT_TEX_SIZE - 1;
+                if (tv < 0) tv = 0; else if (tv >= CRAFT_TEX_SIZE) tv = CRAFT_TEX_SIZE - 1;
+                if (ptex[tv * CRAFT_TEX_SIZE + tu] != CRAFT_CUTOUT_KEY) {
+                    PROF_INC(craft_prof_hits);
+                    h.hit = true;
+                    h.bx = vx; h.by = vy; h.bz = vz;
+                    h.fx = prev_vx; h.fy = prev_vy; h.fz = prev_vz;
+                    h.face = pface; h.blk = blk; h.t = pt;
+                    h.u = u; h.v = v;
+                    return h;
+                }
+            }
+            continue;   /* doorway gap / transparent — trace on */
+        }
         if (craft_is_water_id((uint8_t)blk)) {
             if (!stop_at_water) {
                 if (!h.passed_water) {
@@ -535,14 +736,6 @@ INLINE_HOT TraceHit trace_ray(Vec3 origin, Vec3 dir, bool stop_at_water) {
             }
         }
 
-        PROF_INC(craft_prof_hits);
-        h.hit = true;
-        h.bx = vx; h.by = vy; h.bz = vz;
-        h.fx = prev_vx; h.fy = prev_vy; h.fz = prev_vz;
-        h.face = face;
-        h.blk = blk;
-        h.t = t;
-
         float hx = origin.x + dir.x * t;
         float hy = origin.y + dir.y * t;
         float hz = origin.z + dir.z * t;
@@ -554,20 +747,34 @@ INLINE_HOT TraceHit trace_ray(Vec3 origin, Vec3 dir, bool stop_at_water) {
          * for negative inputs, clamping every face pixel to texture
          * column 0 and rendering each face as a single stretched
          * line of colour. */
+        float u, v;
         switch (face) {
             case FACE_PX: case FACE_NX:
-                h.u = hz - floorf(hz);
-                h.v = 1.0f - (hy - floorf(hy));
-                break;
+                u = hz - floorf(hz); v = 1.0f - (hy - floorf(hy)); break;
             case FACE_PY: case FACE_NY:
-                h.u = hx - floorf(hx);
-                h.v = hz - floorf(hz);
-                break;
-            case FACE_PZ: case FACE_NZ:
-                h.u = hx - floorf(hx);
-                h.v = 1.0f - (hy - floorf(hy));
-                break;
+                u = hx - floorf(hx); v = hz - floorf(hz); break;
+            default: /* FACE_PZ / FACE_NZ */
+                u = hx - floorf(hx); v = 1.0f - (hy - floorf(hy)); break;
         }
+        /* Cutout cube (leaves): sample the entry-face texel; a magenta
+         * hole means the ray passes through this whole cell (cheap
+         * see-through canopy). Render only — pick treats it as solid. */
+        if (cls == BCLASS_CUBE && !stop_at_water) {
+            const uint16_t *lt = craft_block_texture(blk, face);
+            int tu = (int)(u * CRAFT_TEX_SIZE), tv = (int)(v * CRAFT_TEX_SIZE);
+            if (tu < 0) tu = 0; else if (tu >= CRAFT_TEX_SIZE) tu = CRAFT_TEX_SIZE - 1;
+            if (tv < 0) tv = 0; else if (tv >= CRAFT_TEX_SIZE) tv = CRAFT_TEX_SIZE - 1;
+            if (lt[tv * CRAFT_TEX_SIZE + tu] == CRAFT_CUTOUT_KEY) continue;
+        }
+
+        PROF_INC(craft_prof_hits);
+        h.hit = true;
+        h.bx = vx; h.by = vy; h.bz = vz;
+        h.fx = prev_vx; h.fy = prev_vy; h.fz = prev_vz;
+        h.face = face;
+        h.blk = blk;
+        h.t = t;
+        h.u = u; h.v = v;
         return h;
     }
     PROF_INC(craft_prof_maxed);   /* loop exhausted without a solid hit */
@@ -645,6 +852,15 @@ void craft_render_begin(const CraftCamera *cam) {
             const uint8_t *srow = &sh[lz * CRAFT_WORLD_X];
             for (int lx = 0; lx < CRAFT_WORLD_X; lx++) {
                 int v = srow[lx];
+                /* skyheight excludes non-sky-blocking decoration (flowers
+                 * / tall grass sit one cell above the surface). Bump the
+                 * coarse top to cover such a cell so the empty-space skip
+                 * doesn't jump the ray clean past it. One extra read per
+                 * column — cheap vs the steps the skip saves. */
+                if (v + 1 < CRAFT_WORLD_Y &&
+                    craft_world_blocks[((v + 1) * CRAFT_WORLD_Z + lz)
+                                       * CRAFT_WORLD_X + lx] != BLK_AIR)
+                    v += 1;
                 if (v > mx) mx = v;
                 int ci = crow + (lx >> CM_SHIFT);
                 if (v > s_cmax[ci]) s_cmax[ci] = (uint8_t)v;
@@ -924,15 +1140,27 @@ void craft_render_strip(const CraftCamera *cam, uint16_t *fb,
                 }
                 /* Biome tint — grass tops and all leaf faces blend
                  * toward the column's biome colour (swamp murky,
-                 * taiga cold, etc.). Grass sides stay dirt-coloured. */
-                if (h.blk == BLK_LEAVES ||
-                    (h.blk == BLK_GRASS && h.face == FACE_PY)) {
+                 * taiga cold, etc.). On grass SIDES only the green rim
+                 * texels are tinted (g dominant) so the dirt band stays
+                 * brown — keeps the block's recolour consistent on all
+                 * faces, not just the top. */
+                bool grass_top  = (h.blk == BLK_GRASS && h.face == FACE_PY);
+                bool grass_side = (h.blk == BLK_GRASS && h.face != FACE_PY);
+                if (h.blk == BLK_LEAVES || h.blk == BLK_TALL_GRASS ||
+                    grass_top || grass_side) {
                     int blx = h.fx - craft_world_origin_x;
                     int blz = h.fz - craft_world_origin_z;
                     if ((unsigned)blx < CRAFT_WORLD_X &&
                         (unsigned)blz < CRAFT_WORLD_Z) {
-                        c = biome_tint(c, s_biome_tint[
-                            craft_world_biome[blz * CRAFT_WORLD_X + blx]]);
+                        uint16_t tgt = s_biome_tint[
+                            craft_world_biome[blz * CRAFT_WORLD_X + blx]];
+                        bool do_tint = !grass_side;
+                        if (grass_side) {
+                            /* Tint only grassy (green-dominant) texels. */
+                            int gg = (c >> 5) & 0x3F, rr = (c >> 11) & 0x1F, bb = c & 0x1F;
+                            do_tint = ((gg >> 1) > rr && (gg >> 1) >= bb);
+                        }
+                        if (do_tint) c = biome_tint(c, tgt);
                     }
                 }
                 /* Sky vs cave brightness, with torch overlay.

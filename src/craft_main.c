@@ -588,6 +588,12 @@ static void handle_menu_result(CraftMenuResult r) {
             craft_menu_toast(on ? "Far LOD ON" : "Far LOD OFF");
             break;
         }
+        case CRAFT_MENU_RESULT_GROUND_COVER: {
+            bool on = !craft_render_get_groundcover();
+            craft_render_set_groundcover(on);
+            craft_menu_toast(on ? "Ground cover ON" : "Ground cover OFF");
+            break;
+        }
         case CRAFT_MENU_RESULT_INTERLACE: {
             bool on = !craft_render_get_interlace();
             craft_render_set_interlace(on);
@@ -938,4 +944,38 @@ void craft_main_draw_hud(int fps) {
 
 uint32_t craft_main_seed(void) { return s_seed; }
 const CraftPlayer *craft_main_player(void) { return &s_player; }
+
+/* Mouse-look hook for the host build: add yaw/pitch deltas (radians)
+ * straight to the player camera. The device has no pointer, so this is
+ * unused there; the host feeds relative mouse motion here each frame
+ * (with the DPAD_STRAFE scheme handling WASD movement), giving proper
+ * FPS-style look. Pitch is clamped to the same ±85° the player tick uses. */
+void craft_main_look(float dyaw, float dpitch) {
+    s_player.cam.yaw   += dyaw;
+    s_player.cam.pitch += dpitch;
+    const float pmax = 85.0f * 3.14159265f / 180.0f;
+    if (s_player.cam.pitch >  pmax) s_player.cam.pitch =  pmax;
+    if (s_player.cam.pitch < -pmax) s_player.cam.pitch = -pmax;
+}
+
+/* Host-only mouse-look sensitivity multiplier (1.0 = default). Adjusted
+ * by the "Mouse sens" menu slider; the host multiplies its base
+ * radians-per-pixel by this. Not persisted — a host dev convenience. */
+static float s_mouse_sens = 1.0f;
+float craft_main_mouse_sens(void) { return s_mouse_sens; }
+void  craft_main_set_mouse_sens(float s) {
+    if (s < 0.2f) s = 0.2f; else if (s > 3.0f) s = 3.0f;
+    s_mouse_sens = s;
+}
+
+/* Host hotbar selection (Minecraft-style mouse wheel + number keys). The
+ * device cycles the hotbar with a MENU+LB/RB chord; the host drives the
+ * index directly here instead. cycle(±1) wraps; select(n) jumps. */
+void craft_main_hotbar_cycle(int dir) {
+    int n = CRAFT_HOTBAR_SLOTS;
+    s_player.hotbar_idx = (s_player.hotbar_idx + (dir % n) + n) % n;
+}
+void craft_main_hotbar_select(int slot) {
+    if (slot >= 0 && slot < CRAFT_HOTBAR_SLOTS) s_player.hotbar_idx = slot;
+}
 bool craft_main_dirty(void) { return craft_world_dirty != 0; }
