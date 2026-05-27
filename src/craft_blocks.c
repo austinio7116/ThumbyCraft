@@ -495,7 +495,7 @@ static void glass_pattern(uint16_t *dst, uint32_t seed) {
  * "fancy leaves"). Toroidally wrapped so adjacent leaf blocks tile
  * seamlessly. Leaves are biome-tinted at render, so the base greens
  * just need contrast. CRAFT_LEAF_FILL = % of grid cells that get a leaf. */
-#define CRAFT_LEAF_FILL 90
+#define CRAFT_LEAF_FILL 100
 static inline uint32_t leaf_hash(int a, int b) {
     uint32_t n = (uint32_t)(a * 73856093) ^ (uint32_t)(b * 19349663);
     n ^= n >> 13; n *= 0x9E3779B1u; n ^= n >> 16; return n;
