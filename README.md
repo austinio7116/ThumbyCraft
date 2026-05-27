@@ -42,6 +42,53 @@ drifting clouds  ·  flash-backed worlds  ·  280 MHz dual-core M33 tile-stealin
 
 ---
 
+## What's new in 1.17
+
+A **biome-detail, structures & dungeons** release — the world is denser
+and there's somewhere to delve.
+
+**Cutout foliage & sprites.**
+- The raycaster now renders plants, vines, ladders, doors, trapdoors,
+  pressure pads and redstone wire as **see-through cutout textures**
+  inside the DDA itself, instead of post-pass cuboids — crisper and
+  cheaper. A **closed door blocks the ray** (it stops at the slab),
+  saving all the work behind it.
+- **See-through "fancy leaves"** — tree canopies have airy gaps you can
+  see sky/terrain through.
+- **Natural flowers** (tulip + daisy silhouettes, not lollipops),
+  retuned per-biome foliage greens, and **tinted grass sides**.
+- **Tall-grass tufts** come in three styles — light-tipped blades,
+  seed-heads, and shorter tufts — mixed per biome (seedy in warm/dry
+  savanna & desert, solid green in cooler/damp, dark in jungle).
+
+**Flowering jungle & blossom trees.**
+- **Dangling flower vines** hang as a curtain under jungle canopies,
+  with colourful blossoms (pink/red/purple/orange) along their length.
+- **Blossom trees** — some warm-climate trees bloom, their leaves
+  flecked pink/white/yellow/magenta over biome-tinted green.
+- **Palm trees** on warm beaches.
+
+**Forest skeleton forts.**
+- A rare **stone keep + walled compound** hidden deep in the forest,
+  with a loot chest in the keep. **Skeletons swarm it day and night** —
+  approach with care.
+
+**Underground roguelike dungeons.**
+- Stone/cobble **dungeon complexes near the lava** — rooms of varied
+  size linked by a mix of tight 1-wide and wider 2–3-wide corridors.
+- **Treasure chests** with rare/legendary loot reward the delve.
+- **Open 2×2 entrance shafts** punch up to the surface so dungeons are
+  discoverable and enterable.
+- **Skeletons, spiders and slimes** lair down there — they spawn more
+  often and more thickly underground (and never creepers in the deep).
+
+**Other.**
+- New **spawn**: you start at the world origin on the first solid ground
+  below — never in a treetop or a lake.
+- Raycaster moved into **SRAM** for a steadier framerate.
+
+---
+
 ## What's new in 1.16
 
 A performance + polish release — the chunk-load stutter is gone, the
