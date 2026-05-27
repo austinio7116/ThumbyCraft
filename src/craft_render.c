@@ -862,6 +862,7 @@ static void update_basis(const CraftCamera *cam) {
     s_col_basis_valid = true;
 }
 
+CRAFT_HOT
 void craft_render_begin(const CraftCamera *cam) {
     update_basis(cam);
     /* Light each face's base shade by current brightness. */
@@ -1032,6 +1033,7 @@ INLINE_HOT uint16_t cloud_overlay(uint16_t sky_c, Vec3 origin, Vec3 dir) {
     return (uint16_t)((r << 11) | (g << 5) | b);
 }
 
+CRAFT_HOT
 void craft_render_strip(const CraftCamera *cam, uint16_t *fb,
                         int y_start, int y_end) {
     bool underwater = false;
@@ -1181,7 +1183,7 @@ void craft_render_strip(const CraftCamera *cam, uint16_t *fb,
                 bool grass_top  = (h.blk == BLK_GRASS && h.face == FACE_PY);
                 bool grass_side = (h.blk == BLK_GRASS && h.face != FACE_PY);
                 if (h.blk == BLK_LEAVES || h.blk == BLK_TALL_GRASS ||
-                    grass_top || grass_side) {
+                    h.blk == BLK_PALM_LEAF || grass_top || grass_side) {
                     int blx = h.fx - craft_world_origin_x;
                     int blz = h.fz - craft_world_origin_z;
                     if ((unsigned)blx < CRAFT_WORLD_X &&

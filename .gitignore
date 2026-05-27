@@ -14,6 +14,7 @@ dist/
 # craft_atlas / craft_greens / craft_leaves) — regenerate, don't ship.
 *_sheet.png
 *_closeup.png
+*_test.png
 doortest.png
 forest_leaves.png
 

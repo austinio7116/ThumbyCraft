@@ -728,9 +728,9 @@ void craft_blocks_build_textures(void) {
     leaves_pattern(&craft_textures[(BLK_LEAVES * 3 + 1) * CRAFT_TEX_PIXELS], 0xACE);
     leaves_pattern(&craft_textures[(BLK_LEAVES * 3 + 2) * CRAFT_TEX_PIXELS], 0xACE);
 
-    /* PALM FROND — feathery vivid green cutout, NOT biome-tinted (so
-     * desert-beach palms stay green instead of going tan). Diagonal
-     * blade slits of magenta give it a pinnate, airy frond look. */
+    /* PALM FROND — feathery green cutout, 4-fold symmetric so it has no
+     * directional grain. Biome-tinted at render like other leaves, so a
+     * jungle palm reads vivid green and a savanna/desert one drier. */
     {
         const int S = CRAFT_TEX_SIZE;
         for (int f = 0; f < 3; f++) {
