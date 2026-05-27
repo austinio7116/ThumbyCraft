@@ -223,9 +223,11 @@ static void inv_rebuild_visible(const CraftPlayer *p) {
             b == BLK_DELAY_ON           ||
             b == BLK_DISPENSER_ON       ||
             b == BLK_TARGET_ON          ||
+            b == BLK_PALM_LEAF          ||
             b == BLK_REDSTONE_WIRE) {
             /* BLK_REDSTONE_WIRE also hidden because the inventory
-             * item is BLK_REDSTONE dust — wire is the placed form. */
+             * item is BLK_REDSTONE dust — wire is the placed form.
+             * Palm fronds are worldgen-only scenery. */
             continue;
         }
         /* Flowing-water levels L1..L7 are sim state, not items —

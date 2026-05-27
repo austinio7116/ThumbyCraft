@@ -946,6 +946,7 @@ void craft_player_tick(CraftPlayer *p, const CraftInput *in, float dt) {
                     else if (was == BLK_TRAPDOOR_ON)   dropped = BLK_TRAPDOOR_OFF;
                     else if (was == BLK_PISTON_ON)     dropped = BLK_PISTON_OFF;
                     else if (was == BLK_PISTON_ARM)    dropped = BLK_AIR;
+                    else if (was == BLK_PALM_LEAF)     dropped = BLK_AIR;  /* scenery */
                     else if (craft_is_lava_id((uint8_t)was)) dropped = BLK_AIR;   /* never pick up lava */
                     else if (was == BLK_GRAVEL) {
                         /* ~10% of gravel yields flint (the rest gravel).

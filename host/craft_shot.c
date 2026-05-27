@@ -74,6 +74,29 @@ int main(int argc, char **argv) {
         .yaw = 0.7f, .pitch = -0.32f, .fov = 1.4f
     };
 
+    /* PALMVIEW: scan the window for a palm trunk (wood directly on sand)
+     * nearest the centre and frame it at eye level. */
+    if (getenv("PALMVIEW")) {
+        int best = 1 << 30, pwx = 0, pwy = 0, pwz = 0; bool found = false;
+        for (int llz = 0; llz < CRAFT_WORLD_Z; llz++)
+            for (int llx = 0; llx < CRAFT_WORLD_X; llx++)
+                for (int y = 1; y < CRAFT_WORLD_Y - 8; y++) {
+                    int wx = craft_world_origin_x + llx, wz = craft_world_origin_z + llz;
+                    if (craft_world_get(wx, y, wz) == BLK_WOOD &&
+                        craft_world_get(wx, y - 1, wz) == BLK_SAND) {
+                        int d = (llx - CRAFT_WORLD_X/2)*(llx - CRAFT_WORLD_X/2) +
+                                (llz - CRAFT_WORLD_Z/2)*(llz - CRAFT_WORLD_Z/2);
+                        if (d < best) { best = d; pwx = wx; pwy = y; pwz = wz; found = true; }
+                        break;
+                    }
+                }
+        if (found) {
+            printf("palm at (%d,%d,%d)\n", pwx, pwy, pwz);
+            cam.pos.x = (float)pwx - 14.0f; cam.pos.y = (float)pwy + 4.0f;
+            cam.pos.z = (float)pwz + 0.5f; cam.yaw = 1.5708f; cam.pitch = 0.30f;
+        }
+    }
+
     /* DOORTEST: build a stone wall with a doorway + door, plus a trap-
      * door, right in front of an eye-level camera looking +Z. */
     if (getenv("DOORTEST")) {

@@ -728,6 +728,32 @@ void craft_blocks_build_textures(void) {
     leaves_pattern(&craft_textures[(BLK_LEAVES * 3 + 1) * CRAFT_TEX_PIXELS], 0xACE);
     leaves_pattern(&craft_textures[(BLK_LEAVES * 3 + 2) * CRAFT_TEX_PIXELS], 0xACE);
 
+    /* PALM FROND — feathery vivid green cutout, NOT biome-tinted (so
+     * desert-beach palms stay green instead of going tan). Diagonal
+     * blade slits of magenta give it a pinnate, airy frond look. */
+    {
+        const int S = CRAFT_TEX_SIZE;
+        for (int f = 0; f < 3; f++) {
+            uint16_t *t = &craft_textures[(BLK_PALM_LEAF * 3 + f) * CRAFT_TEX_PIXELS];
+            for (int y = 0; y < S; y++)
+                for (int x = 0; x < S; x++) {
+                    /* 4-fold symmetric so the frond has no directional
+                     * grain — fronds reading the same texture in every
+                     * arm direction then don't all "point" one way. */
+                    int fx = x < 8 ? x : 15 - x;
+                    int fy = y < 8 ? y : 15 - y;
+                    uint32_t h = (uint32_t)((fx + 1) * 73856093) ^
+                                 (uint32_t)((fy + 1) * 19349663);
+                    h ^= h >> 13; h *= 0x9E3779B1u; h ^= h >> 16;
+                    int g = 140 + (int)(h & 25);          /* 140..165 */
+                    if (((h >> 5) & 3) == 0)              /* ~25% airy gaps */
+                        t[y * S + x] = rgb565(255, 0, 255);
+                    else
+                        t[y * S + x] = rgb565(40, g, 46);
+                }
+        }
+    }
+
     /* WATER — blue stripes. */
     water_pattern(&craft_textures[(BLK_WATER * 3 + 0) * CRAFT_TEX_PIXELS], 0x10ADED);
     water_pattern(&craft_textures[(BLK_WATER * 3 + 1) * CRAFT_TEX_PIXELS], 0x10ADED);

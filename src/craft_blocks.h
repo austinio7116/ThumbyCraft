@@ -167,6 +167,7 @@ typedef enum {
     BLK_TALL_GRASS      = 99,   /* biome-tinted grass tuft */
     BLK_FLOWER_RED      = 100,  /* red bloom */
     BLK_FLOWER_YELLOW   = 101,  /* yellow bloom */
+    BLK_PALM_LEAF       = 102,  /* palm frond — cutout, NOT biome-tinted */
     BLK_COUNT
 } BlockId;
 

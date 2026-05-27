@@ -356,12 +356,17 @@ static bool is_cave(int x, int y, int z, uint32_t seed) {
  * dominated by tree-neighbour scans into background noise. */
 static bool tree_at(int x, int z, uint32_t seed) {
     uint32_t r = hash3(x, z, seed ^ 0xA1B2C3D4u);
-    /* Cheap pre-gate at the DENSEST biome rate (forest, ~1/32) so the
-     * per-biome decision below only runs for the few survivors — the
-     * climate noise stays out of the hot reject path. Every per-biome
-     * mask is a superset of these low bits, so the gate never drops a
-     * column a denser biome would have kept. */
+    /* Cheap pre-gate ~1/32 (keeps the climate noise out of the hot
+     * reject path; every per-biome mask is a superset of these bits). */
     if ((r & 0x1F) != 0) return false;
+    int hh = height_at(x, z, seed);
+    /* Warm-beach palms: shoreline sand (h at the waterline) in warm
+     * climates, ~1/64 of warm shoreline columns — scattered, not lined.
+     * Checked before the biome switch so a desert beach (otherwise
+     * "no trees") grows them. */
+    if (hh >= CRAFT_WATER_LEVEL && hh <= CRAFT_WATER_LEVEL + 1) {
+        return ((r & 0x3F) == 0) && temperature_at(x, z, seed) > 0.55f;
+    }
     CraftBiome b = craft_biome_at(x, z, seed);
     uint32_t mask;
     switch (b) {
@@ -376,8 +381,7 @@ static bool tree_at(int x, int z, uint32_t seed) {
         default:               mask = 0xFF; break;  /* ~1/256 — sparse */
     }
     if ((r & mask) != 0) return false;
-    int h = height_at(x, z, seed);
-    return h > CRAFT_WATER_LEVEL + 1;
+    return hh > CRAFT_WATER_LEVEL + 1;
 }
 
 typedef enum {
@@ -387,6 +391,7 @@ typedef enum {
     TREE_SWAMP_GIANT,    /* Swamp signature — 2×2 trunk, broad drooping canopy */
     TREE_JUNGLE,         /* Tall single trunk, layered crown, hanging vines */
     TREE_ACACIA,         /* Savanna — slanted trunk, flat wide canopy */
+    TREE_PALM,           /* Warm beaches — curved trunk, drooping fronds */
 } TreeType;
 
 /* Pick a tree shape per position deterministically, by biome:
@@ -395,6 +400,10 @@ typedef enum {
  *   Forest            → oak, ~⅓ large oak (lusher)
  *   Plains / other    → oak, ~¼ large oak */
 static TreeType tree_type_at(int x, int z, uint32_t seed) {
+    /* Beach columns (shoreline sand) grow palms — matches the warm-beach
+     * branch in tree_at. */
+    int h = height_at(x, z, seed);
+    if (h >= CRAFT_WATER_LEVEL && h <= CRAFT_WATER_LEVEL + 1) return TREE_PALM;
     CraftBiome b = craft_biome_at(x, z, seed);
     if (b == CBIOME_MOUNTAINS || b == CBIOME_TAIGA) return TREE_PINE;
     if (b == CBIOME_SWAMP) {
@@ -420,6 +429,19 @@ static TreeType tree_type_at(int x, int z, uint32_t seed) {
  * Deterministic on (x, z, seed). */
 static int tree_variant_at(int x, int z, uint32_t seed) {
     return (int)(hash3(x, z, seed ^ 0xBADBE1FFu) & 0xFF);
+}
+
+/* Palm lean: bias the variant's low 2 bits toward the lowest of the
+ * four neighbour columns (the sea), so beach palms lean out over the
+ * water. Upper bits keep the hash for per-frond length variation. */
+static int palm_variant_at(int x, int z, uint32_t seed) {
+    const int D = 3;
+    int best = height_at(x + D, z, seed), axis = 0, sgn = 0;     /* lean +X */
+    int h;
+    h = height_at(x - D, z, seed); if (h < best) { best = h; axis = 0; sgn = 1; }  /* -X */
+    h = height_at(x, z + D, seed); if (h < best) { best = h; axis = 1; sgn = 0; }  /* +Z */
+    h = height_at(x, z - D, seed); if (h < best) { best = h; axis = 1; sgn = 1; }  /* -Z */
+    return (tree_variant_at(x, z, seed) & ~3) | (axis ? 1 : 0) | (sgn ? 2 : 0);
 }
 
 /* Per-shape block lookup. Each function returns the tree block at the
@@ -733,6 +755,49 @@ static BlockId tree_block_acacia(int variant, int dx, int dz, int y, int trunk_b
     return BLK_AIR;
 }
 
+/* PALM — a tall trunk that curves/leans toward the water (lean
+ * direction comes from the variant, set by palm_variant_at), topped by
+ * long fronds that radiate out and droop. Fronds are BLK_PALM_LEAF
+ * (kept green, not biome-tinted) and step out-then-down so consecutive
+ * cells touch only diagonally — natural, un-blocky fronds. */
+static BlockId tree_block_palm(int variant, int dx, int dz, int y, int trunk_base) {
+    int trunk_y = trunk_base + 1;
+    const int H = 11;                      /* tall trunk */
+    int axis = variant & 1;
+    int sgn  = (variant & 2) ? -1 : 1;
+    int sdx  = axis ? 0 : sgn;             /* lean direction (toward water) */
+    int sdz  = axis ? sgn : 0;
+    int rel  = y - trunk_y;
+    /* Curved trunk: lean grows with height up to offset 3 at the tip. */
+    int loff = (rel <= 1) ? 0 : (rel <= 4) ? 1 : (rel <= 7) ? 2 : 3;
+    if (rel >= 0 && rel <= H) {
+        if (dx == loff * sdx && dz == loff * sdz) return BLK_WOOD;
+    }
+    /* Crown at the leaning tip (trunk offset 3). */
+    int tdx = dx - 3 * sdx, tdz = dz - 3 * sdz;
+    int adx = abs_i(tdx), adz = abs_i(tdz);
+    int cy  = y - (trunk_y + H);
+    if (adx <= 1 && adz <= 1 && cy == 0) return BLK_PALM_LEAF;   /* hub */
+    /* Long fronds: radiate out and droop. Cells step out-then-down so
+     * consecutive cells touch only diagonally — natural, un-blocky. */
+    int onaxis = (tdz == 0 && adx > 0) || (tdx == 0 && adz > 0);
+    int ondiag = (adx == adz && adx > 0);
+    if (onaxis) {
+        int d   = adx + adz;                              /* 1..5 */
+        int dir = (tdz == 0) ? (tdx > 0 ? 0 : 1) : (tdz > 0 ? 2 : 3);
+        int len = 4 + (int)((variant >> (dir + 2)) & 1);  /* 4 or 5 */
+        int droop = (d <= 2) ? 0 : (d == 3) ? -1 : (d == 4) ? -2 : -3;
+        if (d <= len && cy == droop) return BLK_PALM_LEAF;
+    } else if (ondiag) {
+        int d   = adx;                                    /* 1..4 */
+        int dir = 4 + (tdx > 0 ? 0 : 1) + (tdz > 0 ? 0 : 2);
+        int len = 3 + (int)((variant >> (dir % 6 + 1)) & 1);  /* 3 or 4 */
+        int droop = (d <= 1) ? 0 : (d == 2) ? -1 : (d == 3) ? -2 : -3;
+        if (d <= len && cy == droop) return BLK_PALM_LEAF;
+    }
+    return BLK_AIR;
+}
+
 static BlockId tree_block_at(TreeType t, int variant, int dx, int dz,
                              int y, int trunk_base) {
     switch (t) {
@@ -741,6 +806,7 @@ static BlockId tree_block_at(TreeType t, int variant, int dx, int dz,
         case TREE_SWAMP_GIANT: return tree_block_swamp_giant(variant, dx, dz, y, trunk_base);
         case TREE_JUNGLE:    return tree_block_jungle(variant, dx, dz, y, trunk_base);
         case TREE_ACACIA:    return tree_block_acacia(variant, dx, dz, y, trunk_base);
+        case TREE_PALM:      return tree_block_palm(variant, dx, dz, y, trunk_base);
         case TREE_OAK:
         default:             return tree_block_oak(dx, dz, y, trunk_base);
     }
@@ -1504,7 +1570,8 @@ BlockId craft_gen_block_at(int x, int y, int z, uint32_t seed) {
             if (!tree_at(tx, tz, seed)) continue;
             int th = height_at(tx, tz, seed);
             TreeType tt = tree_type_at(tx, tz, seed);
-            int tv = tree_variant_at(tx, tz, seed);
+            int tv = (tt == TREE_PALM) ? palm_variant_at(tx, tz, seed)
+                                       : tree_variant_at(tx, tz, seed);
             BlockId b = tree_block_at(tt, tv, -dx, -dz, y, th);
             if (b != BLK_AIR) return b;
         }
@@ -1694,6 +1761,7 @@ static int tree_radius(TreeType t) {
     switch (t) {
         case TREE_SWAMP_GIANT: return 7;   /* wide spreading canopy */
         case TREE_ACACIA:      return 5;   /* slant offset + flat disc */
+        case TREE_PALM:        return 8;   /* lean offset 3 + frond reach 5 */
         case TREE_OAK_LARGE:   return 3;   /* branch tip + leaf ring */
         case TREE_JUNGLE:      return 2;
         case TREE_PINE:        return 2;
@@ -1734,7 +1802,8 @@ static void stamp_region(uint32_t seed, int tlx0, int tlx1,
             if (!tree_at(wx, wz, seed)) continue;
             int th        = height_at(wx, wz, seed);
             TreeType tt   = tree_type_at(wx, wz, seed);
-            int tv        = tree_variant_at(wx, wz, seed);
+            int tv        = (tt == TREE_PALM) ? palm_variant_at(wx, wz, seed)
+                                              : tree_variant_at(wx, wz, seed);
             int R         = tree_radius(tt);
             for (int dz = -R; dz <= R; dz++) {
                 for (int dx = -R; dx <= R; dx++) {

@@ -353,6 +353,7 @@ enum {
 };
 static const uint8_t s_block_class[BLK_COUNT] = {
     [BLK_LEAVES]             = BCLASS_CUBE,
+    [BLK_PALM_LEAF]          = BCLASS_CUBE,
     [BLK_TALL_GRASS]         = BCLASS_CROSS,
     [BLK_FLOWER_RED]         = BCLASS_CROSS,
     [BLK_FLOWER_YELLOW]      = BCLASS_CROSS,
