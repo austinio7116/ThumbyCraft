@@ -163,10 +163,10 @@ int craft_gen_force_biome = -1;
 static CraftBiome biome_classify(float m, float t, float hu) {
     if (craft_gen_force_biome >= 0) return (CraftBiome)craft_gen_force_biome;
     if (m > 0.5f) return CBIOME_MOUNTAINS;          /* elevation wins */
-    if (t < 0.38f) return CBIOME_TAIGA;             /* cold */
-    if (t > 0.66f) {                                 /* hot band */
-        if (hu > 0.60f) return CBIOME_JUNGLE;        /* hot + wet */
-        if (hu < 0.33f) return CBIOME_DESERT;        /* hot + dry */
+    if (t < 0.35f) return CBIOME_TAIGA;             /* cold */
+    if (t > 0.58f) {                                 /* hot band (widened) */
+        if (hu > 0.58f) return CBIOME_JUNGLE;        /* hot + wet */
+        if (hu < 0.40f) return CBIOME_DESERT;        /* hot + dry */
         return CBIOME_SAVANNA;                        /* hot + moderate */
     }
     if (hu > 0.62f) return CBIOME_SWAMP;             /* temperate + wet */
@@ -711,7 +711,6 @@ static BlockId tree_block_swamp_giant(int variant, int dx, int dz,
  * not a giant. Smaller and rounder than the giant's flat umbrella.
  * Canopy reach = 2. */
 static BlockId tree_block_jungle(int variant, int dx, int dz, int y, int trunk_base) {
-    (void)variant;
     int trunk_y = trunk_base + 1;
     int top = trunk_y + 8;             /* 9-tall trunk */
     if (dx == 0 && dz == 0 && y >= trunk_y && y <= top) return BLK_WOOD;
@@ -739,7 +738,12 @@ static BlockId tree_block_jungle(int variant, int dx, int dz, int y, int trunk_b
         lh ^= lh >> 13; lh *= 0x9E3779B1u; lh ^= lh >> 15;
         int len = 1 + (int)(lh % 6u);          /* 1..6 cells */
         if ((lh & 3u) == 0u && ady >= -2 - len)
-            return (((dx * 7 + dz * 13) & 3) == 0) ? BLK_FLOWER_VINE : BLK_VINE;
+            /* Flower choice mixes in the per-tree variant so it varies
+             * tree-to-tree (without it, the choice was a fixed function
+             * of (dx,dz) and no tree ever flowered). A whole run still
+             * shares one type (variant + dx,dz constant down the run). */
+            return (((lh ^ ((uint32_t)variant * 0x9E3779B1u)) & 3u) == 0u)
+                   ? BLK_FLOWER_VINE : BLK_VINE;
     }
     return BLK_AIR;
 }
@@ -1575,33 +1579,6 @@ static BlockId hut_block_local(int dx, int dz, int dy, int dir, int type) {
     return BLK_AIR;
 }
 
-/* If world cell (x, y, z) lies inside any hut footprint, set *covered
- * and return the hut block (which may be AIR for interior/door). The
- * 5×5 scan in (dx, dz) is small enough to run per-cell from
- * craft_gen_block_at without measurable cost. */
-static BlockId hut_cell(int x, int y, int z, uint32_t seed, bool *covered) {
-    *covered = false;
-    /* Scan the maximum 7×7 bounding box so any building type can be
-     * detected. Per-type W×H culling then drops candidates whose
-     * actual footprint doesn't cover (x, z). */
-    for (int dz = -(HUT_H - 1); dz <= 0; dz++) {
-        for (int dx = -(HUT_W - 1); dx <= 0; dx++) {
-            int hx = x + dx, hz = z + dz;
-            if (!hut_origin_at(hx, hz, seed)) continue;
-            int type = hut_type(hx, hz, seed);
-            int W = hut_w(type), H = hut_h(type);
-            int lx = -dx, lz = -dz;
-            if (lx >= W || lz >= H) continue;        /* outside this type's footprint */
-            int gy = hut_floor_y(hx, hz, seed);
-            int dy = y - gy;
-            if (dy <= 0 || dy > hut_top(type)) continue;
-            *covered = true;
-            int dir = hut_door_dir(hx, hz, seed);
-            return hut_block_local(lx, lz, dy, dir, type);
-        }
-    }
-    return BLK_AIR;
-}
 
 /* --- Underground roguelike dungeons ------------------------------
  *
@@ -1689,18 +1666,6 @@ static int dungeon_column(int wx, int wz, uint32_t seed, bool *chest) {
         return 2;
     return 0;
 }
-/* Per-cell variant (for craft_gen_block_at): 0 none, 1 air, 2 cobble,
- * 3 chest. */
-static int dungeon_cell(int wx, int y, int wz, uint32_t seed) {
-    if (y < DUN_FLOOR || y > DUN_CEIL) return 0;
-    bool chest;
-    int dk = dungeon_column(wx, wz, seed, &chest);
-    if (dk == 0) return 0;
-    if (dk == 2) return 2;                          /* side wall */
-    if (y == DUN_FLOOR || y == DUN_CEIL) return 2;  /* floor / ceiling */
-    if (chest && y == DUN_FLOOR + 1) return 3;      /* treasure */
-    return 1;                                       /* air */
-}
 /* Some rooms (~1/4) open a 1-wide vertical shaft to the surface, capped
  * by a trapdoor in an 8-block stone surround — the dungeon's
  * discoverable hatch entrance/exit. Role of column (wx,wz): 0 none,
@@ -1730,73 +1695,6 @@ bool craft_gen_is_dungeon_chest(int wx, int wy, int wz, uint32_t seed) {
     return chest;
 }
 
-BlockId craft_gen_block_at(int x, int y, int z, uint32_t seed) {
-    /* Only Y is bounded — X and Z extend infinitely. */
-    if ((unsigned)y >= CRAFT_WORLD_Y) return BLK_AIR;
-    (void)x;
-
-    int h = height_at(x, z, seed);
-
-    /* Dungeon entrance hatch — a trapdoor at the surface over a 1-wide
-     * well down to the room, set in an 8-block stone surround. */
-    if (DUN_CEIL < h - 3) {
-        int role = dun_shaft_role(x, z, seed);
-        if (role == 1) {                            /* centre: well + lid */
-            if (y == h) return BLK_TRAPDOOR_OFF;
-            if (y >= DUN_CEIL && y < h) return BLK_AIR;
-        } else if (role == 2 && y == h) {           /* stone frame */
-            return BLK_STONE;
-        }
-    }
-
-    /* Underground / surface columns. Caves carve out the deep stone
-     * layer only — never touches the topmost dirt or surface block,
-     * so the silhouette of the world from above is unaffected. The
-     * y>=2 floor keeps a stone "bedrock" layer below caves, and the
-     * y<h-8 ceiling keeps the top 5 cells of stone solid so caves
-     * stay genuinely subterranean (matches craft_gen_column). */
-    if (y <  h - 3) {
-        int dc = dungeon_cell(x, y, z, seed);
-        if (dc == 1) return BLK_AIR;
-        if (dc == 2) return BLK_COBBLE;
-        if (dc == 3) return BLK_CHEST;
-        if (y >= 2 && y < h - 8 && is_cave(x, y, z, seed)) return BLK_AIR;
-        return BLK_STONE;
-    }
-    if (y <  h)     return BLK_DIRT;
-    if (y == h) {
-        if (h <= CRAFT_WATER_LEVEL + 1) return BLK_SAND;
-        return BLK_GRASS;
-    }
-    /* Above ground but below water: water or air. */
-    if (y <= CRAFT_WATER_LEVEL) return BLK_WATER;
-
-    /* Hut check FIRST so walls/interior override any tree blocks that
-     * would otherwise land in the footprint. Hut floor (y=gy) is not
-     * "covered" — that's the natural surface. */
-    {
-        bool covered;
-        BlockId hb = hut_cell(x, y, z, seed, &covered);
-        if (covered) return hb;
-    }
-
-    /* Tree check — scan a 7×7 neighbourhood of columns. */
-    for (int dz = -3; dz <= 3; dz++) {
-        for (int dx = -3; dx <= 3; dx++) {
-            int tx = x + dx, tz = z + dz;
-            if (!tree_at(tx, tz, seed)) continue;
-            int th = height_at(tx, tz, seed);
-            TreeType tt = tree_type_at(tx, tz, seed);
-            int tv = (tt == TREE_PALM) ? palm_variant_at(tx, tz, seed)
-                                       : tree_variant_at(tx, tz, seed);
-            BlockId b = tree_block_at(tt, tv, -dx, -dz, y, th);
-            if (b == BLK_LEAVES && tree_blossoms_at(tx, tz, seed))
-                b = BLK_BLOSSOM_LEAVES;
-            if (b != BLK_AIR) return b;
-        }
-    }
-    return BLK_AIR;
-}
 
 void craft_gen_column(int wx, int wz, uint32_t seed,
                       uint8_t out[/* CRAFT_WORLD_Y */]) {
@@ -2058,8 +1956,22 @@ static void stamp_region(uint32_t seed, int tlx0, int tlx1,
                     int clx = cwx - ox, clz = cwz - oz;
                     if ((unsigned)clx >= CRAFT_WORLD_X) continue;
                     if ((unsigned)clz >= CRAFT_WORLD_Z) continue;
+                    /* Broadleaf trees bloom — oak, large oak, acacia,
+                     * jungle and swamp giants. Never conifers (pine) or
+                     * palms. Jungle trees double up: canopy blossoms AND
+                     * dangling flower-vines. */
+                    bool blossom = tree_blossoms_at(wx, wz, seed) &&
+                                   (tt == TREE_OAK   || tt == TREE_OAK_LARGE ||
+                                    tt == TREE_ACACIA || tt == TREE_JUNGLE  ||
+                                    tt == TREE_SWAMP_GIANT);
                     for (int y = th + 1; y < CRAFT_WORLD_Y; y++) {
                         BlockId b = tree_block_at(tt, tv, dx, dz, y, th);
+                        /* Only a few scattered canopy cells bloom (~1/6),
+                         * so a blossom tree is mostly green with a sprinkle
+                         * of flowers rather than a solid wall of bloom. */
+                        if (b == BLK_LEAVES && blossom &&
+                            (hash3(cwx, y, cwz) % 6u) == 0u)
+                            b = BLK_BLOSSOM_LEAVES;
                         if (b == BLK_AIR) continue;
                         int idx = (y * CRAFT_WORLD_Z + clz) * CRAFT_WORLD_X + clx;
                         if (craft_world_blocks[idx] != BLK_AIR) continue;
@@ -2125,18 +2037,6 @@ void craft_gen_stamp_features_region(uint32_t seed,
     stamp_region(seed, tlx0, tlx1, tlz0, tlz1);
 }
 
-void craft_gen_world(uint32_t seed) {
-    craft_world_clear();
-    for (int y = 0; y < CRAFT_WORLD_Y; y++) {
-        for (int z = 0; z < CRAFT_WORLD_Z; z++) {
-            for (int x = 0; x < CRAFT_WORLD_X; x++) {
-                BlockId b = craft_gen_block_at(x, y, z, seed);
-                if (b != BLK_AIR) craft_world_set(x, y, z, b);
-            }
-        }
-    }
-    craft_world_dirty = 0;
-}
 
 /* Blocks a spawn plumb-line passes straight through when seeking the
  * ground surface — air, tree canopy/trunk and ground plants are not

@@ -842,11 +842,6 @@ bool craft_world_end_batch(void) {
     return torch;
 }
 
-BlockId craft_world_block_at(int wx, int wy, int wz, uint32_t seed) {
-    int m = mod_get(wx, wy, wz);
-    if (m >= 0) return (BlockId)m;
-    return craft_gen_block_at(wx, wy, wz, seed);
-}
 
 /* --- Lifecycle --------------------------------------------------- */
 void craft_world_init(void) {

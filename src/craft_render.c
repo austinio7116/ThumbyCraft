@@ -296,6 +296,9 @@ static const uint16_t s_leaf_bloom[4] = {
     RGB565C(245, 220,  90),   /* yellow  */
     RGB565C(230, 110, 210),   /* magenta */
 };
+/* Acacia (savanna) blossoms are always red. */
+static const uint16_t s_acacia_bloom = RGB565C(220, 64, 56);
+#define CRAFT_BIOME_SAVANNA 7   /* index into craft_world_biome */
 
 #define BIOME_TINT_T 165       /* ~64% blend — clearly visible */
 
@@ -1264,13 +1267,31 @@ void craft_render_strip(const CraftCamera *cam, uint16_t *fb,
                             (unsigned)blz < CRAFT_WORLD_Z)
                             c = biome_tint(c, s_biome_tint[
                                 craft_world_biome[blz * CRAFT_WORLD_X + blx]]);
-                    } else {
+                    } else if (h.blk == BLK_FLOWER_VINE) {
+                        /* Vines keep per-cluster colour variety. */
                         uint32_t bh = (uint32_t)((h.bx >> 2) * 73856093)
                                     ^ (uint32_t)((h.by >> 2) * 19349663)
                                     ^ (uint32_t)((h.bz >> 2) * 83492791);
                         bh ^= bh >> 13; bh *= 0x9E3779B1u; bh ^= bh >> 16;
-                        c = (h.blk == BLK_FLOWER_VINE ? s_vine_bloom
-                                                      : s_leaf_bloom)[bh & 3];
+                        c = s_vine_bloom[bh & 3];
+                    } else {
+                        /* Blossom leaves: acacia (savanna) is always red;
+                         * other blossom trees take ONE colour per tree
+                         * (coarse 8-block region hash, no Y → whole tree
+                         * shares it). */
+                        int blx = h.bx - craft_world_origin_x;
+                        int blz = h.bz - craft_world_origin_z;
+                        int biome = ((unsigned)blx < CRAFT_WORLD_X &&
+                                     (unsigned)blz < CRAFT_WORLD_Z)
+                                  ? craft_world_biome[blz * CRAFT_WORLD_X + blx] : 0;
+                        if (biome == CRAFT_BIOME_SAVANNA) {
+                            c = s_acacia_bloom;
+                        } else {
+                            uint32_t bh = (uint32_t)((h.bx >> 3) * 73856093)
+                                        ^ (uint32_t)((h.bz >> 3) * 83492791);
+                            bh ^= bh >> 13; bh *= 0x9E3779B1u; bh ^= bh >> 16;
+                            c = s_leaf_bloom[bh & 3];
+                        }
                     }
                 }
                 /* Sky vs cave brightness, with torch overlay.

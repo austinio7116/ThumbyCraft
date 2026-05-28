@@ -20,22 +20,14 @@
  * in the deep caverns (well under the water table). */
 #define CRAFT_LAVA_LEVEL  10
 
-/* Fill the world buffer with freshly-generated terrain from `seed`. */
-void craft_gen_world(uint32_t seed);
-
 /* Suggested player spawn point — picks a grass tile near world centre
- * a few blocks above the ground. Call after craft_gen_world. */
+ * a few blocks above the ground. Call after the world is generated. */
 Vec3 craft_gen_spawn(void);
 
 /* Nearest forest skeleton-fort origin to (px,pz) within scan range —
  * fills courtyard centre + floor y. Returns false if none near. */
 bool craft_gen_nearest_fort(int px, int pz, uint32_t seed,
                             int *ox, int *oy, int *oz);
-
-/* Pure function — what *would* block (x, y, z) be in a fresh world
- * for `seed`? Used by the save layer to diff the current world
- * against the base without holding a second world buffer in SRAM. */
-BlockId craft_gen_block_at(int x, int y, int z, uint32_t seed);
 
 /* Fast column generator — fills `out[CRAFT_WORLD_Y]` with the gen
  * values for column (wx, wz). Used by craft_world's window_load to

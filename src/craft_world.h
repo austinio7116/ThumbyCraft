@@ -177,9 +177,4 @@ int     craft_world_mod_get(int wx, int wy, int wz);
  * non-pool positions. */
 int     craft_world_wipe_water_mods(void);
 
-/* Mod-aware block lookup — used by the window shift path. Returns
- * the override block if (wx, wy, wz) is in the mod table, otherwise
- * the procedural value from craft_gen_block_at(seed). */
-BlockId craft_world_block_at(int wx, int wy, int wz, uint32_t seed);
-
 #endif
