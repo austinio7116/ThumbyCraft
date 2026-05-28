@@ -42,6 +42,53 @@ drifting clouds  ·  flash-backed worlds  ·  280 MHz dual-core M33 tile-stealin
 
 ---
 
+## What's new in 1.17.1
+
+> ℹ️ Drop-in on 1.17 — no FAT reformat, no save-format change. Existing
+> worlds keep your edits and pick up the rebalanced biomes as terrain
+> regenerates around you.
+
+A **polish** release — two bugs fixed in the 1.17 content, biomes
+rebalanced so the rare ones actually show up, and blossoms toned down
+so a blooming tree is a sprinkle of flowers rather than a wall of
+bloom.
+
+**Bug fixes.**
+- **Blossom trees now actually appear.** The leaves → blossom
+  conversion was missing from the live world-fill path, so blossom-leaf
+  blocks never made it into the world. Fixed — warm broadleaf trees
+  now bloom.
+- **Flowering jungle vines now flower.** The flower-vs-plain choice was
+  a fixed function of the tree-relative (dx, dz), identical for every
+  jungle tree, so no run ever flowered. Now seeded with the per-tree
+  variant; runs vary tree-to-tree.
+
+**Biome rebalance.**
+- **Jungle and desert** were vanishingly rare before (~0.9 % and ~1.9 %
+  of the world). They're now ~7 % and ~10 %, so you actually find them.
+  Taiga drops from ~20 % to ~15 % to make room; plains, forest,
+  mountains and swamp are essentially unchanged.
+
+**Blossom tuning.**
+- **Sparse blossom cells** — only ~1/6 of a blossom tree's canopy cells
+  bloom now (was every cell), so a blossom tree is mostly green with a
+  sprinkle of flowers.
+- **Acacia (savanna) blossoms are red** — distinct from the temperate
+  broadleaf palette.
+- **One bloom colour per tree** (was per cluster) — a coarse per-tree
+  hash, so a whole tree shares one of pink, white, yellow or magenta.
+- **Bloom whitelist:** oak, large oak, acacia, jungle and swamp giants.
+  **Pine no longer blossoms** (it kept slipping through because
+  mountains are gated by elevation, not temperature). Palm stays
+  exempt — it uses fronds.
+
+**Internal.**
+- Removed a legacy per-cell generator path that had drifted from the
+  live column-and-stamp path — eliminating the drift footgun that
+  caused both bugs above. Single source of truth for worldgen now.
+
+---
+
 ## What's new in 1.17
 
 > ℹ️ **Saves carry over.** The save format is unchanged (the loader
