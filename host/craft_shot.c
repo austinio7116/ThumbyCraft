@@ -119,6 +119,33 @@ int main(int argc, char **argv) {
         return 0;
     }
 
+    /* BLKCOUNT: count blossom-leaf + flower-vine cells in the window. */
+    if (getenv("BLKCOUNT")) {
+        long blossom = 0, fvine = 0, leaves = 0;
+        for (int y = 0; y < CRAFT_WORLD_Y; y++)
+        for (int z = 0; z < CRAFT_WORLD_Z; z++)
+        for (int x = 0; x < CRAFT_WORLD_X; x++) {
+            BlockId b = craft_world_get(craft_world_origin_x+x, y, craft_world_origin_z+z);
+            if (b == BLK_BLOSSOM_LEAVES) blossom++;
+            else if (b == BLK_FLOWER_VINE) fvine++;
+            else if (b == BLK_VINE) leaves++;  /* reuse leaves col for VINE */
+        }
+        printf("blossom=%ld fvine=%ld vine=%ld\n", blossom, fvine, leaves);
+        return 0;
+    }
+
+    /* BIOMEHIST: per-biome cell counts in the window (natural biome). */
+    if (getenv("BIOMEHIST")) {
+        long c[8] = {0};
+        for (int i = 0; i < CRAFT_WORLD_X * CRAFT_WORLD_Z; i++) {
+            uint8_t b = craft_world_biome[i];
+            if (b < 8) c[b]++;
+        }
+        printf("%ld %ld %ld %ld %ld %ld %ld %ld\n",
+               c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]);
+        return 0;
+    }
+
     /* SHAFTPROBE: find a dungeon trapdoor and print the vertical column
      * through it + the 3×3 surface surround. */
     if (getenv("SHAFTPROBE")) {
