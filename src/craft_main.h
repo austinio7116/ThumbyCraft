@@ -122,6 +122,10 @@ void        craft_main_hotbar_select(int slot);
 float       craft_main_mouse_sens(void);
 void        craft_main_set_mouse_sens(float s);
 
+/* Player's Invert-Y preference (the "Invert Y" menu toggle). Lets a
+ * platform's free-look (host mouse / Android touch) match the setting. */
+bool        craft_main_get_invert_y(void);
+
 /* True if the world has unsaved changes. */
 bool craft_main_dirty(void);
 

@@ -1,0 +1,16 @@
+# Build artifacts
+app/build/
+app/.cxx/
+build/
+.gradle/
+
+# Machine-specific SDK path
+local.properties
+
+# Vendored SDL2 source — not committed (large). Populate with:
+#   git clone --depth 1 --branch SDL2 https://github.com/libsdl-org/SDL.git app/jni/SDL
+app/jni/SDL/
+
+# IDE
+.idea/
+*.iml

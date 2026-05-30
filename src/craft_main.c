@@ -62,20 +62,27 @@ static bool     s_thumb_valid;
 
 static void capture_thumb_from_fb(void) {
     if (!s_fb) return;
-    /* 4×4 average down 128×128 → 32×32. RGB565 needs unpack/pack. */
+    /* Average the centred CRAFT_FB_H-square region down to 32×32. On the
+     * square device x_off is 0 and blk is 4 — the original 4×4 → 32×32. On a
+     * wider framebuffer (Android) it crops the centre so the square thumbnail
+     * stays undistorted instead of capturing only the left edge. */
+    int side  = CRAFT_FB_H;
+    int x_off = (CRAFT_FB_W - side) / 2;
+    int blk   = side / CRAFT_THUMB_W;
+    int n     = blk * blk;
     for (int y = 0; y < CRAFT_THUMB_H; y++) {
         for (int x = 0; x < CRAFT_THUMB_W; x++) {
-            int sx = x * 4, sy = y * 4;
+            int sx = x_off + x * blk, sy = y * blk;
             int r = 0, g = 0, b = 0;
-            for (int dy = 0; dy < 4; dy++) {
-                for (int dx = 0; dx < 4; dx++) {
+            for (int dy = 0; dy < blk; dy++) {
+                for (int dx = 0; dx < blk; dx++) {
                     uint16_t c = s_fb[(sy + dy) * CRAFT_FB_W + (sx + dx)];
                     r += (c >> 11) & 0x1F;
                     g += (c >> 5)  & 0x3F;
                     b +=  c        & 0x1F;
                 }
             }
-            r >>= 4; g >>= 4; b >>= 4;
+            r /= n; g /= n; b /= n;
             s_thumb[y * CRAFT_THUMB_W + x] =
                 (uint16_t)((r << 11) | (g << 5) | b);
         }
@@ -959,6 +966,8 @@ void craft_main_look(float dyaw, float dpitch) {
     if (s_player.cam.pitch >  pmax) s_player.cam.pitch =  pmax;
     if (s_player.cam.pitch < -pmax) s_player.cam.pitch = -pmax;
 }
+
+bool craft_main_get_invert_y(void) { return s_player.invert_y; }
 
 /* Host-only mouse-look sensitivity multiplier (1.0 = default). Adjusted
  * by the "Mouse sens" menu slider; the host multiplies its base

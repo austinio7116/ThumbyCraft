@@ -23,8 +23,15 @@
 #include "craft_torches.h"   /* craft_torches_lookup_orient — repeater delay marker */
 #include <string.h>
 
+/* Raycaster reach. Defaults tuned for the RP2350; a more powerful host
+ * (e.g. the Android build) can override these at compile time to see
+ * further — steps must comfortably exceed the distance in block units. */
+#ifndef CRAFT_MAX_STEPS
 #define CRAFT_MAX_STEPS  64
+#endif
+#ifndef CRAFT_MAX_DIST
 #define CRAFT_MAX_DIST   60.0f
+#endif
 
 #ifdef CRAFT_PROFILE
 /* Profiling counters (host bench only; zero overhead in normal builds). */
@@ -88,17 +95,18 @@ static int ice_macro_q8(int fx, int fz) {
  * craft_hud_draw_hotbar after the strip. We skip raycasting under it
  * because nothing we render in those pixels can ever be seen.
  *
- * Geometry mirrors craft_hud_draw_hotbar:
- *   slot_w = 14, gap = 1, slots = 8
- *   total  = 8*14 + 7*1   = 119
- *   x0     = (128 - 119) / 2 = 4
- *   y0     = 128 - 14 - 1    = 113
- *   plate  = (x0 - 2, y0 - 1) size (total + 4, slot_w + 2)
- *          = (2, 112) size (123, 16)  → x ∈ [2,124], y ∈ [112,127]
+ * Geometry mirrors craft_hud_draw_hotbar and is derived from CRAFT_FB_W/H so
+ * it stays aligned with the centred hotbar at any framebuffer width (on the
+ * 128 device this is x ∈ [2,124], y ∈ [112,127]; on a wider Android FB it
+ * tracks the hotbar's true centre instead of leaving an unrendered corner):
+ *   total = 8*14 + 7*1 = 119
+ *   x0    = (CRAFT_FB_W - 119) / 2 ; plate spans (x0-2) .. (x0-2 + 122)
+ *   y0    = CRAFT_FB_H - 14 - 1    ; plate top = y0 - 1 = CRAFT_FB_H - 16
  */
-#define CRAFT_HUD_PLATE_X0   2
-#define CRAFT_HUD_PLATE_X1   124
-#define CRAFT_HUD_PLATE_Y0   112
+#define CRAFT_HUD_PLATE_TOTAL 119
+#define CRAFT_HUD_PLATE_X0   (((CRAFT_FB_W - CRAFT_HUD_PLATE_TOTAL) / 2) - 2)
+#define CRAFT_HUD_PLATE_X1   (CRAFT_HUD_PLATE_X0 + CRAFT_HUD_PLATE_TOTAL + 3)
+#define CRAFT_HUD_PLATE_Y0   (CRAFT_FB_H - 16)
 
 #define INLINE_HOT static inline __attribute__((always_inline))
 
@@ -894,7 +902,10 @@ static void update_basis(const CraftCamera *cam) {
         s_fwd.z * s_right.x - s_fwd.x * s_right.z,
         s_fwd.x * s_right.y - s_fwd.y * s_right.x);
     s_fov_tan_v = tanf(cam->fov * 0.5f);
-    s_fov_tan_h = s_fov_tan_v;   /* square framebuffer */
+    /* fov is vertical; widen the horizontal half-angle by the aspect ratio so
+     * pixels stay square. CRAFT_FB_W==CRAFT_FB_H (device) leaves this a no-op;
+     * a wide framebuffer (Android) gets a correctly wider horizontal view. */
+    s_fov_tan_h = s_fov_tan_v * ((float)CRAFT_FB_W / (float)CRAFT_FB_H);
 
     /* Precompute per-column horizontal ray. */
     for (int px = 0; px < CRAFT_FB_W; px++) {
@@ -1485,6 +1496,14 @@ void craft_render_frame(const CraftCamera *cam, uint16_t *fb) {
  * east/west position. Moon is the antipode. World convention: +X
  * east, +Y up, +Z south.
  */
+/* Z-buffer value at/above which a pixel counts as "sky" for celestial
+ * occlusion. The sky sentinel is 255; terrain clamps to 254. When the draw
+ * distance exceeds the 8-bit z-buffer range, far terrain also saturates to
+ * 254, so only a true 255 may show the sun/moon/stars (Android). When draw ==
+ * zbuf range (the RP2350) keep the original 254 far-edge — folds to a
+ * constant, so the device build is unchanged. */
+#define CRAFT_SKY_ZFLOOR ((CRAFT_MAX_DIST > CRAFT_MAX_DIST_FOR_ZBUF) ? 255 : 254)
+
 static void draw_disc(uint16_t *fb, int cx, int cy, int radius,
                       uint16_t core, uint16_t halo) {
     int r2 = radius * radius;
@@ -1498,7 +1517,7 @@ static void draw_disc(uint16_t *fb, int cx, int cy, int radius,
             int idx = y * CRAFT_FB_W + x;
             /* Sun/moon live at infinity — only paint over sky.
              * Anything closer (block, tree, mob) occludes them. */
-            if (craft_zbuf[idx] < 254) continue;
+            if (craft_zbuf[idx] < CRAFT_SKY_ZFLOOR) continue;
             int d2 = dx * dx + dy * dy;
             if (d2 <= r2)        fb[idx] = core;
             else if (d2 <= h2)   fb[idx] = halo;
@@ -1541,7 +1560,7 @@ void craft_render_celestials(const CraftCamera *cam, uint16_t *fb) {
         if (zf > 0.05f) {
             float xs = v3_dot(sun_dir, right) / zf;
             float ys = v3_dot(sun_dir, up)    / zf;
-            int   px = (int)(CRAFT_FB_W * 0.5f + xs * CRAFT_FB_W * 0.5f / tan_h);
+            int   px = (int)(CRAFT_FB_W * 0.5f + xs * CRAFT_FB_H * 0.5f / tan_h);
             int   py = (int)(CRAFT_FB_H * 0.5f - ys * CRAFT_FB_H * 0.5f / tan_h);
             /* Bright yellow with faint glow halo. */
             uint16_t core = rgb565(255, 230, 140);
@@ -1559,7 +1578,7 @@ void craft_render_celestials(const CraftCamera *cam, uint16_t *fb) {
         if (zf > 0.05f) {
             float xs = v3_dot(moon_dir, right) / zf;
             float ys = v3_dot(moon_dir, up)    / zf;
-            int   px = (int)(CRAFT_FB_W * 0.5f + xs * CRAFT_FB_W * 0.5f / tan_h);
+            int   px = (int)(CRAFT_FB_W * 0.5f + xs * CRAFT_FB_H * 0.5f / tan_h);
             int   py = (int)(CRAFT_FB_H * 0.5f - ys * CRAFT_FB_H * 0.5f / tan_h);
             /* Cool pale white with darker halo. */
             uint16_t core = rgb565(230, 230, 240);
@@ -1708,7 +1727,9 @@ void craft_render_stars(const CraftCamera *cam, uint16_t *fb) {
         fwd.z * right.x - fwd.x * right.z,
         fwd.x * right.y - fwd.y * right.x);
     float tan_h   = tanf(cam->fov * 0.5f);
-    float focal_h = (CRAFT_FB_W * 0.5f) / tan_h;
+    /* Horizontal focal uses FB_H too so square pixels survive a wide
+     * (non-square) framebuffer; on the square device FB_W==FB_H. */
+    float focal_h = (CRAFT_FB_H * 0.5f) / tan_h;
     float focal_v = (CRAFT_FB_H * 0.5f) / tan_h;
 
     for (int i = 0; i < STAR_COUNT; i++) {
@@ -1723,7 +1744,7 @@ void craft_render_stars(const CraftCamera *cam, uint16_t *fb) {
         if ((unsigned)py >= CRAFT_FB_H) continue;
         int idx = py * CRAFT_FB_W + px;
         /* Only paint over sky (zbuf at far-sentinel). */
-        if (craft_zbuf[idx] < 254) continue;
+        if (craft_zbuf[idx] < CRAFT_SKY_ZFLOOR) continue;
         uint16_t c = s_star_colors[i];
         int r = ((c >> 11) & 0x1F) * alpha >> 8;
         int g = ((c >>  5) & 0x3F) * alpha >> 8;
@@ -1751,7 +1772,7 @@ bool craft_render_project(const CraftCamera *cam, Vec3 world_pos,
     if (zf <= 0.05f) return false;       /* behind / at camera plane */
     float xs = v3_dot(rel, right) / zf;
     float ys = v3_dot(rel, up)    / zf;
-    int sx = (int)(CRAFT_FB_W * 0.5f + xs * CRAFT_FB_W * 0.5f / tan_h);
+    int sx = (int)(CRAFT_FB_W * 0.5f + xs * CRAFT_FB_H * 0.5f / tan_h);
     int sy = (int)(CRAFT_FB_H * 0.5f - ys * CRAFT_FB_H * 0.5f / tan_h);
     float dist = sqrtf(rel.x*rel.x + rel.y*rel.y + rel.z*rel.z);
     int q = (int)(dist * 255.0f / CRAFT_MAX_DIST_FOR_ZBUF);

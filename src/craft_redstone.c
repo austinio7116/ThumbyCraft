@@ -114,7 +114,16 @@ static void meta_set(int wx, int wy, int wz, uint8_t val) {
  * phase re-reads the block at every listed cell and type-checks it, so
  * a stale entry (cell since changed) is simply skipped — harmless. */
 #define RS_MAX 1024
-static uint8_t s_rs_lx[RS_MAX], s_rs_wy[RS_MAX], s_rs_lz[RS_MAX];
+/* Local window coords need >8 bits once the world window is wider than 256
+ * (the Android build runs a 576-wide window). uint8_t on the RP2350's 64-wide
+ * world keeps the storage byte-identical there. */
+#if (CRAFT_WORLD_X > 255) || (CRAFT_WORLD_Z > 255)
+typedef uint16_t RsCoord;
+#else
+typedef uint8_t  RsCoord;
+#endif
+static RsCoord s_rs_lx[RS_MAX], s_rs_lz[RS_MAX];
+static uint8_t s_rs_wy[RS_MAX];
 static int     s_rs_n;
 static bool    s_rs_dirty;
 static bool    s_in_tick;
@@ -185,9 +194,9 @@ static void rs_full_scan(void) {
                 if (!f) continue;                 /* not redstone — the common case */
                 if (f & RS_F_ACTIVE) active++;
                 if ((f & RS_F_RELEVANT) && s_rs_n < RS_MAX) {
-                    s_rs_lx[s_rs_n] = (uint8_t)lx;
+                    s_rs_lx[s_rs_n] = (RsCoord)lx;
                     s_rs_wy[s_rs_n] = (uint8_t)wy;
-                    s_rs_lz[s_rs_n] = (uint8_t)lz;
+                    s_rs_lz[s_rs_n] = (RsCoord)lz;
                     s_rs_n++;
                 }
             }
@@ -323,7 +332,7 @@ void craft_redstone_tick_fuses(float dt) {
  * comfortably handles a wire network that fills a third of the
  * window's underground volume — plenty. */
 #define BFS_MAX WIRE_MAX
-typedef struct { uint8_t lx, wy, lz; } RsCell;
+typedef struct { RsCoord lx; uint8_t wy; RsCoord lz; } RsCell;
 static RsCell s_frontier[BFS_MAX];
 
 /* Bitmap of cells visited this BFS round. One bit per window cell.
@@ -334,9 +343,13 @@ static uint32_t s_visited_keys[WIRE_MAX];
 static int      s_visited_n;
 
 static inline uint32_t key_of(int lx, int wy, int lz) {
-    return ((uint32_t)(lx & 0x3F) << 16) |
-           ((uint32_t)(wy & 0x3F) << 8)  |
-            (uint32_t)(lz & 0x3F);
+    /* 11 bits per horizontal axis (window up to 2048), 6 bits for height.
+     * The old 6-bit packing assumed a 64-wide world and collided once the
+     * window grew; widening keeps keys unique at any supported world size and
+     * is value-unique for the 64-world too (keys are ephemeral per tick). */
+    return ((uint32_t)(lx & 0x7FF) << 17) |
+           ((uint32_t)(lz & 0x7FF) << 6)  |
+            (uint32_t)(wy & 0x3F);
 }
 static bool visited_seen(uint32_t k) {
     for (int i = 0; i < s_visited_n; i++)
@@ -479,7 +492,7 @@ void craft_redstone_tick(float dt) {
                     uint32_t k = key_of(olx, owy, olz);
                     if (visited_add(k) && frontier_n < BFS_MAX) {
                         s_frontier[frontier_n++] = (RsCell){
-                            (uint8_t)olx, (uint8_t)owy, (uint8_t)olz
+                            (RsCoord)olx, (uint8_t)owy, (RsCoord)olz
                         };
                     }
                 }
@@ -514,7 +527,7 @@ void craft_redstone_tick(float dt) {
                             uint32_t k = key_of(nlx, nwy, nlz);
                             if (visited_add(k) && frontier_n < BFS_MAX) {
                                 s_frontier[frontier_n++] = (RsCell){
-                                    (uint8_t)nlx, (uint8_t)nwy, (uint8_t)nlz
+                                    (RsCoord)nlx, (uint8_t)nwy, (RsCoord)nlz
                                 };
                             }
                         } else if (nb == BLK_DIAMOND_BLOCK) {
@@ -559,7 +572,7 @@ void craft_redstone_tick(float dt) {
                 uint32_t k = key_of(nlx, nwy, nlz);
                 if (visited_add(k) && frontier_n < BFS_MAX) {
                     s_frontier[frontier_n++] = (RsCell){
-                        (uint8_t)nlx, (uint8_t)nwy, (uint8_t)nlz
+                        (RsCoord)nlx, (uint8_t)nwy, (RsCoord)nlz
                     };
                 }
             }
@@ -590,7 +603,7 @@ void craft_redstone_tick(float dt) {
                 if (!visited_seen(k)) {
                     if (visited_add(k) && frontier_n < BFS_MAX) {
                         s_frontier[frontier_n++] = (RsCell){
-                            (uint8_t)nlx, (uint8_t)nwy, (uint8_t)nlz
+                            (RsCoord)nlx, (uint8_t)nwy, (RsCoord)nlz
                         };
                     }
                 }

@@ -1156,8 +1156,12 @@ void craft_mobs_render(const CraftCamera *cam, uint16_t *fb) {
         fwd.y * right.z - fwd.z * right.y,
         fwd.z * right.x - fwd.x * right.z,
         fwd.x * right.y - fwd.y * right.x);
-    float tan_h  = tanf(cam->fov * 0.5f);
-    float focal_h = (CRAFT_FB_W * 0.5f) / tan_h;
+    float tan_h  = tanf(cam->fov * 0.5f);     /* fov is vertical → this is tan_v */
+    /* Horizontal must match the world raycaster's aspect-widened FOV so the
+     * cuboid rays line up with the terrain. On the square device FB_W==FB_H,
+     * so aspect==1 and focal_h==focal_v — identical to before. */
+    float aspect = (float)CRAFT_FB_W / (float)CRAFT_FB_H;
+    float focal_h = (CRAFT_FB_H * 0.5f) / tan_h;
     float focal_v = (CRAFT_FB_H * 0.5f) / tan_h;
 
     for (int i = 0; i < CRAFT_MAX_MOBS; i++) {
@@ -1222,7 +1226,7 @@ void craft_mobs_render(const CraftCamera *cam, uint16_t *fb) {
             float vy    = ndc_y * tan_h;
             for (int sx = sx_min; sx <= sx_max; sx++) {
                 float ndc_x = ((float)(sx * 2 - CRAFT_FB_W + 1) / (float)CRAFT_FB_W);
-                float vx    = ndc_x * tan_h;
+                float vx    = ndc_x * tan_h * aspect;
 
                 /* World ray dir. */
                 float wdx = fwd.x + right.x * vx + up.x * vy;

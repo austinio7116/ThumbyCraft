@@ -137,7 +137,9 @@ static bool project_to_screen(const CraftPlayer *p, Vec3 t,
     float zf = rx * fwd.x + ry * fwd.y + rz * fwd.z;
     if (zf <= 0.05f) return false;
     float tan_h  = tanf(p->cam.fov * 0.5f);
-    float focal_h = (CRAFT_FB_W * 0.5f) / tan_h;
+    /* Horizontal focal off FB_H so it matches the aspect-widened world FOV on a
+     * wide framebuffer; identical on the square device (FB_W==FB_H). */
+    float focal_h = (CRAFT_FB_H * 0.5f) / tan_h;
     float focal_v = (CRAFT_FB_H * 0.5f) / tan_h;
     float xs = (rx * right.x + ry * right.y + rz * right.z) / zf;
     float ys = (rx * up.x    + ry * up.y    + rz * up.z   ) / zf;

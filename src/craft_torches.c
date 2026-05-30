@@ -1062,8 +1062,11 @@ void craft_torches_render(const CraftCamera *cam, uint16_t *fb) {
         fwd.y * right.z - fwd.z * right.y,
         fwd.z * right.x - fwd.x * right.z,
         fwd.x * right.y - fwd.y * right.x);
-    float tan_h  = tanf(cam->fov * 0.5f);
-    float focal_h = (CRAFT_FB_W * 0.5f) / tan_h;
+    float tan_h  = tanf(cam->fov * 0.5f);     /* fov is vertical → tan_v */
+    /* Match the world raycaster's aspect-widened horizontal FOV so the cuboid
+     * lines up with the terrain. Square device (FB_W==FB_H) → aspect 1, no-op. */
+    float aspect = (float)CRAFT_FB_W / (float)CRAFT_FB_H;
+    float focal_h = (CRAFT_FB_H * 0.5f) / tan_h;
     float focal_v = (CRAFT_FB_H * 0.5f) / tan_h;
 
     for (int i = 0; i < CRAFT_MAX_TORCHES; i++) {
@@ -1147,7 +1150,7 @@ void craft_torches_render(const CraftCamera *cam, uint16_t *fb) {
             float vy    = ndc_y * tan_h;
             for (int sx = sx_min; sx <= sx_max; sx++) {
                 float ndc_x = ((float)(sx * 2 - CRAFT_FB_W + 1) / (float)CRAFT_FB_W);
-                float vx    = ndc_x * tan_h;
+                float vx    = ndc_x * tan_h * aspect;
                 float wdx = fwd.x + right.x * vx + up.x * vy;
                 float wdy = fwd.y + right.y * vx + up.y * vy;
                 float wdz = fwd.z + right.z * vx + up.z * vy;

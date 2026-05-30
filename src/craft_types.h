@@ -11,8 +11,15 @@
 #include <stdbool.h>
 #include <math.h>
 
+/* Framebuffer size. Square 128x128 on the RP2350; a more powerful host
+ * (Android) can override at compile time — e.g. a wide 256x128 to fill a
+ * phone screen. Keep CRAFT_FB_H at 128 so the HUD layout is unchanged. */
+#ifndef CRAFT_FB_W
 #define CRAFT_FB_W 128
+#endif
+#ifndef CRAFT_FB_H
 #define CRAFT_FB_H 128
+#endif
 
 /* CRAFT_HOT — function attribute that places the function in SRAM
  * on device so XIP flash latency doesn't stall the inner loop. On
@@ -24,9 +31,20 @@
 #  define CRAFT_HOT
 #endif
 
+/* In-memory world window (a sliding window over the infinite X/Z plane).
+ * 64^3 = 256 KB fits the RP2350; a host with more RAM (Android) can widen
+ * X/Z to hold more blocks so a longer draw distance has world to show.
+ * Indexing is by symbolic multiply (not bit-masks), so these need NOT be
+ * powers of two. Keep the X/Z:draw-distance ratio ~ the default (64:60). */
+#ifndef CRAFT_WORLD_X
 #define CRAFT_WORLD_X 64
+#endif
+#ifndef CRAFT_WORLD_Y
 #define CRAFT_WORLD_Y 64
+#endif
+#ifndef CRAFT_WORLD_Z
 #define CRAFT_WORLD_Z 64
+#endif
 #define CRAFT_WORLD_VOXELS (CRAFT_WORLD_X * CRAFT_WORLD_Y * CRAFT_WORLD_Z)
 
 typedef struct { float x, y, z; } Vec3;

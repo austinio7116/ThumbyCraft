@@ -141,7 +141,9 @@ void craft_render_stars(const CraftCamera *cam, uint16_t *fb);
  * sky/no-hit pixels are 255 (the "infinity" sentinel). Mobs and
  * future overlay sprites z-test against this buffer to occlude
  * correctly behind world blocks. */
-#define CRAFT_MAX_DIST_FOR_ZBUF 60.0f
+#ifndef CRAFT_MAX_DIST_FOR_ZBUF
+#define CRAFT_MAX_DIST_FOR_ZBUF 60.0f   /* override to match CRAFT_MAX_DIST */
+#endif
 extern uint8_t craft_zbuf[CRAFT_FB_W * CRAFT_FB_H];
 
 /* Project a world-space point onto the screen. Returns false if the
