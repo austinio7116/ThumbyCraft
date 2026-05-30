@@ -18,4 +18,9 @@ int craft_font_draw_2x(uint16_t *fb, const char *text, int x, int y, uint16_t co
 int craft_font_width(const char *text);
 int craft_font_width_2x(const char *text);
 
+/* Set the destination dimensions glyph writes are clamped/strided to. Used by
+ * the HUD when rendering into a smaller upscale overlay. No-op (and the writer
+ * stays a compile-time constant) unless CRAFT_HUD_SCALE>1. */
+void craft_font_set_target(int w, int h);
+
 #endif

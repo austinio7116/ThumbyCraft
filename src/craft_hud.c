@@ -17,8 +17,8 @@
 #include <string.h>
 
 static inline void put(uint16_t *fb, int x, int y, uint16_t c) {
-    if ((unsigned)x < CRAFT_FB_W && (unsigned)y < CRAFT_FB_H)
-        fb[y * CRAFT_FB_W + x] = c;
+    if ((unsigned)x < CRAFT_HUD_VW && (unsigned)y < CRAFT_HUD_VH)
+        fb[y * CRAFT_HUD_VW + x] = c;
 }
 
 static void rect(uint16_t *fb, int x, int y, int w, int h, uint16_t c) {
@@ -139,18 +139,18 @@ static bool project_to_screen(const CraftPlayer *p, Vec3 t,
     float tan_h  = tanf(p->cam.fov * 0.5f);
     /* Horizontal focal off FB_H so it matches the aspect-widened world FOV on a
      * wide framebuffer; identical on the square device (FB_W==FB_H). */
-    float focal_h = (CRAFT_FB_H * 0.5f) / tan_h;
-    float focal_v = (CRAFT_FB_H * 0.5f) / tan_h;
+    float focal_h = (CRAFT_HUD_VH * 0.5f) / tan_h;
+    float focal_v = (CRAFT_HUD_VH * 0.5f) / tan_h;
     float xs = (rx * right.x + ry * right.y + rz * right.z) / zf;
     float ys = (rx * up.x    + ry * up.y    + rz * up.z   ) / zf;
-    *px = (int)(CRAFT_FB_W * 0.5f + xs * focal_h);
-    *py = (int)(CRAFT_FB_H * 0.5f - ys * focal_v);
+    *px = (int)(CRAFT_HUD_VW * 0.5f + xs * focal_h);
+    *py = (int)(CRAFT_HUD_VH * 0.5f - ys * focal_v);
     return true;
 }
 
 static void crosshair(uint16_t *fb, const CraftPlayer *p) {
-    int cx = CRAFT_FB_W / 2;
-    int cy = CRAFT_FB_H / 2 - 6;   /* hotbar takes up the bottom 14 px */
+    int cx = CRAFT_HUD_VW / 2;
+    int cy = CRAFT_HUD_VH / 2 - 6;   /* hotbar takes up the bottom 14 px */
     uint16_t c = 0xFFFF;
     /* When drawing the bow with a locked target, project the target
      * onto the screen and slide the crosshair there so the player
@@ -161,8 +161,8 @@ static void crosshair(uint16_t *fb, const CraftPlayer *p) {
         Vec3 tgt = { m->pos.x, m->pos.y + 0.5f, m->pos.z };
         int tx, ty;
         if (project_to_screen(p, tgt, &tx, &ty)) {
-            if (tx >= 2 && tx < CRAFT_FB_W - 2 &&
-                ty >= 2 && ty < CRAFT_FB_H - 2) {
+            if (tx >= 2 && tx < CRAFT_HUD_VW - 2 &&
+                ty >= 2 && ty < CRAFT_HUD_VH - 2) {
                 cx = tx;
                 cy = ty;
                 c  = rgb565(255, 220, 70);
@@ -175,8 +175,8 @@ static void crosshair(uint16_t *fb, const CraftPlayer *p) {
 void craft_hud_draw_hotbar(uint16_t *fb, const CraftPlayer *p) {
     int slot_w = 14, gap = 1;
     int total = CRAFT_HOTBAR_SLOTS * slot_w + (CRAFT_HOTBAR_SLOTS - 1) * gap;
-    int x0 = (CRAFT_FB_W - total) / 2;
-    int y0 = CRAFT_FB_H - slot_w - 1;
+    int x0 = (CRAFT_HUD_VW - total) / 2;
+    int y0 = CRAFT_HUD_VH - slot_w - 1;
 
     /* Background plate */
     rect(fb, x0 - 2, y0 - 1, total + 4, slot_w + 2, rgb565(20, 20, 25));
@@ -209,8 +209,8 @@ void craft_hud_draw(uint16_t *fb, const CraftPlayer *p, int fps) {
      * overlays land on the same slots the hotbar function drew. */
     int slot_w = 14, gap = 1;
     int total  = CRAFT_HOTBAR_SLOTS * slot_w + (CRAFT_HOTBAR_SLOTS - 1) * gap;
-    int x0     = (CRAFT_FB_W - total) / 2;
-    int y0     = CRAFT_FB_H - slot_w - 1;
+    int x0     = (CRAFT_HUD_VW - total) / 2;
+    int y0     = CRAFT_HUD_VH - slot_w - 1;
 
     /* Block name above hotbar when something just happened. */
     BlockId sel = p->hotbar[p->hotbar_idx];
@@ -221,7 +221,7 @@ void craft_hud_draw(uint16_t *fb, const CraftPlayer *p, int fps) {
         name = buf;
     }
     int nw = craft_font_width(name);
-    craft_font_draw(fb, name, (CRAFT_FB_W - nw) / 2, y0 - 8, 0xFFFF);
+    craft_font_draw(fb, name, (CRAFT_HUD_VW - nw) / 2, y0 - 8, 0xFFFF);
 
     if (fps > 0) {
         char buf[20];
@@ -238,7 +238,7 @@ void craft_hud_draw(uint16_t *fb, const CraftPlayer *p, int fps) {
             if (bi < 8) bl = L[bi];
         }
         snprintf(buf, sizeof buf, "%c %d", bl, fps);
-        craft_font_draw(fb, buf, CRAFT_FB_W - craft_font_width(buf) - 2, 1, 0xFFE0);
+        craft_font_draw(fb, buf, CRAFT_HUD_VW - craft_font_width(buf) - 2, 1, 0xFFE0);
 
         /* World position coords (top-right, under the FPS counter).
          * Show X, Y, Z so the player can see how deep they are. Gated
@@ -246,7 +246,7 @@ void craft_hud_draw(uint16_t *fb, const CraftPlayer *p, int fps) {
         snprintf(buf, sizeof buf, "%d,%d,%d",
                  (int)p->cam.pos.x, (int)p->cam.pos.y, (int)p->cam.pos.z);
         craft_font_draw(fb, buf,
-                        CRAFT_FB_W - craft_font_width(buf) - 2, 8,
+                        CRAFT_HUD_VW - craft_font_width(buf) - 2, 8,
                         rgb565(180, 220, 255));
     }
     if (p->fly_mode) {
@@ -270,7 +270,7 @@ void craft_hud_draw(uint16_t *fb, const CraftPlayer *p, int fps) {
             /* Tint the whole framebuffer red briefly. */
             int t = (int)(p->damage_flash * 200.0f);
             if (t > 60) t = 60;
-            for (int i = 0; i < CRAFT_FB_W * CRAFT_FB_H; i++) {
+            for (int i = 0; i < CRAFT_HUD_VW * CRAFT_HUD_VH; i++) {
                 uint16_t c = fb[i];
                 int r = (c >> 11) & 0x1F;
                 int g = (c >>  5) & 0x3F;
@@ -285,13 +285,13 @@ void craft_hud_draw(uint16_t *fb, const CraftPlayer *p, int fps) {
         if (p->respawn_timer > 0.0f) {
             const char *msg = "YOU DIED";
             int w = craft_font_width_2x(msg);
-            craft_font_draw_2x(fb, msg, (CRAFT_FB_W - w) / 2,
-                               CRAFT_FB_H / 2 - 8, rgb565(255, 60, 60));
+            craft_font_draw_2x(fb, msg, (CRAFT_HUD_VW - w) / 2,
+                               CRAFT_HUD_VH / 2 - 8, rgb565(255, 60, 60));
             char rs[20];
             snprintf(rs, sizeof rs, "respawn %.1fs", p->respawn_timer);
             int rw = craft_font_width(rs);
-            craft_font_draw(fb, rs, (CRAFT_FB_W - rw) / 2,
-                            CRAFT_FB_H / 2 + 8, 0xFFFF);
+            craft_font_draw(fb, rs, (CRAFT_HUD_VW - rw) / 2,
+                            CRAFT_HUD_VH / 2 + 8, 0xFFFF);
         }
     }
     /* Boss-spider victory banner — green, mirrored from the death
@@ -299,15 +299,15 @@ void craft_hud_draw(uint16_t *fb, const CraftPlayer *p, int fps) {
     if (p->win_banner_t > 0.0f) {
         const char *msg = "YOU WIN!";
         int w = craft_font_width_2x(msg);
-        craft_font_draw_2x(fb, msg, (CRAFT_FB_W - w) / 2,
-                           CRAFT_FB_H / 2 - 8, rgb565(80, 240, 90));
+        craft_font_draw_2x(fb, msg, (CRAFT_HUD_VW - w) / 2,
+                           CRAFT_HUD_VH / 2 - 8, rgb565(80, 240, 90));
     }
 
     /* Toast — centred near bottom (above hotbar). */
     const char *toast = craft_menu_toast_text();
     if (toast) {
         int tw = craft_font_width(toast);
-        int tx = (CRAFT_FB_W - tw) / 2;
+        int tx = (CRAFT_HUD_VW - tw) / 2;
         int ty = y0 - 18;
         rect(fb, tx - 2, ty - 1, tw + 4, 8, rgb565(0, 0, 0));
         craft_font_draw(fb, toast, tx, ty, rgb565(255, 230, 120));

@@ -21,6 +21,18 @@
 #define CRAFT_FB_H 128
 #endif
 
+/* HUD render scale. The HUD draws at fixed pixel sizes, so on a high-res
+ * framebuffer it would look tiny. CRAFT_HUD_SCALE>1 makes it render into a
+ * CRAFT_HUD_VW×CRAFT_HUD_VH overlay (the resolution it's designed for) which is
+ * then nearest-upscaled onto the framebuffer, keeping the HUD a constant
+ * on-screen size. Default 1 (RP2350/host): HUD dims == framebuffer dims and
+ * the HUD draws straight into the framebuffer, unchanged. */
+#ifndef CRAFT_HUD_SCALE
+#define CRAFT_HUD_SCALE 1
+#endif
+#define CRAFT_HUD_VW (CRAFT_FB_W / CRAFT_HUD_SCALE)
+#define CRAFT_HUD_VH (CRAFT_FB_H / CRAFT_HUD_SCALE)
+
 /* CRAFT_HOT — function attribute that places the function in SRAM
  * on device so XIP flash latency doesn't stall the inner loop. On
  * host it's a no-op. PICO_ON_DEVICE is defined by the Pico SDK when

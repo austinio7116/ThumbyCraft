@@ -14,6 +14,7 @@
 #include "craft_gen.h"
 #include "craft_render.h"
 #include "craft_hud.h"
+#include "craft_font.h"
 #include "craft_audio.h"
 #include "craft_save.h"
 #include "craft_blocks.h"
@@ -92,6 +93,37 @@ static void capture_thumb_from_fb(void) {
 
 const uint16_t *craft_main_thumb(void) {
     return s_thumb_valid ? s_thumb : NULL;
+}
+
+/* Draw the overlay HUD. On the device/host (CRAFT_HUD_SCALE==1) the HUD draws
+ * straight into the framebuffer, unchanged. On a high-res build it renders
+ * into a HUD-resolution overlay (the size the HUD is designed for) and is
+ * then nearest-upscaled onto the framebuffer so it keeps a constant on-screen
+ * size. Transparent texels (magenta sentinel) let the world show through. */
+#if CRAFT_HUD_SCALE > 1
+#define CRAFT_HUD_KEY 0xF81Fu
+static uint16_t s_hud_overlay[CRAFT_HUD_VW * CRAFT_HUD_VH];
+#endif
+static void hud_present(int fps) {
+#if CRAFT_HUD_SCALE > 1
+    for (int i = 0; i < CRAFT_HUD_VW * CRAFT_HUD_VH; i++)
+        s_hud_overlay[i] = CRAFT_HUD_KEY;
+    craft_font_set_target(CRAFT_HUD_VW, CRAFT_HUD_VH);   /* glyphs into the overlay */
+    craft_hud_draw(s_hud_overlay, &s_player, fps);
+    craft_font_set_target(CRAFT_FB_W, CRAFT_FB_H);       /* restore for the menu etc. */
+    for (int y = 0; y < CRAFT_HUD_VH; y++) {
+        for (int x = 0; x < CRAFT_HUD_VW; x++) {
+            uint16_t c = s_hud_overlay[y * CRAFT_HUD_VW + x];
+            if (c == CRAFT_HUD_KEY) continue;
+            int bx = x * CRAFT_HUD_SCALE, by = y * CRAFT_HUD_SCALE;
+            for (int dy = 0; dy < CRAFT_HUD_SCALE; dy++)
+                for (int dx = 0; dx < CRAFT_HUD_SCALE; dx++)
+                    s_fb[(by + dy) * CRAFT_FB_W + (bx + dx)] = c;
+        }
+    }
+#else
+    craft_hud_draw(s_fb, &s_player, fps);
+#endif
 }
 
 static int s_save_slot = 0;
@@ -728,7 +760,7 @@ void craft_main_step(const CraftInput *in, float dt, int fps) {
         craft_torches_render(&s_player.cam, s_fb);
         craft_particles_render(&s_player.cam, s_fb);
         craft_render_pick_outline(&s_player.cam, s_fb);
-        craft_hud_draw(s_fb, &s_player, s_show_fps ? fps : 0);
+        hud_present(s_show_fps ? fps : 0);
         craft_menu_draw(s_fb, &s_player);
         s_player.cam.pos.y += s_player.step_lag;
         return;
@@ -821,7 +853,7 @@ void craft_main_step(const CraftInput *in, float dt, int fps) {
      * you can see which slot you're holding. */
     craft_render_held_item(s_player.hotbar[s_player.hotbar_idx],
                            s_fb, s_held_swing_t, s_player.bow_draw_t);
-    craft_hud_draw(s_fb, &s_player, s_show_fps ? fps : 0);
+    hud_present(s_show_fps ? fps : 0);
     s_player.cam.pos.y += s_player.step_lag;
 }
 
@@ -945,7 +977,7 @@ void craft_main_draw_hud(int fps) {
      * indicator must stay visible on top of the viewport. */
     craft_render_held_item(s_player.hotbar[s_player.hotbar_idx],
                            s_fb, s_held_swing_t, s_player.bow_draw_t);
-    craft_hud_draw(s_fb, &s_player, s_show_fps ? fps : 0);
+    hud_present(s_show_fps ? fps : 0);
     if (craft_menu_is_open()) craft_menu_draw(s_fb, &s_player);
     /* Restore logical cam y so next tick's physics is correct. */
     s_player.cam.pos.y += s_player.step_lag;

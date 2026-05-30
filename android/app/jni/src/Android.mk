@@ -18,15 +18,18 @@ LOCAL_C_INCLUDES := \
 #
 # Android has far more headroom than the RP2350. Make the most of it (all of
 # these are RP2350-default elsewhere; only this build overrides them):
-#   - wide framebuffer 256x128 (height kept at 128 -> HUD unchanged, just a
-#     wider field of view to fill a phone screen);
+#   - high-res wide framebuffer 512x256 (2:1 to fill a phone screen; 4x the
+#     pixels of the device for a sharper world. NOTE: the engine HUD draws at
+#     fixed pixel sizes, so it positions correctly but appears smaller at this
+#     resolution; the on-screen touch controls are screen-space so unaffected);
 #   - big in-memory world window 576x64x576 (~27 MB vs 256 KB) so a long
 #     draw distance has blocks to show;
 #   - raycaster reach 60 -> 540 blocks (steps raised to match).
 # (World:draw-distance ratio is kept ~ the stock 64:60, just 9x the scale.)
 LOCAL_CFLAGS := -DCRAFT_HOST=1 -DCRAFT_TEXTURES_BAKED=1 -DNDEBUG \
                 -O2 -ffast-math -std=c11 \
-                -DCRAFT_FB_W=256 -DCRAFT_FB_H=128 \
+                -DCRAFT_FB_W=512 -DCRAFT_FB_H=256 \
+                -DCRAFT_HUD_SCALE=2 \
                 -DCRAFT_WORLD_X=576 -DCRAFT_WORLD_Z=576 \
                 -DCRAFT_MAX_DIST=540.0f -DCRAFT_MAX_STEPS=1024 \
                 -include stdio.h -include stdlib.h -include string.h -include math.h

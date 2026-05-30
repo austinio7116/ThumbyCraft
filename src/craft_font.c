@@ -45,9 +45,26 @@ static const uint16_t font[256] = {
     [127] = 0x0550,
 };
 
+/* Render-target dimensions for the glyph writer. The HUD can draw text into
+ * a smaller upscale overlay, so the stride/bounds must follow that target and
+ * not the full framebuffer. On the RP2350/host (CRAFT_HUD_SCALE==1) these stay
+ * compile-time constants == the framebuffer, so the writer is byte-identical
+ * and craft_font_set_target is a no-op. */
+#if CRAFT_HUD_SCALE > 1
+static int s_font_w = CRAFT_FB_W;
+static int s_font_h = CRAFT_FB_H;
+void craft_font_set_target(int w, int h) { s_font_w = w; s_font_h = h; }
+#define FONT_TW s_font_w
+#define FONT_TH s_font_h
+#else
+void craft_font_set_target(int w, int h) { (void)w; (void)h; }
+#define FONT_TW CRAFT_FB_W
+#define FONT_TH CRAFT_FB_H
+#endif
+
 static inline void put(uint16_t *fb, int x, int y, uint16_t c) {
-    if ((unsigned)x < CRAFT_FB_W && (unsigned)y < CRAFT_FB_H)
-        fb[y * CRAFT_FB_W + x] = c;
+    if ((unsigned)x < (unsigned)FONT_TW && (unsigned)y < (unsigned)FONT_TH)
+        fb[y * FONT_TW + x] = c;
 }
 
 int craft_font_draw(uint16_t *fb, const char *text, int x, int y, uint16_t color) {
