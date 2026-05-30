@@ -246,6 +246,17 @@ target_compile_options(thumbycraft_host PRIVATE
 
 target_link_libraries(thumbycraft_host PRIVATE ${SDL2_LIBRARIES} m)
 
+# Raw Xlib for the WSLg/XWayland mouse-look (XWarpPointer/XQueryPointer).
+# Linux only; degrades to a no-op fallback elsewhere.
+if(UNIX AND NOT APPLE)
+    find_package(X11)
+    if(X11_FOUND)
+        target_compile_definitions(thumbycraft_host PRIVATE CRAFT_HOST_X11=1)
+        target_include_directories(thumbycraft_host PRIVATE ${X11_INCLUDE_DIR})
+        target_link_libraries(thumbycraft_host PRIVATE ${X11_LIBRARIES})
+    endif()
+endif()
+
 add_executable(redstone_test
     ${CMAKE_CURRENT_LIST_DIR}/redstone_test.c
     ${CMAKE_CURRENT_LIST_DIR}/craft_chunk_store_stub.c

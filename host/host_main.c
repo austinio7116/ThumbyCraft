@@ -16,7 +16,8 @@
  *   Mouse wheel     Cycle hotbar
  *   1 – 8           Select hotbar slot
  *   Escape          Pause menu (Inventory, Save, etc.)
- *   G / `           Toggle mouse capture (to free the cursor)
+ *   G / `           Toggle mouse capture (frees the cursor; alt-tab also
+ *                   releases it, refocusing the window recaptures)
  *   F1 fog · F5 save · F9 load · F12 quit
  *
  * Window is 128×128 logical, scaled 5× to 640×640.
@@ -33,6 +34,11 @@
 #include <string.h>
 #include <time.h>
 
+#if defined(CRAFT_HOST_X11)
+#include <SDL2/SDL_syswm.h>
+#include <X11/Xlib.h>
+#endif
+
 #define SCALE 5
 #define WIN_W (CRAFT_FB_W * SCALE)
 #define WIN_H (CRAFT_FB_H * SCALE)
@@ -42,6 +48,44 @@ static uint16_t g_fb[CRAFT_FB_W * CRAFT_FB_H];
 static SDL_Window   *win;
 static SDL_Renderer *ren;
 static SDL_Texture  *tex;
+
+/* Mouse-look via raw Xlib on SDL's own X11 connection. Under WSLg's XWayland,
+ * neither SDL relative mode, SDL grab, nor XGrabPointer(confine) actually trap
+ * the cursor (measured) -- but XWarpPointer DOES move it and XQueryPointer DOES
+ * read it. So we pin the pointer to the window centre every frame (Quake-style)
+ * and read its offset as the look delta. All no-ops if not running on X11. */
+#if defined(CRAFT_HOST_X11)
+static Display *s_xdpy;
+static Window   s_xwin;
+static void x11_pointer_init(SDL_Window *w) {
+    SDL_SysWMinfo info; SDL_VERSION(&info.version);
+    if (SDL_GetWindowWMInfo(w, &info) && info.subsystem == SDL_SYSWM_X11) {
+        s_xdpy = info.info.x11.display;
+        s_xwin = info.info.x11.window;
+    }
+}
+static bool x11_have(void) { return s_xdpy != NULL; }
+/* Read pointer offset from window centre; returns false if unavailable. */
+static bool x11_query_delta(int *dx, int *dy) {
+    if (!s_xdpy) return false;
+    Window rr, cr; int rx, ry, wx, wy; unsigned int mask;
+    if (!XQueryPointer(s_xdpy, s_xwin, &rr, &cr, &rx, &ry, &wx, &wy, &mask))
+        return false;
+    *dx = wx - WIN_W / 2;
+    *dy = wy - WIN_H / 2;
+    return true;
+}
+static void x11_pointer_center(void) {
+    if (!s_xdpy) return;
+    XWarpPointer(s_xdpy, None, s_xwin, 0, 0, 0, 0, WIN_W / 2, WIN_H / 2);
+    XFlush(s_xdpy);
+}
+#else
+static void x11_pointer_init(SDL_Window *w) { (void)w; }
+static bool x11_have(void) { return false; }
+static bool x11_query_delta(int *dx, int *dy) { (void)dx; (void)dy; return false; }
+static void x11_pointer_center(void) { }
+#endif
 
 static SDL_AudioDeviceID audio_dev;
 
@@ -129,15 +173,22 @@ static void try_save(void) {
 uint32_t craft_platform_rand32(void) { return (uint32_t)rand(); }
 
 int main(int argc, char **argv) {
+    /* Force the X11 video backend so we have a real X connection to drive
+     * XWarpPointer/XQueryPointer (the Wayland backend exposes no usable warp
+     * under WSLg). Respect an explicit SDL_VIDEODRIVER override if set. */
+    if (!getenv("SDL_VIDEODRIVER"))
+        SDL_SetHint(SDL_HINT_VIDEODRIVER, "x11");
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS | SDL_INIT_AUDIO) != 0) {
         fprintf(stderr, "SDL_Init: %s\n", SDL_GetError()); return 1;
     }
+    printf("[host] SDL video driver = %s\n", SDL_GetCurrentVideoDriver());
     win = SDL_CreateWindow("ThumbyCraft (host)",
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
         WIN_W, WIN_H, SDL_WINDOW_SHOWN);
     ren = SDL_CreateRenderer(win, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
     tex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_RGB565,
         SDL_TEXTUREACCESS_STREAMING, CRAFT_FB_W, CRAFT_FB_H);
+    x11_pointer_init(win);
 
     audio_init();
 
@@ -152,25 +203,28 @@ int main(int argc, char **argv) {
     /* Host plays FPS-style: WASD move/strafe via the DPAD_STRAFE scheme,
      * yaw/pitch from the mouse.
      *
-     * Mouse-look method: we do NOT use SDL relative mode. Under
-     * WSLg/XWayland every relative path (warp fallback, raw XInput2)
-     * reports bogus deltas that spin the view uncontrollably. What IS
-     * reliable there is the absolute cursor position inside the window,
-     * so we compute our own delta = (pos - last_pos) each frame, clamp
-     * it hard against spurious jumps, then recentre the cursor only when
-     * it nears a window edge (rare warps → no per-frame round-trip lag).
-     * `need_reseed` makes the next sample seed last_pos WITHOUT applying
-     * a delta — set on launch, grab toggle, and window re-entry so a big
-     * entry jump can never whip the camera. */
+     * Mouse-look method: Quake-style pin-to-centre via raw Xlib.
+     *
+     * Under WSLg's XWayland nothing confines the cursor -- not SDL relative
+     * mode, SDL grab, nor XGrabPointer(confine) -- but XWarpPointer reliably
+     * MOVES the pointer and XQueryPointer reliably READS it. So each frame we
+     * read how far the pointer has drifted from the window centre (that's the
+     * look delta), then warp it straight back to the centre. The pointer is
+     * therefore re-pinned to the centre every frame and can never leave the
+     * window. need_reseed swallows the delta for the first frame after launch/
+     * focus/grab; MOUSE_CLAMP bounds any spike. Falls back to no mouse-look
+     * (keyboard only) if not running on X11. */
     craft_main_set_scheme(CRAFT_SCHEME_DPAD_STRAFE);
+    /* mouse_grab is the *intent* (toggled with G); focused tracks window
+     * focus. We capture only when both are true. */
     bool mouse_grab = true;
+    bool focused    = true;
+    bool need_reseed = true;           /* skip the first frame's delta */
     SDL_ShowCursor(SDL_DISABLE);
-    int  last_mx = 0, last_my = 0;
-    bool need_reseed = true;
+    x11_pointer_center();
     const float LOOK_SENS = 0.0035f;   /* radians per pixel of cursor travel */
     const float KEY_LOOK  = 2.2f;      /* arrow-key look rate, radians/sec */
-    const int   MOUSE_CLAMP = 40;      /* max px delta applied per frame */
-    const int   EDGE_MARGIN = 80;      /* recentre when cursor within this */
+    const int   MOUSE_CLAMP = 200;     /* clamp delta/frame, kills entry spikes */
 
     EdgeState e_a = {0}, e_b = {0}, e_lb = {0}, e_rb = {0}, e_menu = {0};
     EdgeState e_f1 = {0}, e_f5 = {0}, e_f9 = {0}, e_grab = {0};
@@ -187,12 +241,18 @@ int main(int argc, char **argv) {
             if (ev.type == SDL_QUIT) running = false;
             if (ev.type == SDL_KEYDOWN &&
                 ev.key.keysym.scancode == SDL_SCANCODE_F12) running = false;
-            /* Re-entering / refocusing the window can deliver one big
-             * position jump — reseed so it isn't applied as look. */
-            if (ev.type == SDL_WINDOWEVENT &&
-                (ev.window.event == SDL_WINDOWEVENT_ENTER ||
-                 ev.window.event == SDL_WINDOWEVENT_FOCUS_GAINED))
-                need_reseed = true;
+            /* Hide cursor on focus-in, show on focus-out so the user can
+             * alt-tab / reach other windows. */
+            if (ev.type == SDL_WINDOWEVENT) {
+                if (ev.window.event == SDL_WINDOWEVENT_FOCUS_GAINED) {
+                    focused = true;
+                    need_reseed = true;
+                    if (mouse_grab) { SDL_ShowCursor(SDL_DISABLE); x11_pointer_center(); }
+                } else if (ev.window.event == SDL_WINDOWEVENT_FOCUS_LOST) {
+                    focused = false;
+                    SDL_ShowCursor(SDL_ENABLE);
+                }
+            }
             if (ev.type == SDL_MOUSEWHEEL) {
                 /* Wheel up = previous slot, down = next (Minecraft feel). */
                 if (ev.wheel.y > 0)      craft_main_hotbar_cycle(-1);
@@ -205,37 +265,27 @@ int main(int argc, char **argv) {
             }
         }
         const Uint8 *k = SDL_GetKeyboardState(NULL);
-        int mx, my;
-        Uint32 mb = SDL_GetMouseState(&mx, &my);
+        Uint32 mb = SDL_GetMouseState(NULL, NULL);
 
-        /* Mouse-look from absolute-position delta. First sample after a
-         * reseed only stores last_pos (no look) so window-entry jumps
-         * never whip the camera. Deltas are clamped to ±MOUSE_CLAMP px to
-         * kill any residual spurious spike, then the cursor is recentred
-         * only when it strays near an edge (so warps are rare → no lag).
-         * Yaw right = +dx, look up = cursor up = -dy. */
-        if (mouse_grab) {
-            if (need_reseed) {
-                last_mx = mx; last_my = my;
-                need_reseed = false;
-            } else {
-                int dx = mx - last_mx;
-                int dy = my - last_my;
-                if (dx >  MOUSE_CLAMP) dx =  MOUSE_CLAMP;
-                else if (dx < -MOUSE_CLAMP) dx = -MOUSE_CLAMP;
-                if (dy >  MOUSE_CLAMP) dy =  MOUSE_CLAMP;
-                else if (dy < -MOUSE_CLAMP) dy = -MOUSE_CLAMP;
-                if (dx || dy) {
+        /* Mouse-look: read how far the pointer drifted from the window centre
+         * (the look delta), then warp it back to centre so it stays pinned and
+         * can never leave the window. Clamp guards spikes; need_reseed drops
+         * the first frame. Mouse right = look right (yaw -= dx); mouse up =
+         * look up (-dy, since screen y grows downward). */
+        if (mouse_grab && focused && x11_have()) {
+            int dx = 0, dy = 0;
+            if (x11_query_delta(&dx, &dy)) {
+                if (need_reseed) {
+                    need_reseed = false;
+                } else if (dx || dy) {
+                    if (dx >  MOUSE_CLAMP) dx =  MOUSE_CLAMP;
+                    else if (dx < -MOUSE_CLAMP) dx = -MOUSE_CLAMP;
+                    if (dy >  MOUSE_CLAMP) dy =  MOUSE_CLAMP;
+                    else if (dy < -MOUSE_CLAMP) dy = -MOUSE_CLAMP;
                     float s = LOOK_SENS * craft_main_mouse_sens();
-                    craft_main_look((float)dx * s, -(float)dy * s);
+                    craft_main_look(-(float)dx * s, -(float)dy * s);
                 }
-                if (mx < EDGE_MARGIN || mx > WIN_W - EDGE_MARGIN ||
-                    my < EDGE_MARGIN || my > WIN_H - EDGE_MARGIN) {
-                    SDL_WarpMouseInWindow(win, WIN_W / 2, WIN_H / 2);
-                    last_mx = WIN_W / 2; last_my = WIN_H / 2;
-                } else {
-                    last_mx = mx; last_my = my;
-                }
+                x11_pointer_center();
             }
         }
 
@@ -290,8 +340,10 @@ int main(int argc, char **argv) {
                     now_ms, &press_grab, &long_dummy);
         if (press_grab) {
             mouse_grab = !mouse_grab;
-            SDL_ShowCursor(mouse_grab ? SDL_DISABLE : SDL_ENABLE);
-            need_reseed = true;   /* don't apply the gap as a look delta */
+            bool on = mouse_grab && focused;
+            SDL_ShowCursor(on ? SDL_DISABLE : SDL_ENABLE);
+            if (on) x11_pointer_center();
+            need_reseed = true;   /* don't apply the toggle gap as a look delta */
         }
 
         craft_main_step(&in, dt, fps_value);
@@ -321,6 +373,7 @@ int main(int argc, char **argv) {
         }
     }
 
+    SDL_ShowCursor(SDL_ENABLE);
     if (audio_dev) SDL_CloseAudioDevice(audio_dev);
     SDL_DestroyTexture(tex);
     SDL_DestroyRenderer(ren);
