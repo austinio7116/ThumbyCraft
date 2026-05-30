@@ -1011,9 +1011,9 @@ static void draw_thumb_scaled(uint16_t *fb, int x, int y, int size,
         for (int dx = 0; dx < size; dx++) {
             int sx = (dx * CRAFT_SAVE_THUMB_DIM) / size;
             int fx = x + dx, fy = y + dy;
-            if ((unsigned)fx >= CRAFT_FB_W) continue;
-            if ((unsigned)fy >= CRAFT_FB_H) continue;
-            fb[fy * CRAFT_FB_W + fx] =
+            if ((unsigned)fx >= CRAFT_HUD_VW) continue;
+            if ((unsigned)fy >= CRAFT_HUD_VH) continue;
+            fb[fy * CRAFT_HUD_VW + fx] =
                 thumb[sy * CRAFT_SAVE_THUMB_DIM + sx];
         }
     }
@@ -1021,7 +1021,7 @@ static void draw_thumb_scaled(uint16_t *fb, int x, int y, int size,
 
 static void draw_slot_picker_page(uint16_t *fb) {
     int panel_w = 120, panel_h = 116;
-    int x0 = (CRAFT_FB_W - panel_w) / 2;
+    int x0 = (CRAFT_HUD_VW - panel_w) / 2;
     int y0 = 2;
     rect(fb, x0, y0, panel_w, panel_h, rgb565(30, 30, 40));
     rect(fb, x0,             y0,                panel_w, 1, rgb565(150, 150, 180));
@@ -1350,9 +1350,9 @@ CraftMenuResult craft_menu_tick(const CraftInput *in, const CraftPlayer *p) {
 }
 
 static void rect(uint16_t *fb, int x, int y, int w, int h, uint16_t c) {
-    for (int yy = y; yy < y + h && yy < CRAFT_FB_H; yy++)
-        for (int xx = x; xx < x + w && xx < CRAFT_FB_W; xx++)
-            if (xx >= 0 && yy >= 0) fb[yy * CRAFT_FB_W + xx] = c;
+    for (int yy = y; yy < y + h && yy < CRAFT_HUD_VH; yy++)
+        for (int xx = x; xx < x + w && xx < CRAFT_HUD_VW; xx++)
+            if (xx >= 0 && yy >= 0) fb[yy * CRAFT_HUD_VW + xx] = c;
 }
 
 static void darken_bg(uint16_t *fb) {
@@ -1367,8 +1367,8 @@ static void darken_bg(uint16_t *fb) {
 
 static void draw_main_page(uint16_t *fb, const CraftPlayer *p) {
     int panel_w = 100, panel_h = 110;
-    int x0 = (CRAFT_FB_W - panel_w) / 2;
-    int y0 = (CRAFT_FB_H - panel_h) / 2;
+    int x0 = (CRAFT_HUD_VW - panel_w) / 2;
+    int y0 = (CRAFT_HUD_VH - panel_h) / 2;
     rect(fb, x0, y0, panel_w, panel_h, rgb565(30, 30, 40));
     rect(fb, x0,             y0, panel_w, 1, rgb565(150, 150, 180));
     rect(fb, x0,             y0 + panel_h - 1, panel_w, 1, rgb565(150, 150, 180));
@@ -1525,8 +1525,8 @@ static void block_swatch_at(uint16_t *fb, int x, int y, int size, BlockId blk) {
             int fx = x + dx, fy = y + dy;
             uint16_t c = tex[tv * CRAFT_TEX_SIZE + tu];
             if (c == 0xF81Fu) continue;   /* cutout key — leave slot bg */
-            if ((unsigned)fx < CRAFT_FB_W && (unsigned)fy < CRAFT_FB_H)
-                fb[fy * CRAFT_FB_W + fx] = c;
+            if ((unsigned)fx < CRAFT_HUD_VW && (unsigned)fy < CRAFT_HUD_VH)
+                fb[fy * CRAFT_HUD_VW + fx] = c;
         }
     }
 }
@@ -1537,9 +1537,9 @@ static void draw_inventory_page(uint16_t *fb, const CraftPlayer *p) {
 
     /* Panel fills most of the screen but leaves the bottom hotbar
      * strip uncovered so the active-slot indicator stays visible. */
-    int panel_w = CRAFT_FB_W - 4;
-    int panel_h = CRAFT_FB_H - 22;     /* leave ~22 px for hotbar */
-    int x0 = (CRAFT_FB_W - panel_w) / 2;
+    int panel_w = CRAFT_HUD_VW - 4;
+    int panel_h = CRAFT_HUD_VH - 22;     /* leave ~22 px for hotbar */
+    int x0 = (CRAFT_HUD_VW - panel_w) / 2;
     int y0 = 2;
     rect(fb, x0, y0, panel_w, panel_h, rgb565(30, 30, 40));
     rect(fb, x0,             y0, panel_w, 1, rgb565(150, 150, 180));
@@ -1630,7 +1630,7 @@ static void draw_inventory_page(uint16_t *fb, const CraftPlayer *p) {
 
 static void draw_craft_page(uint16_t *fb, const CraftPlayer *p) {
     int panel_w = 120, panel_h = 108;
-    int x0 = (CRAFT_FB_W - panel_w) / 2;
+    int x0 = (CRAFT_HUD_VW - panel_w) / 2;
     int y0 = 2;
     rect(fb, x0, y0, panel_w, panel_h, rgb565(30, 30, 40));
     rect(fb, x0,             y0,                panel_w, 1, rgb565(150, 150, 180));
@@ -1738,8 +1738,8 @@ static void draw_craft_page(uint16_t *fb, const CraftPlayer *p) {
 static void draw_recipes_page(uint16_t *fb, const CraftPlayer *p) {
     (void)p;
     int panel_w = 120, panel_h = 110;
-    int x0 = (CRAFT_FB_W - panel_w) / 2;
-    int y0 = (CRAFT_FB_H - panel_h) / 2;
+    int x0 = (CRAFT_HUD_VW - panel_w) / 2;
+    int y0 = (CRAFT_HUD_VH - panel_h) / 2;
     rect(fb, x0, y0, panel_w, panel_h, rgb565(30, 30, 40));
     rect(fb, x0,             y0,                panel_w, 1, rgb565(150, 150, 180));
     rect(fb, x0,             y0 + panel_h - 1,  panel_w, 1, rgb565(150, 150, 180));
@@ -1810,8 +1810,8 @@ static void draw_recipes_page(uint16_t *fb, const CraftPlayer *p) {
 static void draw_controls_page(uint16_t *fb, const CraftPlayer *p) {
     (void)p;
     int panel_w = 124, panel_h = 122;
-    int x0 = (CRAFT_FB_W - panel_w) / 2;
-    int y0 = (CRAFT_FB_H - panel_h) / 2;
+    int x0 = (CRAFT_HUD_VW - panel_w) / 2;
+    int y0 = (CRAFT_HUD_VH - panel_h) / 2;
     rect(fb, x0, y0, panel_w, panel_h, rgb565(30, 30, 40));
     rect(fb, x0,             y0,                panel_w, 1, rgb565(150, 150, 180));
     rect(fb, x0,             y0 + panel_h - 1,  panel_w, 1, rgb565(150, 150, 180));
@@ -1874,9 +1874,9 @@ static void draw_controls_page(uint16_t *fb, const CraftPlayer *p) {
 static void draw_furnace_page(uint16_t *fb, const CraftPlayer *p) {
     CraftFurnace *f = craft_furnace_find(s_furnace_wx, s_furnace_wy, s_furnace_wz);
 
-    int panel_w = CRAFT_FB_W - 4;
-    int panel_h = CRAFT_FB_H - 22;
-    int x0 = (CRAFT_FB_W - panel_w) / 2;
+    int panel_w = CRAFT_HUD_VW - 4;
+    int panel_h = CRAFT_HUD_VH - 22;
+    int x0 = (CRAFT_HUD_VW - panel_w) / 2;
     int y0 = 2;
     rect(fb, x0, y0, panel_w, panel_h, rgb565(30, 30, 40));
     rect(fb, x0,             y0, panel_w, 1, rgb565(150, 150, 180));
@@ -1986,9 +1986,9 @@ static void draw_furnace_page(uint16_t *fb, const CraftPlayer *p) {
 static void draw_chest_page(uint16_t *fb, const CraftPlayer *p) {
     CraftChest *c = craft_chest_find(s_chest_wx, s_chest_wy, s_chest_wz);
 
-    int panel_w = CRAFT_FB_W - 4;
-    int panel_h = CRAFT_FB_H - 22;
-    int x0 = (CRAFT_FB_W - panel_w) / 2;
+    int panel_w = CRAFT_HUD_VW - 4;
+    int panel_h = CRAFT_HUD_VH - 22;
+    int x0 = (CRAFT_HUD_VW - panel_w) / 2;
     int y0 = 2;
     rect(fb, x0, y0, panel_w, panel_h, rgb565(30, 30, 40));
     rect(fb, x0,             y0, panel_w, 1, rgb565(150, 150, 180));
@@ -2047,9 +2047,8 @@ static void draw_chest_page(uint16_t *fb, const CraftPlayer *p) {
                     y0 + panel_h - 8, rgb565(180, 180, 200));
 }
 
-void craft_menu_draw(uint16_t *fb, const CraftPlayer *p) {
-    if (!s_open) return;
-    darken_bg(fb);
+/* Draw the menu UI (page + hotbar) into the given buffer at HUD resolution. */
+static void draw_menu_ui(uint16_t *fb, const CraftPlayer *p) {
     if (s_page == PAGE_INVENTORY)      draw_inventory_page(fb, p);
     else if (s_page == PAGE_CRAFT)     draw_craft_page(fb, p);
     else if (s_page == PAGE_RECIPES)   draw_recipes_page(fb, p);
@@ -2063,6 +2062,38 @@ void craft_menu_draw(uint16_t *fb, const CraftPlayer *p) {
      * navigates the menu — they need to see what they're holding
      * when picking what to craft / what to swap to. */
     craft_hud_draw_hotbar(fb, p);
+}
+
+#if CRAFT_HUD_SCALE > 1
+#define CRAFT_MENU_KEY 0xF81Fu        /* magenta transparency sentinel */
+static uint16_t s_menu_overlay[CRAFT_HUD_VW * CRAFT_HUD_VH];
+#endif
+
+void craft_menu_draw(uint16_t *fb, const CraftPlayer *p) {
+    if (!s_open) return;
+    darken_bg(fb);                    /* full-res dim of the world behind */
+#if CRAFT_HUD_SCALE > 1
+    /* Render the UI at HUD resolution into an overlay, then nearest-upscale
+     * it onto the (dimmed) framebuffer so the menu keeps a constant size.
+     * Transparent (magenta) texels leave the dimmed world showing through. */
+    for (int i = 0; i < CRAFT_HUD_VW * CRAFT_HUD_VH; i++)
+        s_menu_overlay[i] = CRAFT_MENU_KEY;
+    craft_font_set_target(CRAFT_HUD_VW, CRAFT_HUD_VH);
+    draw_menu_ui(s_menu_overlay, p);
+    craft_font_set_target(CRAFT_FB_W, CRAFT_FB_H);
+    for (int y = 0; y < CRAFT_HUD_VH; y++) {
+        for (int x = 0; x < CRAFT_HUD_VW; x++) {
+            uint16_t c = s_menu_overlay[y * CRAFT_HUD_VW + x];
+            if (c == CRAFT_MENU_KEY) continue;
+            int bx = x * CRAFT_HUD_SCALE, by = y * CRAFT_HUD_SCALE;
+            for (int dy = 0; dy < CRAFT_HUD_SCALE; dy++)
+                for (int dx = 0; dx < CRAFT_HUD_SCALE; dx++)
+                    fb[(by + dy) * CRAFT_FB_W + (bx + dx)] = c;
+        }
+    }
+#else
+    draw_menu_ui(fb, p);
+#endif
 }
 
 /* --- Toast ----------------------------------------------------- */
