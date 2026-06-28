@@ -27,12 +27,15 @@ LOCAL_C_INCLUDES := \
 #   - raycaster reach 60 -> 540 blocks (steps raised to match).
 # (World:draw-distance ratio is kept ~ the stock 64:60, just 9x the scale.)
 LOCAL_CFLAGS := -DCRAFT_HOST=1 -DCRAFT_TEXTURES_BAKED=1 -DNDEBUG \
-                -O2 -ffast-math -std=c11 \
+                -O3 -ffast-math -flto -std=c11 \
                 -DCRAFT_FB_W=512 -DCRAFT_FB_H=256 \
                 -DCRAFT_HUD_SCALE=2 \
                 -DCRAFT_WORLD_X=576 -DCRAFT_WORLD_Z=576 \
                 -DCRAFT_MAX_DIST=540.0f -DCRAFT_MAX_STEPS=1024 \
                 -include stdio.h -include stdlib.h -include string.h -include math.h
+# Link-time optimisation inlines hot calls across the engine's translation
+# units (the raycaster reaches into several files) — needs the flag at link too.
+LOCAL_LDFLAGS += -flto -O3
 # NOTE: CRAFT_MAX_DIST_FOR_ZBUF is deliberately NOT raised with the draw
 # distance. The depth buffer is 8-bit; entity (cuboid) occlusion only matters
 # in the near field, so it keeps the stock 60-block range for fine precision.

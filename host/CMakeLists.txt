@@ -16,6 +16,21 @@ project(thumbycraft_host C)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
+# Match the Android (mobile) render config on the PC host: wide hi-res
+# framebuffer, 2x HUD, a big in-memory world window and a long draw distance.
+# Off by default so `build_host` stays at the stock device-parity config.
+# Enable with:  cmake -S host -B build_host_big -DCRAFT_BIG_WORLD=ON
+# These reach the engine via its #ifndef guards (RP2350 build is untouched).
+option(CRAFT_BIG_WORLD "Build with the mobile wide-FB / long-draw config" OFF)
+if(CRAFT_BIG_WORLD)
+    add_compile_definitions(
+        CRAFT_FB_W=512 CRAFT_FB_H=256
+        CRAFT_HUD_SCALE=2
+        CRAFT_WORLD_X=576 CRAFT_WORLD_Z=576
+        CRAFT_MAX_DIST=540.0f CRAFT_MAX_STEPS=1024)
+    message(STATUS "CRAFT_BIG_WORLD: mobile render config (512x256, 576 world, 540 draw)")
+endif()
+
 find_package(SDL2 REQUIRED)
 
 set(CRAFT_ROOT ${CMAKE_CURRENT_LIST_DIR}/..)

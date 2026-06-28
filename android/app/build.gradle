@@ -35,6 +35,9 @@ android {
     }
     buildTypes {
         release {
+            // Sign with the debug key so the release APK is still sideloadable
+            // without managing a keystore (not for Play Store distribution).
+            signingConfig signingConfigs.debug
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
         }
