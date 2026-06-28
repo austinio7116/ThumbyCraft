@@ -42,6 +42,21 @@ drifting clouds  ·  flash-backed worlds  ·  280 MHz dual-core M33 tile-stealin
 
 ---
 
+## What's new in 1.17.2
+
+> ℹ️ Drop-in on 1.17.x — no FAT reformat, no save-format change. Existing
+> worlds are unaffected.
+
+A **bug-fix** release.
+
+**Bug fixes.**
+- **Fixed a world-generation maths bug far out in the world.** At very
+  large world coordinates an integer calculation could overflow — which
+  in C is undefined, so the result wasn't guaranteed. The maths is now
+  written so it always produces a well-defined result.
+
+---
+
 ## What's new in 1.17.1
 
 > ℹ️ Drop-in on 1.17 — no FAT reformat, no save-format change. Existing

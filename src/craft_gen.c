@@ -16,9 +16,13 @@
 #include "craft_torches.h"     /* craft_torches_record_orient (trap dispensers) */
 
 static uint32_t hash3(int x, int y, int z) {
-    uint32_t h = (uint32_t)(x * 374761393) ^
-                 (uint32_t)(y * 668265263) ^
-                 (uint32_t)(z * 2147483647);
+    /* Multiply in UNSIGNED (well-defined wrap), not signed int — `x * 374761393`
+     * overflows int for |x| beyond ~5700, which is undefined behavior the compiler
+     * flags (-Waggressive-loop-optimizations) and may miscompile. Casting the
+     * operand first makes it a uint*uint wrap; identical result for in-range coords. */
+    uint32_t h = (uint32_t)x * 374761393u ^
+                 (uint32_t)y * 668265263u ^
+                 (uint32_t)z * 2147483647u;
     h = (h ^ (h >> 13)) * 1274126177u;
     h ^= h >> 16;
     return h;
