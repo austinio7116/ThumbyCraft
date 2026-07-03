@@ -11,6 +11,7 @@
 #include "craft_font.h"
 
 #include <stdbool.h>
+#include <stdio.h>
 #include <string.h>
 
 static uint16_t *s_fb;
