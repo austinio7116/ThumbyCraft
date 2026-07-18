@@ -27,5 +27,6 @@ int  craft_link_status(void);        /* CRAFT_LINK_OFF/SEARCHING/CONNECTED */
 int  craft_link_send(const void *data, int len);   /* returns bytes accepted */
 int  craft_link_recv(void *buf, int max);          /* returns bytes read */
 int  craft_link_active(void);        /* started? */
+int  craft_link_role_host(void);     /* diagnostic: current USB role (1=host) */
 
 #endif /* CRAFT_LINK_H */

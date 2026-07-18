@@ -242,6 +242,8 @@ int craft_link_status(void) {
     return s_connected ? CRAFT_LINK_CONNECTED : CRAFT_LINK_SEARCHING;
 }
 
+int craft_link_role_host(void) { return s_is_host; }
+
 int craft_link_send(const void *data, int len) {
     if (!s_started || !s_connected || len <= 0) return 0;
     uint32_t n;

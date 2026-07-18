@@ -218,16 +218,19 @@ uint32_t craft_platform_rand32(void) { return get_rand_32(); }
 
 #if defined(CRAFT_NET_ENABLED) && CRAFT_NET_ENABLED
 /* Aggressive USB pump while the link is pairing/syncing: host-role
- * enumeration advances one control transfer per task call, and once
- * per 30 fps frame can't finish inside a role-flip window. ~8 ms of
- * spaced pumping per frame pairs within a few seconds (the same
- * pattern Mote uses in its fps-cap sleep). Audio keeps flowing too —
- * the pairing screens run for whole seconds. */
+ * enumeration advances one control transfer per task call, and — the
+ * part that bites with TWO self-pumping units — a transfer only
+ * completes while BOTH sides happen to be pumping. Mote pumps nearly
+ * continuously during discovery; we burst 24 ms per frame (~60%+
+ * duty at the resulting frame rate) so the two units' windows always
+ * overlap and enumeration finishes well inside a role-flip window.
+ * Only runs while pairing/syncing, so gameplay fps is untouched once
+ * connected. Audio keeps flowing — pairing runs for whole seconds. */
 static void net_idle_pump(void) {
-    absolute_time_t end = make_timeout_time_us(8000);
+    absolute_time_t end = make_timeout_time_us(24000);
     while (absolute_time_diff_us(get_absolute_time(), end) > 0) {
         craft_link_task();
-        sleep_us(300);
+        sleep_us(200);
     }
     audio_pump();
 }

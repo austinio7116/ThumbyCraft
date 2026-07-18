@@ -112,6 +112,8 @@ void craft_link_task(void) {
 
 int craft_link_status(void) { return s_state; }
 
+int craft_link_role_host(void) { return s_listen >= 0; }
+
 int craft_link_send(const void *data, int len) {
     if (s_state != CRAFT_LINK_CONNECTED || len <= 0) return 0;
     /* Model the device's small CDC FIFO: accept at most 256 bytes per

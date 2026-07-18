@@ -939,6 +939,14 @@ void craft_net_draw(uint16_t *fb) {
         }
         draw_text_centered(fb, "LINK PLAY", 45, 0xFFFF);
         draw_text_centered(fb, s_phase, 57, 0xCE79);
+        if (s_ns == NS_WAIT_LINK || s_ns == NS_HELLO) {
+            /* Diagnostic line: current USB role (should alternate D/H
+             * every ~second while searching) + elapsed seconds. */
+            char dbg[24];
+            snprintf(dbg, sizeof dbg, "usb %c  %ds",
+                     craft_link_role_host() ? 'H' : 'D', (int)s_wait_t);
+            draw_text_centered(fb, dbg, 67, 0x8410);
+        }
         if (s_ns == NS_SYNC && s_wtotal > 0) {
             uint32_t p = s_wdone * 100u / s_wtotal;
             if (p > 100) p = 100;
@@ -956,12 +964,16 @@ void craft_net_draw(uint16_t *fb) {
     /* Host-side searching/greeting/sync runs behind normal play — one
      * status line at the top so it doesn't cover gameplay. */
     if (s_host && s_ns != NS_PLAY) {
+        static char buf[36];
         const char *txt = s_phase;
         if (s_ns == NS_SYNC && s_wtotal > 0) {
-            static char buf[32];
             uint32_t p = s_wdone * 100u / s_wtotal;
             if (p > 100) p = 100;
             snprintf(buf, sizeof buf, "SENDING WORLD %u%%", (unsigned)p);
+            txt = buf;
+        } else if (s_ns == NS_WAIT_LINK || s_ns == NS_HELLO) {
+            snprintf(buf, sizeof buf, "%s %c %ds", s_phase,
+                     craft_link_role_host() ? 'H' : 'D', (int)s_wait_t);
             txt = buf;
         }
         draw_text_centered(fb, txt, 2, 0xFFE0);
