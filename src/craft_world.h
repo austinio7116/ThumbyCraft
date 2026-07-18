@@ -112,6 +112,16 @@ void craft_world_maybe_shift(int player_wx, int player_wz, uint32_t seed);
 /* Number of mod entries in the table (for HUD diagnostics). */
 int craft_world_mod_count(void);
 
+/* --- Co-op (craft_net) accessors --------------------------------- *
+ * mod_iter walks occupied hash entries (cursor 0 to start, -1 = done);
+ * net_ingest_mod journals a remote edit for an out-of-window cell;
+ * dirty_pending is the dirty-chunk queue depth (drain via persist_tick
+ * before enumerating the chunk store for a world transfer). */
+int  craft_world_mod_iter(int cursor, int32_t *wx, int *wy, int32_t *wz,
+                          uint8_t *blk);
+void craft_world_net_ingest_mod(int wx, int wy, int wz, uint8_t blk);
+int  craft_world_dirty_pending(void);
+
 /* Persist all currently-windowed chunks' mods to flash, and pull in
  * any flash-persisted mods for chunks in the window. The pair is the
  * bridge between the in-SRAM mod hash and the flash chunk store —

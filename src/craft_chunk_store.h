@@ -71,4 +71,13 @@ void craft_chunk_store_erase_region(int region);
 void craft_chunk_store_copy(int src_region, uint32_t src_nonce,
                             int dst_region, uint32_t dst_nonce);
 
+/* --- Enumeration (co-op world transfer) --------------------------- *
+ * Walk the bound region slot by slot (0 .. slots-1). read_slot fills
+ * (cx, cz) and up to max_entries mods for a valid record and returns
+ * its full mod count; returns -1 for an empty/stale/corrupt slot.
+ * Pass out=NULL, max_entries=0 to just measure a slot. */
+int craft_chunk_store_slots(void);
+int craft_chunk_store_read_slot(int slot, int *cx, int *cz,
+                                ChunkMod *out, int max_entries);
+
 #endif

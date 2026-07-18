@@ -113,4 +113,10 @@ void craft_mobs_spawn_hostile(CraftPlayer *p, int n);
 /* Draw all alive mobs onto fb, z-tested against craft_zbuf. */
 void craft_mobs_render(const CraftCamera *cam, uint16_t *fb);
 
+/* Draw the co-op remote player (Steve-style cuboid humanoid) at the
+ * given FEET position and yaw, through the same z-tested raycast as
+ * the mobs. Called by craft_net after the mob pass. */
+void craft_mobs_render_net_player(const CraftCamera *cam, uint16_t *fb,
+                                  Vec3 feet, float yaw);
+
 #endif

@@ -106,6 +106,16 @@ set(CRAFT_DEVICE_SOURCES
     ${CRAFT_BAKED_C}
 )
 
+# 2-player co-op over the USB-C link — standalone only. Slot mode is
+# compiled without it (the ThumbyOne lobby owns the USB controller),
+# so the slot build's RAM/behaviour is completely unchanged.
+if (NOT THUMBYONE_SLOT_MODE)
+    list(APPEND CRAFT_DEVICE_SOURCES
+        ${SRC}/craft_net.c
+        ${DEVICE}/craft_link_usb.c
+    )
+endif()
+
 # In slot mode, pull in FatFs sources + ThumbyOne's shared helpers
 # (FS mount, LED + backlight + settings for the brightness chord).
 # Same executable shape as standalone — produces firmware_thumbycraft.uf2
@@ -161,6 +171,14 @@ target_link_libraries(thumbycraft
 )
 if (THUMBYONE_SLOT_MODE)
     target_link_libraries(thumbycraft hardware_pio hardware_adc)
+else()
+    # USB link: TinyUSB device + host on the one native controller
+    # (role-flip discovery, see craft_link_usb.c / tusb_config.h).
+    target_link_libraries(thumbycraft
+        tinyusb_device
+        tinyusb_host
+        tinyusb_board
+    )
 endif()
 
 if (THUMBYONE_SLOT_MODE)
@@ -171,7 +189,18 @@ if (THUMBYONE_SLOT_MODE)
     # 520 KB SRAM ceiling.
     set(CRAFT_HEAP_SIZE 0x2000)
 else()
-    set(CRAFT_HEAP_SIZE 0x10000)
+    # 12 KB (was 64 KB). Two things eat the old headroom:
+    #  - the engine grew ~40 KB of BSS since the standalone was last
+    #    linked (2026-05-20): light-source registry, lava flow, perf
+    #    modes — all shipped via the slot build, whose heap is 8 KB.
+    #  - the co-op link adds ~11.5 KB (TinyUSB device+host ~4 KB +
+    #    craft_net ring/queues/staging ~7.5 KB).
+    # The engine barely uses heap (slot mode proves 8 KB suffices,
+    # WITH FatFs caches on top); 12 KB leaves comfortable slack while
+    # keeping world storage (voxels, mod journal, torches, light
+    # sources) untouched. Main-RAM margin after this: ~1.5 KB — the
+    # stacks live in SCRATCH_X/Y so they don't contend.
+    set(CRAFT_HEAP_SIZE 0x3000)
 endif()
 
 target_compile_definitions(thumbycraft PRIVATE
@@ -180,6 +209,7 @@ target_compile_definitions(thumbycraft PRIVATE
     PICO_CORE1_STACK_SIZE=0x1000
     CRAFT_TEXTURES_BAKED=1
     $<$<BOOL:${THUMBYONE_SLOT_MODE}>:THUMBYONE_SLOT_MODE=1>
+    $<$<NOT:$<BOOL:${THUMBYONE_SLOT_MODE}>>:CRAFT_NET_ENABLED=1>
 )
 add_dependencies(thumbycraft generate_craft_textures)
 

@@ -55,6 +55,9 @@ typedef struct {
 
 static MobModel s_models[MOB_TYPE_COUNT];
 
+/* Co-op remote player model (see craft_mobs_render_net_player). */
+static MobModel s_net_player_model;
+
 static const float mob_speed[MOB_TYPE_COUNT] = {
     1.0f,    /* sheep */
     1.3f,    /* pig   */
@@ -344,6 +347,33 @@ void craft_mobs_build_sprites(void) {
             }
             mm->parts[j + 1] = key;
         }
+    }
+
+    /* NET PLAYER — Steve-style humanoid for the co-op peer. Faces +Z
+     * like the mobs; feet at local y=0. Parts are already listed
+     * roughly big-to-small so it skips the sort above harmlessly. */
+    {
+        MobModel *pm = &s_net_player_model;
+        uint16_t SKIN  = rgb565(214, 168, 128);
+        uint16_t HAIR  = rgb565(62, 42, 24);
+        uint16_t SHIRT = rgb565(0, 168, 168);
+        uint16_t PANTS = rgb565(58, 66, 156);
+        uint16_t SHOE  = rgb565(90, 90, 96);
+        uint16_t EYE   = rgb565(40, 40, 120);
+        pm->parts[0]  = (CuboidPart){  0.00f, 1.05f,  0.00f,  0.24f, 0.30f, 0.13f, SHIRT }; /* torso */
+        pm->parts[1]  = (CuboidPart){ -0.12f, 0.42f,  0.00f,  0.11f, 0.34f, 0.12f, PANTS }; /* L leg */
+        pm->parts[2]  = (CuboidPart){  0.12f, 0.42f,  0.00f,  0.11f, 0.34f, 0.12f, PANTS }; /* R leg */
+        pm->parts[3]  = (CuboidPart){  0.00f, 1.55f,  0.00f,  0.20f, 0.20f, 0.20f, SKIN  }; /* head */
+        pm->parts[4]  = (CuboidPart){ -0.33f, 1.02f,  0.00f,  0.08f, 0.28f, 0.09f, SKIN  }; /* L arm */
+        pm->parts[5]  = (CuboidPart){  0.33f, 1.02f,  0.00f,  0.08f, 0.28f, 0.09f, SKIN  }; /* R arm */
+        pm->parts[6]  = (CuboidPart){  0.00f, 1.72f,  0.00f,  0.21f, 0.06f, 0.21f, HAIR  }; /* hair cap */
+        pm->parts[7]  = (CuboidPart){ -0.12f, 0.06f,  0.02f,  0.11f, 0.06f, 0.14f, SHOE  }; /* L shoe */
+        pm->parts[8]  = (CuboidPart){  0.12f, 0.06f,  0.02f,  0.11f, 0.06f, 0.14f, SHOE  }; /* R shoe */
+        pm->parts[9]  = (CuboidPart){ -0.08f, 1.58f,  0.19f,  0.04f, 0.03f, 0.03f, EYE   }; /* L eye */
+        pm->parts[10] = (CuboidPart){  0.08f, 1.58f,  0.19f,  0.04f, 0.03f, 0.03f, EYE   }; /* R eye */
+        pm->n_parts = 11;
+        pm->radius  = 0.55f;
+        pm->height  = 1.80f;
     }
 }
 
@@ -1147,7 +1177,13 @@ static inline uint16_t shade565(uint16_t c, int m) {
     return (uint16_t)((r << 11) | (g << 5) | b);
 }
 
-void craft_mobs_render(const CraftCamera *cam, uint16_t *fb) {
+/* Render one cuboid model at a world position/yaw, z-tested against
+ * craft_zbuf. Shared by the mob pass and the co-op remote player.
+ * hurt_flash > 0 applies the red wash; fuse_k >= 0 lerps toward white
+ * (creeper fuse). */
+static void render_model(const CraftCamera *cam, uint16_t *fb,
+                         const MobModel *model, Vec3 pos, float yaw,
+                         float hurt_flash, float fuse_k) {
     float cy_c = cosf(cam->yaw),  sy_c = sinf(cam->yaw);
     float cp_c = cosf(cam->pitch), sp_c = sinf(cam->pitch);
     Vec3 fwd   = v3(sy_c * cp_c, sp_c, cy_c * cp_c);
@@ -1164,18 +1200,14 @@ void craft_mobs_render(const CraftCamera *cam, uint16_t *fb) {
     float focal_h = (CRAFT_FB_H * 0.5f) / tan_h;
     float focal_v = (CRAFT_FB_H * 0.5f) / tan_h;
 
-    for (int i = 0; i < CRAFT_MAX_MOBS; i++) {
-        CraftMob *m = &craft_mobs[i];
-        if (!m->alive) continue;
-        const MobModel *model = &s_models[m->type];
-
+    {
         /* Yaw-invariant world AABB for screen-bbox computation. */
-        float wbmin_x = m->pos.x - model->radius;
-        float wbmin_y = m->pos.y;
-        float wbmin_z = m->pos.z - model->radius;
-        float wbmax_x = m->pos.x + model->radius;
-        float wbmax_y = m->pos.y + model->height;
-        float wbmax_z = m->pos.z + model->radius;
+        float wbmin_x = pos.x - model->radius;
+        float wbmin_y = pos.y;
+        float wbmin_z = pos.z - model->radius;
+        float wbmax_x = pos.x + model->radius;
+        float wbmax_y = pos.y + model->height;
+        float wbmax_z = pos.z + model->radius;
 
         /* Project 8 AABB corners → screen bbox. */
         int sx_min = CRAFT_FB_W, sx_max = -1;
@@ -1200,22 +1232,22 @@ void craft_mobs_render(const CraftCamera *cam, uint16_t *fb) {
             if (sy < sy_min) sy_min = sy;
             if (sy > sy_max) sy_max = sy;
         }
-        if (!any_in_front) continue;
+        if (!any_in_front) return;
         /* Clip + expand by 1 px for safety. */
         sx_min--; sy_min--; sx_max++; sy_max++;
         if (sx_min < 0)            sx_min = 0;
         if (sy_min < 0)            sy_min = 0;
         if (sx_max >= CRAFT_FB_W)  sx_max = CRAFT_FB_W - 1;
         if (sy_max >= CRAFT_FB_H)  sy_max = CRAFT_FB_H - 1;
-        if (sx_min > sx_max || sy_min > sy_max) continue;
+        if (sx_min > sx_max || sy_min > sy_max) return;
 
         /* Pre-transform camera position into mob-local frame. The mob
          * faces +Z in local space; world yaw rotates that around Y.
          * Inverse rotation: -yaw around Y. */
-        float my_c = cosf(-m->yaw), my_s = sinf(-m->yaw);
-        float rel_x = cam->pos.x - m->pos.x;
-        float rel_y = cam->pos.y - m->pos.y;
-        float rel_z = cam->pos.z - m->pos.z;
+        float my_c = cosf(-yaw), my_s = sinf(-yaw);
+        float rel_x = cam->pos.x - pos.x;
+        float rel_y = cam->pos.y - pos.y;
+        float rel_z = cam->pos.z - pos.z;
         float lo_x  = rel_x * my_c - rel_z * my_s;
         float lo_y  = rel_y;
         float lo_z  = rel_x * my_s + rel_z * my_c;
@@ -1263,7 +1295,7 @@ void craft_mobs_render(const CraftCamera *cam, uint16_t *fb) {
                 if (best_t >= 1e29f) continue;
 
                 /* Hurt-flash tint — momentary red wash. */
-                if (m->hurt_flash > 0.0f) {
+                if (hurt_flash > 0.0f) {
                     int r = ((best_color >> 11) & 0x1F);
                     int g = ((best_color >>  5) & 0x3F);
                     int b = ( best_color        & 0x1F);
@@ -1272,10 +1304,10 @@ void craft_mobs_render(const CraftCamera *cam, uint16_t *fb) {
                     b = b / 3;
                     best_color = (uint16_t)((r << 11) | (g << 5) | b);
                 }
-                /* Creeper fuse tint — lerp toward white as fuse_t
-                 * winds down from CREEPER_FUSE_TIME to 0. */
-                if (m->type == MOB_CREEPER && m->fuse_t > 0.0f) {
-                    float k = 1.0f - (m->fuse_t / CREEPER_FUSE_TIME);
+                /* Creeper fuse tint — lerp toward white as the fuse
+                 * winds down (fuse_k 0..1; negative = no fuse). */
+                if (fuse_k >= 0.0f) {
+                    float k = fuse_k;
                     if (k < 0.0f) k = 0.0f;
                     if (k > 1.0f) k = 1.0f;
                     int kk = (int)(k * 256.0f);
@@ -1304,6 +1336,27 @@ void craft_mobs_render(const CraftCamera *cam, uint16_t *fb) {
             }
         }
     }
+}
+
+void craft_mobs_render(const CraftCamera *cam, uint16_t *fb) {
+    for (int i = 0; i < CRAFT_MAX_MOBS; i++) {
+        CraftMob *m = &craft_mobs[i];
+        if (!m->alive) continue;
+        float fuse_k = (m->type == MOB_CREEPER && m->fuse_t > 0.0f)
+                       ? 1.0f - (m->fuse_t / CREEPER_FUSE_TIME) : -1.0f;
+        render_model(cam, fb, &s_models[m->type], m->pos, m->yaw,
+                     m->hurt_flash, fuse_k);
+    }
+}
+
+/* --- Co-op remote player (craft_net) ------------------------------ *
+ * A Steve-style humanoid rendered through the same cuboid raycast as
+ * the mobs, so it occludes correctly behind terrain. Model is built in
+ * craft_mobs_build_sprites alongside the mob set. */
+void craft_mobs_render_net_player(const CraftCamera *cam, uint16_t *fb,
+                                  Vec3 feet, float yaw) {
+    if (s_net_player_model.n_parts == 0) return;
+    render_model(cam, fb, &s_net_player_model, feet, yaw, 0.0f, -1.0f);
 }
 
 /* --- Arrow projectile system ------------------------------------- */

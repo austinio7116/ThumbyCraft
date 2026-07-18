@@ -23,6 +23,10 @@
 #include "craft_chunk_store.h"
 #include <string.h>
 
+#if CRAFT_NET_ENABLED
+#include "craft_net.h"
+#endif
+
 uint8_t  craft_world_blocks[CRAFT_WORLD_VOXELS];
 uint32_t craft_world_dirty;
 int      craft_world_origin_x;
@@ -138,6 +142,31 @@ static int mod_get(int wx, int wy, int wz) {
 }
 
 int craft_world_mod_count(void) { return s_mod_count; }
+
+int craft_world_dirty_pending(void) { return s_dirty_q_n; }
+
+/* Iterate occupied mod-hash entries. Pass 0 to start; feed the return
+ * value back in as the next cursor. Returns -1 when exhausted. Entries
+ * never move within the open-addressing table (no deletion during
+ * play), so a cursor stays valid across inserts. */
+int craft_world_mod_iter(int cursor, int32_t *wx, int *wy, int32_t *wz,
+                         uint8_t *blk) {
+    for (int i = cursor; i < MOD_TABLE_SIZE; i++) {
+        ModEntry *e = &s_mods[i];
+        if (!(e->flags & 1)) continue;
+        *wx = e->wx; *wz = e->wz; *wy = e->wy; *blk = e->blk;
+        return i + 1;
+    }
+    return -1;
+}
+
+/* Record a remote edit for a cell outside the resident window: journal
+ * only (mod hash + dirty-chunk marking), no buffer/lightmap work. The
+ * cell takes effect when its strip streams in, exactly like a local
+ * out-of-window mod. */
+void craft_world_net_ingest_mod(int wx, int wy, int wz, uint8_t blk) {
+    mod_set(wx, wy, wz, (BlockId)blk);
+}
 
 /* --- Flash chunk-store bridge ------------------------------------ */
 
@@ -704,6 +733,14 @@ void craft_world_set(int wx, int wy, int wz, BlockId blk) {
      * restart spreading on every reload. */
     if (!craft_is_water_id((uint8_t)blk)) {
         mod_set(wx, wy, wz, blk);
+#if CRAFT_NET_ENABLED
+        /* Single choke point for co-op edit capture: every journal-worthy
+         * change funnels through here (player edits, TNT, doors, pistons).
+         * The hook itself decides what actually goes on the wire — it
+         * skips echoes of remote applies and near-peer sim results. */
+        craft_net_note_set(wx, wy, wz, (uint8_t)prev, (uint8_t)blk,
+                           s_defer_rebuild);
+#endif
     }
     /* Keep the light-source registry current for player edits (place/
      * break a torch, lamp toggle, water→lava→obsidian, etc.) so the

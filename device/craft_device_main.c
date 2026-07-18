@@ -48,7 +48,11 @@ static uint8_t g_fs_work[FF_MAX_SS] __attribute__((aligned(4)));
 #include "craft_title.h"
 #include "craft_blocks.h"
 #include "craft_menu.h"
-#include "craft_menu.h"
+
+#if defined(CRAFT_NET_ENABLED) && CRAFT_NET_ENABLED
+#include "craft_net.h"
+#include "craft_link.h"
+#endif
 
 #ifdef THUMBYONE_SLOT_MODE
 #  include "thumbyone_led.h"
@@ -152,6 +156,11 @@ static void drain_requests(void) {
     if (craft_main_take_save_request()) {
         static uint8_t buf[CRAFT_SAVE_MAX_BYTES];
         int slot = craft_main_save_slot();
+#if defined(CRAFT_NET_ENABLED) && CRAFT_NET_ENABLED
+        /* Flash save freezes both cores per sector — warn the peer so
+         * the quiet spell reads as "saving", not a dead link. */
+        craft_net_note_saving(true);
+#endif
         /* craft_main_save picks/keeps the chunks nonce internally
          * and stamps it into the serialised blob (HDR_OFF_CHUNKS_NONCE).
          * The seq is independent and just gives the slot picker its
@@ -163,6 +172,9 @@ static void drain_requests(void) {
             craft_menu_toast("World saved");
         else
             craft_menu_toast("Save failed");
+#if defined(CRAFT_NET_ENABLED) && CRAFT_NET_ENABLED
+        craft_net_note_saving(false);
+#endif
     }
     if (craft_main_take_load_request()) {
         int slot = craft_main_save_slot();
@@ -193,6 +205,23 @@ static void drain_requests(void) {
 /* Platform-random hook used by craft_main's next_seed(). On RP2350
  * get_rand_32 reads ROSC entropy + boot-rom RNG, fresh per call. */
 uint32_t craft_platform_rand32(void) { return get_rand_32(); }
+
+#if defined(CRAFT_NET_ENABLED) && CRAFT_NET_ENABLED
+/* Aggressive USB pump while the link is pairing/syncing: host-role
+ * enumeration advances one control transfer per task call, and once
+ * per 30 fps frame can't finish inside a role-flip window. ~8 ms of
+ * spaced pumping per frame pairs within a few seconds (the same
+ * pattern Mote uses in its fps-cap sleep). Audio keeps flowing too —
+ * the pairing screens run for whole seconds. */
+static void net_idle_pump(void) {
+    absolute_time_t end = make_timeout_time_us(8000);
+    while (absolute_time_diff_us(get_absolute_time(), end) > 0) {
+        craft_link_task();
+        sleep_us(300);
+    }
+    audio_pump();
+}
+#endif
 
 int main(void) {
     /* Crank to 280 MHz — the raycaster wants every cycle. */
@@ -250,6 +279,17 @@ int main(void) {
             extern void craft_lcd_present(const uint16_t *fb);
             craft_lcd_present(g_fb);
         }
+#if defined(CRAFT_NET_ENABLED) && CRAFT_NET_ENABLED
+        craft_net_set_idle_pump(net_idle_pump);
+        if (act == CRAFT_TITLE_JOIN) {
+            /* Guest: boot a throwaway random world so the main loop has
+             * something to render; craft_net swaps it for the host's
+             * world when the join transfer lands. */
+            craft_main_set_active_region(TBC_REGION_SCRATCH);
+            craft_main_init(g_fb, get_rand_32());
+            craft_net_begin_guest();
+        } else
+#endif
         if (act == CRAFT_TITLE_LOAD) {
             int slot = craft_title_chosen_slot();
             const uint8_t *blob;

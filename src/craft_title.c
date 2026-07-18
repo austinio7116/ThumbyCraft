@@ -20,8 +20,14 @@ static bool      s_prev_a;
 static CraftTitleAction s_pending;
 static int       s_chosen_slot;
 
-#define TILE_COUNT 5
 #define TILE_NEW   4
+#if defined(CRAFT_NET_ENABLED) && CRAFT_NET_ENABLED
+/* Co-op builds split the bottom row: New World | Join Friend. */
+#define TILE_JOIN  5
+#define TILE_COUNT 6
+#else
+#define TILE_COUNT 5
+#endif
 
 static inline uint16_t rgb565_v(int r, int g, int b) {
     if (r > 255) r = 255; if (r < 0) r = 0;
@@ -72,25 +78,28 @@ void craft_title_init(uint16_t *fb) {
 CraftTitleAction craft_title_step(const CraftInput *in) {
     bool dpad_now = in->up || in->down || in->left || in->right;
     if (dpad_now && !s_prev_dpad) {
-        /* Layout: slots 0..3 form a 2×2 on top, slot 4 (New World)
-         * spans the bottom row. UP from row 2 picks slot 0/1;
-         * DOWN from any slot moves to New. */
+        /* Layout: slots 0..3 form a 2×2 on top; row 2 is the bottom
+         * row — New World alone (solo builds) or New World | Join
+         * Friend (co-op builds). */
         int r, c;
-        if (s_sel == TILE_NEW) { r = 2; c = 0; }
+        if (s_sel >= TILE_NEW) { r = 2; c = s_sel - TILE_NEW; }
         else                   { r = s_sel / 2; c = s_sel % 2; }
         if (in->up) {
             r = (r > 0) ? r - 1 : 2;
         } else if (in->down) {
             r = (r < 2) ? r + 1 : 0;
-        } else if (in->left) {
-            if (r == 2) { /* New tile — wrap to top-right */ r = 1; c = 1; }
-            else c = (c + 1) & 1;
-        } else if (in->right) {
-            if (r == 2) { r = 0; c = 0; }
-            else c = (c + 1) & 1;
+        } else if (in->left || in->right) {
+            c = (c + 1) & 1;
         }
-        if (r == 2) s_sel = TILE_NEW;
-        else        s_sel = r * 2 + c;
+        if (r == 2) {
+#if defined(CRAFT_NET_ENABLED) && CRAFT_NET_ENABLED
+            s_sel = TILE_NEW + (c & 1);
+#else
+            s_sel = TILE_NEW;
+#endif
+        } else {
+            s_sel = r * 2 + c;
+        }
     }
     s_prev_dpad = dpad_now;
 
@@ -100,6 +109,10 @@ CraftTitleAction craft_title_step(const CraftInput *in) {
     if (a_now && !s_prev_a) {
         if (s_sel == TILE_NEW) {
             s_pending = CRAFT_TITLE_NEW;
+#if defined(CRAFT_NET_ENABLED) && CRAFT_NET_ENABLED
+        } else if (s_sel == TILE_JOIN) {
+            s_pending = CRAFT_TITLE_JOIN;
+#endif
         } else {
             if (craft_save_slot_used(s_sel)) {
                 s_chosen_slot = s_sel;
@@ -164,11 +177,15 @@ void craft_title_draw(void) {
         }
     }
 
-    /* "New World" tile spanning the bottom of the panel. */
+    /* Bottom row: "New World" spanning the panel (solo builds), or
+     * "New World" | "Join Friend" side by side (co-op builds). */
     int nw_x = grid_x;
     int nw_y = grid_y + 2 * tile + gap + 2;
     int nw_w = grid_w;
     int nw_h = 18;
+#if defined(CRAFT_NET_ENABLED) && CRAFT_NET_ENABLED
+    nw_w = (grid_w - gap) / 2;
+#endif
     fill_rect(nw_x, nw_y, nw_w, nw_h, rgb565_v(40, 80, 50));
     outline_rect(nw_x, nw_y, nw_w, nw_h, rgb565_v(100, 200, 120));
     const char *nw_label = "New World";
@@ -180,4 +197,21 @@ void craft_title_draw(void) {
         uint16_t hi = rgb565_v(255, 255, 255);
         outline_rect(nw_x - 1, nw_y - 1, nw_w + 2, nw_h + 2, hi);
     }
+#if defined(CRAFT_NET_ENABLED) && CRAFT_NET_ENABLED
+    {
+        int jf_x = nw_x + nw_w + gap;
+        int jf_w = grid_w - nw_w - gap;
+        fill_rect(jf_x, nw_y, jf_w, nw_h, rgb565_v(40, 60, 90));
+        outline_rect(jf_x, nw_y, jf_w, nw_h, rgb565_v(110, 160, 230));
+        const char *jf_label = "Join Friend";
+        int jlw = craft_font_width(jf_label);
+        craft_font_draw(s_fb, jf_label, jf_x + (jf_w - jlw) / 2,
+                        nw_y + (nw_h - 5) / 2,
+                        rgb565_v(255, 255, 255));
+        if (s_sel == TILE_JOIN) {
+            uint16_t hi = rgb565_v(255, 255, 255);
+            outline_rect(jf_x - 1, nw_y - 1, jf_w + 2, nw_h + 2, hi);
+        }
+    }
+#endif
 }

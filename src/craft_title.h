@@ -29,6 +29,7 @@ typedef enum {
     CRAFT_TITLE_STILL    = 0,   /* user hasn't picked yet */
     CRAFT_TITLE_NEW      = 1,   /* New World tile confirmed */
     CRAFT_TITLE_LOAD     = 2,   /* save slot confirmed; query slot via getter */
+    CRAFT_TITLE_JOIN     = 3,   /* Join Friend (2P link) confirmed — co-op builds only */
 } CraftTitleAction;
 
 void               craft_title_init(uint16_t *fb);

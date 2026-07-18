@@ -27,6 +27,15 @@ bool craft_chunk_store_save(int chunk_x, int chunk_z,
     return true;
 }
 
+/* Nothing to enumerate — the mod hash carries everything on host, so
+ * the co-op world transfer's SEC_MODS section covers the whole diff. */
+int craft_chunk_store_slots(void) { return 0; }
+int craft_chunk_store_read_slot(int slot, int *cx, int *cz,
+                                ChunkMod *out, int max_entries) {
+    (void)slot; (void)cx; (void)cz; (void)out; (void)max_entries;
+    return -1;
+}
+
 void craft_chunk_store_erase_region(int region) { (void)region; }
 void craft_chunk_store_copy(int src_region, uint32_t src_nonce,
                             int dst_region, uint32_t dst_nonce) {

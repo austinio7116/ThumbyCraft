@@ -50,6 +50,11 @@ static const MenuItem ITEMS[] = {
 #ifdef CRAFT_HOST
     { "Mouse sens",    CRAFT_MENU_RESULT_MOUSE_SENS, false },
 #endif
+#if defined(CRAFT_NET_ENABLED) && CRAFT_NET_ENABLED
+    /* Host a 2-player link session: friend joins THIS world via the
+     * title screen's "Join Friend" (USB-C cable device-to-device). */
+    { "Invite friend", CRAFT_MENU_RESULT_LINK_INVITE, true },
+#endif
     { "New world",     CRAFT_MENU_RESULT_NEW_WORLD,  true  },
 #ifdef THUMBYONE_SLOT_MODE
     /* Reboot into ThumbyOne lobby. Only present in slot builds —
@@ -121,6 +126,12 @@ static bool  s_input_prev_b;
 static bool  s_input_prev_menu;
 static bool  s_dpad_was_pressed;
 static float s_dpad_repeat_t;
+
+bool craft_menu_chest_view(int *wx, int *wy, int *wz) {
+    if (!s_open || s_page != PAGE_CHEST) return false;
+    *wx = s_chest_wx; *wy = s_chest_wy; *wz = s_chest_wz;
+    return true;
+}
 
 void craft_menu_open(const CraftInput *in) {
     s_open = true;

@@ -154,4 +154,12 @@ bool craft_main_take_quit_to_lobby_request(void);
 /* Current world time in seconds (wraps at DAY_LENGTH). For HUD use. */
 float craft_main_world_time(void);
 
+#if defined(CRAFT_NET_ENABLED) && CRAFT_NET_ENABLED
+/* --- Co-op guest world lifecycle (see craft_net.c) ---------------- */
+void craft_main_net_guest_prepare(uint32_t seed);
+void craft_main_net_guest_adopt(Vec3 spawn, float world_time);
+void craft_main_net_guest_abort(void);
+void craft_main_net_set_world_time(float t);
+#endif
+
 #endif

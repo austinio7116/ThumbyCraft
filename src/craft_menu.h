@@ -46,6 +46,9 @@ typedef enum {
 #ifdef CRAFT_HOST
     , CRAFT_MENU_RESULT_MOUSE_SENS /* host-only: mouse-look sensitivity slider */
 #endif
+#if defined(CRAFT_NET_ENABLED) && CRAFT_NET_ENABLED
+    , CRAFT_MENU_RESULT_LINK_INVITE /* start hosting a 2-player link session */
+#endif
 } CraftMenuResult;
 
 /* Open the menu. `in` is the current input snapshot — used to seed
@@ -77,5 +80,9 @@ void              craft_menu_toast(const char *msg);
  * dt in seconds. */
 void              craft_menu_toast_tick(float dt);
 const char       *craft_menu_toast_text(void);
+
+/* Co-op: true while the chest page is open, filling in the bound chest
+ * coords. craft_net polls this to sync the record when the UI closes. */
+bool              craft_menu_chest_view(int *wx, int *wy, int *wz);
 
 #endif

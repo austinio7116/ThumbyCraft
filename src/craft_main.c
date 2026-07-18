@@ -37,6 +37,10 @@
 #include "thumbyone_settings.h"
 #endif
 
+#if defined(CRAFT_NET_ENABLED) && CRAFT_NET_ENABLED
+#include "craft_net.h"
+#endif
+
 #include <string.h>
 
 #define CRAFT_DAY_LENGTH 300.0f      /* 5 min total cycle. Sun curve
@@ -610,8 +614,18 @@ static void handle_menu_result(CraftMenuResult r) {
             s_save_req = true;
             break;
         case CRAFT_MENU_RESULT_LOAD:
+#if defined(CRAFT_NET_ENABLED) && CRAFT_NET_ENABLED
+            /* Loading a different world under a live link would desync
+             * both sides — leave the session first. */
+            if (craft_net_started()) craft_net_stop(true);
+#endif
             s_load_req = true;
             break;
+#if defined(CRAFT_NET_ENABLED) && CRAFT_NET_ENABLED
+        case CRAFT_MENU_RESULT_LINK_INVITE:
+            craft_net_begin_host();
+            break;
+#endif
         case CRAFT_MENU_RESULT_FLY_TOGGLE:
             s_player.fly_mode = !s_player.fly_mode;
             s_player.vel = v3(0, 0, 0);
@@ -678,6 +692,9 @@ static void handle_menu_result(CraftMenuResult r) {
             break;
         }
         case CRAFT_MENU_RESULT_NEW_WORLD: {
+#if defined(CRAFT_NET_ENABLED) && CRAFT_NET_ENABLED
+            if (craft_net_started()) craft_net_stop(true);
+#endif
             /* Capture settings BEFORE player_init memsets them away. The
              * previous version of this code captured AFTER init and so
              * always read the freshly-zeroed defaults — that's why
@@ -745,6 +762,23 @@ static void handle_menu_result(CraftMenuResult r) {
 
 void craft_main_step(const CraftInput *in, float dt, int fps) {
     craft_menu_toast_tick(dt);
+#if defined(CRAFT_NET_ENABLED) && CRAFT_NET_ENABLED
+    craft_net_tick(in, dt);
+    if (craft_net_blocking()) {
+        /* Guest joining: freeze gameplay, keep the last world rendering
+         * behind the sync overlay. */
+        s_player.cam.pos.y -= s_player.step_lag;
+        craft_render_set_time(s_world_time);
+        craft_render_begin(&s_player.cam);
+        craft_render_strip(&s_player.cam, s_fb, 0, CRAFT_FB_H);
+        craft_render_stars(&s_player.cam, s_fb);
+        craft_render_celestials(&s_player.cam, s_fb);
+        hud_present(0);
+        craft_net_draw(s_fb);
+        s_player.cam.pos.y += s_player.step_lag;
+        return;
+    }
+#endif
     if (craft_menu_is_open()) {
         CraftMenuResult r = craft_menu_tick(in, &s_player);
         handle_menu_result(r);
@@ -755,6 +789,9 @@ void craft_main_step(const CraftInput *in, float dt, int fps) {
         craft_render_stars(&s_player.cam, s_fb);
         craft_render_celestials(&s_player.cam, s_fb);
         craft_mobs_render(&s_player.cam, s_fb);
+#if defined(CRAFT_NET_ENABLED) && CRAFT_NET_ENABLED
+        craft_net_render_remote(&s_player.cam, s_fb);
+#endif
         craft_arrows_render(&s_player.cam, s_fb);
         craft_drops_render(&s_player.cam, s_fb);
         craft_torches_render(&s_player.cam, s_fb);
@@ -762,6 +799,9 @@ void craft_main_step(const CraftInput *in, float dt, int fps) {
         craft_render_pick_outline(&s_player.cam, s_fb);
         hud_present(s_show_fps ? fps : 0);
         craft_menu_draw(s_fb, &s_player);
+#if defined(CRAFT_NET_ENABLED) && CRAFT_NET_ENABLED
+        craft_net_draw(s_fb);
+#endif
         s_player.cam.pos.y += s_player.step_lag;
         return;
     }
@@ -843,6 +883,9 @@ void craft_main_step(const CraftInput *in, float dt, int fps) {
     craft_render_stars(&s_player.cam, s_fb);
     craft_render_celestials(&s_player.cam, s_fb);
     craft_mobs_render(&s_player.cam, s_fb);
+#if defined(CRAFT_NET_ENABLED) && CRAFT_NET_ENABLED
+    craft_net_render_remote(&s_player.cam, s_fb);
+#endif
     craft_arrows_render(&s_player.cam, s_fb);
     craft_drops_render(&s_player.cam, s_fb);
     craft_torches_render(&s_player.cam, s_fb);
@@ -854,11 +897,20 @@ void craft_main_step(const CraftInput *in, float dt, int fps) {
     craft_render_held_item(s_player.hotbar[s_player.hotbar_idx],
                            s_fb, s_held_swing_t, s_player.bow_draw_t);
     hud_present(s_show_fps ? fps : 0);
+#if defined(CRAFT_NET_ENABLED) && CRAFT_NET_ENABLED
+    craft_net_draw(s_fb);
+#endif
     s_player.cam.pos.y += s_player.step_lag;
 }
 
 void craft_main_tick(const CraftInput *in, float dt) {
     craft_menu_toast_tick(dt);
+#if defined(CRAFT_NET_ENABLED) && CRAFT_NET_ENABLED
+    craft_net_tick(in, dt);
+    /* Guest joining: gameplay frozen; the render phases still run each
+     * frame and craft_main_draw_hud paints the sync overlay. */
+    if (craft_net_blocking()) return;
+#endif
     if (craft_menu_is_open()) {
         CraftMenuResult r = craft_menu_tick(in, &s_player);
         handle_menu_result(r);
@@ -959,6 +1011,9 @@ void craft_main_draw_hud(int fps) {
     craft_render_stars(&s_player.cam, s_fb);
     craft_render_celestials(&s_player.cam, s_fb);
     craft_mobs_render(&s_player.cam, s_fb);
+#if defined(CRAFT_NET_ENABLED) && CRAFT_NET_ENABLED
+    craft_net_render_remote(&s_player.cam, s_fb);
+#endif
     craft_arrows_render(&s_player.cam, s_fb);
     craft_drops_render(&s_player.cam, s_fb);
     /* Pre-compute the picker hit so the sprite render can highlight
@@ -979,12 +1034,85 @@ void craft_main_draw_hud(int fps) {
                            s_fb, s_held_swing_t, s_player.bow_draw_t);
     hud_present(s_show_fps ? fps : 0);
     if (craft_menu_is_open()) craft_menu_draw(s_fb, &s_player);
+#if defined(CRAFT_NET_ENABLED) && CRAFT_NET_ENABLED
+    craft_net_draw(s_fb);
+#endif
     /* Restore logical cam y so next tick's physics is correct. */
     s_player.cam.pos.y += s_player.step_lag;
 }
 
 uint32_t craft_main_seed(void) { return s_seed; }
 const CraftPlayer *craft_main_player(void) { return &s_player; }
+
+#if defined(CRAFT_NET_ENABLED) && CRAFT_NET_ENABLED
+/* --- Co-op guest world lifecycle (called from craft_net) ---------- */
+
+/* The host's meta just arrived: drop the placeholder world and rebind
+ * a fresh scratch region so the incoming journal lands cleanly. The
+ * resident block buffer keeps rendering the old terrain behind the
+ * sync overlay until adopt() regenerates it. */
+void craft_main_net_guest_prepare(uint32_t seed) {
+    s_seed = seed;
+    scratch_new_nonce();
+    craft_main_set_active_region(TBC_REGION_SCRATCH);
+    craft_world_reset_mods();
+    craft_chests_init();
+    craft_furnace_init();
+}
+
+/* Journal fully ingested: regenerate the window from the host's seed
+ * around the host-provided spawn and enter their world. Session
+ * settings (mode, invert-Y, music) carry across like New World. */
+void craft_main_net_guest_adopt(Vec3 spawn, float world_time) {
+    CraftGameMode mode_was  = s_player.mode;
+    bool          inv_was   = s_player.invert_y;
+    bool          music_was = craft_audio_music_is_enabled();
+    craft_water_init();
+    craft_lava_init();
+    craft_redstone_init();
+    craft_drops_init();
+    craft_particles_init();
+    craft_world_load_around((int)spawn.x, (int)spawn.z, s_seed);
+    craft_player_init(&s_player, spawn);
+    craft_mobs_spawn_around(spawn, s_seed);
+    craft_player_set_mode(&s_player, mode_was);
+    s_player.invert_y = inv_was;
+    craft_audio_music_enable(music_was);
+    if (mode_was == CRAFT_MODE_SURVIVAL) craft_mobs_spawn_hostile(&s_player, 3);
+    s_world_time = world_time;
+}
+
+/* The join failed/cancelled after prepare() dropped the old world —
+ * recover into a fresh solo world (the New World path, minus toast). */
+void craft_main_net_guest_abort(void) {
+    CraftGameMode mode_was = s_player.mode;
+    bool          inv_was  = s_player.invert_y;
+    uint32_t ns = next_seed();
+    s_seed = ns;
+    scratch_new_nonce();
+    craft_main_set_active_region(TBC_REGION_SCRATCH);
+    craft_world_reset_mods();
+    craft_chests_init();
+    craft_furnace_init();
+    craft_water_init();
+    craft_lava_init();
+    craft_redstone_init();
+    craft_drops_init();
+    craft_particles_init();
+    craft_world_load_around(0, 0, ns);
+    Vec3 sp = craft_gen_spawn();
+    craft_player_init(&s_player, sp);
+    craft_mobs_spawn_around(sp, ns);
+    craft_player_set_mode(&s_player, mode_was);
+    s_player.invert_y = inv_was;
+    s_world_time = 60.0f;
+}
+
+/* Guest clock follows the host (piggybacked on state messages). */
+void craft_main_net_set_world_time(float t) {
+    if (t >= 0.0f && t < CRAFT_DAY_LENGTH) s_world_time = t;
+}
+#endif /* CRAFT_NET_ENABLED */
 
 /* Mouse-look hook for the host build: add yaw/pitch deltas (radians)
  * straight to the player camera. The device has no pointer, so this is

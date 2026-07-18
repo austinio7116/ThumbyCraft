@@ -220,6 +220,27 @@ bool craft_chunk_store_save(int chunk_x, int chunk_z,
     return true;
 }
 
+int craft_chunk_store_slots(void) { return CS_SLOTS; }
+
+int craft_chunk_store_read_slot(int slot, int *cx, int *cz,
+                                ChunkMod *out, int max_entries) {
+    if (s_region < 0) return -1;
+    int count = 0;
+    if (!read_header(s_region, slot, s_nonce, cx, cz, &count)) return -1;
+    if (out) {
+        int n = count > max_entries ? max_entries : count;
+        uint32_t off = region_base(s_region) + (uint32_t)slot * CS_SECTOR_SIZE;
+        const uint8_t *p = flash_at(off + OFF_MODS);
+        for (int i = 0; i < n; i++) {
+            out[i].lx  = p[i * 4 + 0];
+            out[i].y   = p[i * 4 + 1];
+            out[i].lz  = p[i * 4 + 2];
+            out[i].blk = p[i * 4 + 3];
+        }
+    }
+    return count;
+}
+
 void craft_chunk_store_erase_region(int region) {
     if ((unsigned)region >= TBC_REGION_COUNT) return;
     /* Per-sector erase, no progress bar — only invoked from explicit

@@ -28,6 +28,11 @@
 #include "craft_save.h"
 #include "craft_menu.h"
 
+#if defined(CRAFT_NET_ENABLED) && CRAFT_NET_ENABLED
+#include "craft_net.h"
+#include "craft_world.h"   /* co-op self-test: verify edit propagation */
+#endif
+
 #include <SDL2/SDL.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -159,7 +164,13 @@ static bool try_load(void) {
 }
 static void try_save(void) {
     uint8_t buf[CRAFT_SAVE_MAX_BYTES];
+#if defined(CRAFT_NET_ENABLED) && CRAFT_NET_ENABLED
+    craft_net_note_saving(true);
+#endif
     size_t n = craft_main_save(buf, sizeof buf);
+#if defined(CRAFT_NET_ENABLED) && CRAFT_NET_ENABLED
+    craft_net_note_saving(false);
+#endif
     if (n == 0) { printf("[host] save failed (too many deltas?)\n"); return; }
     FILE *f = fopen(SAV_PATH, "wb");
     if (!f) { perror("save"); return; }
@@ -200,6 +211,30 @@ int main(int argc, char **argv) {
     craft_main_init(g_fb, seed);
     try_load();
 
+#if defined(CRAFT_NET_ENABLED) && CRAFT_NET_ENABLED
+    /* Scripted co-op start for two-instance testing:
+     *   CRAFT_NET_AUTO=host  → begin hosting immediately
+     *   CRAFT_NET_AUTO=join  → begin joining immediately
+     * (Interactive: F2 hosts, F3 joins.) */
+    {
+        /* CRAFT_NET_TEST_BULK=N: journal N synthetic edits before the
+         * link opens, so the join transfer streams a multi-kilobyte,
+         * multi-section journal (exercises flow control end to end). */
+        const char *bulk = getenv("CRAFT_NET_TEST_BULK");
+        if (bulk) {
+            int n = atoi(bulk);
+            for (int i = 0; i < n; i++)
+                craft_world_set(100 + (i % 40), 10 + (i / 1600),
+                                100 + (i / 40) % 40, BLK_STONE);
+            printf("[net-test] bulk: journalled %d edits, mods=%d\n",
+                   n, craft_world_mod_count());
+        }
+        const char *an = getenv("CRAFT_NET_AUTO");
+        if (an && strcmp(an, "host") == 0) craft_net_begin_host();
+        if (an && strcmp(an, "join") == 0) craft_net_begin_guest();
+    }
+#endif
+
     /* Host plays FPS-style: WASD move/strafe via the DPAD_STRAFE scheme,
      * yaw/pitch from the mouse.
      *
@@ -228,6 +263,7 @@ int main(int argc, char **argv) {
 
     EdgeState e_a = {0}, e_b = {0}, e_lb = {0}, e_rb = {0}, e_menu = {0};
     EdgeState e_f1 = {0}, e_f5 = {0}, e_f9 = {0}, e_grab = {0};
+    EdgeState e_f2 = {0}, e_f3 = {0};
     bool fog_on = true;
 
     Uint32 last_ms = SDL_GetTicks();
@@ -335,6 +371,16 @@ int main(int argc, char **argv) {
         if (press_f5) try_save();
         if (press_f9) try_load();
 
+#if defined(CRAFT_NET_ENABLED) && CRAFT_NET_ENABLED
+        /* Link play (two instances pair via the Unix socket):
+         *   F2 = host (invite into this world), F3 = join a host. */
+        bool press_f2, press_f3;
+        edge_update(&e_f2, k[SDL_SCANCODE_F2], now_ms, &press_f2, &long_dummy);
+        edge_update(&e_f3, k[SDL_SCANCODE_F3], now_ms, &press_f3, &long_dummy);
+        if (press_f2) { printf("[host] F2: hosting link session\n"); craft_net_begin_host(); }
+        if (press_f3) { printf("[host] F3: joining link session\n"); craft_net_begin_guest(); }
+#endif
+
         bool press_grab;
         edge_update(&e_grab, k[SDL_SCANCODE_G] || k[SDL_SCANCODE_GRAVE],
                     now_ms, &press_grab, &long_dummy);
@@ -347,6 +393,43 @@ int main(int argc, char **argv) {
         }
 
         craft_main_step(&in, dt, fps_value);
+
+#if defined(CRAFT_NET_ENABLED) && CRAFT_NET_ENABLED
+        /* CRAFT_NET_TEST=1 self-test: once linked, the host places a
+         * stone at a fixed absolute coordinate; the guest polls its mod
+         * journal for it and reports PASS — proves join transfer + live
+         * edit stream end to end without needing gameplay input. */
+        if (getenv("CRAFT_NET_TEST") && craft_net_active()) {
+            static float t_net_test;
+            static int   net_test_stage;    /* 0 pending, 1 first leg done, 2 done */
+            t_net_test += dt;
+            if (craft_net_is_host()) {
+                if (net_test_stage == 0 && t_net_test > 2.0f) {
+                    net_test_stage = 1;
+                    craft_world_set(5, 30, 5, BLK_STONE);
+                    printf("[net-test] host placed STONE at (5,30,5), seed=%u, mods=%d\n",
+                           craft_main_seed(), craft_world_mod_count());
+                    fflush(stdout);
+                } else if (net_test_stage == 1 &&
+                           craft_world_mod_get(7, 30, 7) == (int)BLK_STONE) {
+                    net_test_stage = 2;
+                    printf("[net-test] PASS: host received guest edit, mods=%d\n",
+                           craft_world_mod_count());
+                    fflush(stdout);
+                }
+            } else {
+                if (net_test_stage == 0 &&
+                    craft_world_mod_get(5, 30, 5) == (int)BLK_STONE) {
+                    net_test_stage = 1;
+                    printf("[net-test] PASS: guest received edit, seed=%u, mods=%d\n",
+                           craft_main_seed(), craft_world_mod_count());
+                    craft_world_set(7, 30, 7, BLK_STONE);
+                    printf("[net-test] guest placed STONE at (7,30,7)\n");
+                    fflush(stdout);
+                }
+            }
+        }
+#endif
         /* Drain menu requests. */
         if (craft_main_take_save_request()) {
             try_save();

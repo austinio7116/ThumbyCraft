@@ -63,6 +63,8 @@ add_custom_target(generate_craft_textures DEPENDS ${CRAFT_BAKED_C})
 add_executable(thumbycraft_host
     ${CMAKE_CURRENT_LIST_DIR}/host_main.c
     ${CMAKE_CURRENT_LIST_DIR}/craft_chunk_store_stub.c
+    ${CMAKE_CURRENT_LIST_DIR}/craft_link_socket.c
+    ${SRC}/craft_net.c
     ${SRC}/craft_world.c
     ${SRC}/craft_blocks.c
     ${SRC}/craft_gen.c
@@ -88,7 +90,11 @@ add_executable(thumbycraft_host
     ${CRAFT_BAKED_C}
 )
 add_dependencies(thumbycraft_host generate_craft_textures)
-target_compile_definitions(thumbycraft_host PRIVATE CRAFT_TEXTURES_BAKED=1 CRAFT_HOST=1)
+# CRAFT_NET_ENABLED: 2-player co-op — two host instances pair over a
+# Unix socket (craft_link_socket.c). F2 hosts, F3 joins. The headless
+# harnesses below build without it, so their behaviour is unchanged.
+target_compile_definitions(thumbycraft_host PRIVATE
+    CRAFT_TEXTURES_BAKED=1 CRAFT_HOST=1 CRAFT_NET_ENABLED=1)
 
 target_include_directories(thumbycraft_host PRIVATE
     ${SRC}

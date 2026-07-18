@@ -68,6 +68,14 @@ void craft_torches_record_orient(int wx, int wy, int wz, int face) {
         e->flags = 1;
     }
     e->orient = (uint8_t)face;
+#if CRAFT_NET_ENABLED
+    /* Co-op: ride the mount face along with the pending block edit so
+     * the peer's torch/lever/piston points the same way. */
+    {
+        extern void craft_net_note_orient(int wx, int wy, int wz, int face);
+        craft_net_note_orient(wx, wy, wz, face);
+    }
+#endif
 }
 
 void craft_torches_forget_orient(int wx, int wy, int wz) {
