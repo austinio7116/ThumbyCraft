@@ -170,7 +170,7 @@ static void drain_requests(void) {
          * and stamps it into the serialised blob (HDR_OFF_CHUNKS_NONCE).
          * The seq is independent and just gives the slot picker its
          * "newest" ordering. */
-        size_t n = craft_main_save(buf, sizeof buf);
+        size_t n = craft_main_save(buf, CRAFT_SAVE_MAX_BYTES);
         if (n > 0 && craft_save_flash_write_slot(
                          slot, craft_save_flash_pick_next_seq(),
                          buf, n, craft_main_thumb()))
