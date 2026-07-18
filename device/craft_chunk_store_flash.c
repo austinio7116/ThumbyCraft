@@ -154,6 +154,8 @@ int craft_chunk_store_load(int chunk_x, int chunk_z,
 /* Shared 4 KB staging page for save + copy. Keeps BSS down. */
 uint8_t cs_staging_page[CS_SECTOR_SIZE] __attribute__((aligned(4)));
 
+uint8_t *craft_chunk_store_scratch4k(void) { return cs_staging_page; }
+
 /* Write a fully-built sector buffer to (region, slot). Erase-then-
  * program; lockout core 1 across the erase+program window. */
 static void program_sector(int region, int slot, const uint8_t *page) {

@@ -13,9 +13,12 @@
  *   u32 crc32 over [magic..pad]
  *   bytes 2048..   32×32 RGB565 thumbnail (exactly 2048 bytes)
  *
- * Per-slot 4 KB caches let read_slot / read_thumb / slot_used return
- * stable in-RAM pointers (FatFs has no mmap-equivalent). Caches are
- * lazy: each slot is read on first query and refreshed on write.
+ * RAM model (slimmed for the co-op link's BSS budget): thumbnails and
+ * used/seq metadata are cached per slot (the title screen reads all
+ * four every frame), but only ONE 4 KB record sector stays resident,
+ * tagged with the slot it holds — switching slots costs one file read.
+ * read_slot's pointer stays valid until the next record-cache miss or
+ * write, which covers every caller (all consume the blob immediately).
  */
 #include "craft_save_flash.h"
 
@@ -34,10 +37,13 @@
 #define THUMB_OFFSET       2048u
 #define MAX_RECORD_BYTES   (THUMB_OFFSET - 16u)
 
-/* Per-slot 4 KB cache mirrors what would be the on-flash sector. */
-static uint8_t s_cache[CRAFT_SAVE_SLOT_COUNT][SECTOR_SIZE] __attribute__((aligned(4)));
-static bool    s_cache_valid[CRAFT_SAVE_SLOT_COUNT];
-static bool    s_cache_used[CRAFT_SAVE_SLOT_COUNT];
+/* One shared record-sector cache + small per-slot metadata. */
+static uint8_t  s_record[SECTOR_SIZE] __attribute__((aligned(4)));
+static int      s_record_slot = -1;      /* slot s_record holds; -1 = none */
+static uint8_t  s_thumbs[CRAFT_SAVE_SLOT_COUNT][THUMB_BYTES] __attribute__((aligned(2)));
+static bool     s_meta_valid[CRAFT_SAVE_SLOT_COUNT];
+static bool     s_used[CRAFT_SAVE_SLOT_COUNT];
+static uint32_t s_seq[CRAFT_SAVE_SLOT_COUNT];
 
 static const char *slot_path(int slot) {
     static char path[32];
@@ -70,11 +76,10 @@ static uint32_t crc32_calc(const uint8_t *p, size_t n) {
     return ~c;
 }
 
-/* Validate the cached sector for `slot`. Returns the record byte
- * count if valid, else 0. */
-static uint32_t cache_record_len(int slot) {
-    if ((unsigned)slot >= CRAFT_SAVE_SLOT_COUNT) return 0;
-    const uint8_t *p = s_cache[slot];
+/* Validate the shared record cache. Returns the record byte count if
+ * valid, else 0. */
+static uint32_t record_len(void) {
+    const uint8_t *p = s_record;
     if (rd32(p) != CRAFT_SAVE_MAGIC_FLASH) return 0;
     uint32_t len = rd32(p + 8);
     if (len == 0 || len > MAX_RECORD_BYTES) return 0;
@@ -87,36 +92,48 @@ static uint32_t cache_record_len(int slot) {
     return len;
 }
 
-/* Lazy-load slot's cache from the file. */
-static void ensure_loaded(int slot) {
-    if ((unsigned)slot >= CRAFT_SAVE_SLOT_COUNT) return;
-    if (s_cache_valid[slot]) return;
-    s_cache_valid[slot] = true;
-    memset(s_cache[slot], 0xFF, SECTOR_SIZE);
-    s_cache_used[slot] = false;
+/* Pull `slot`'s file into the shared record cache (evicting whatever
+ * it held). Returns the validated record length (0 = empty/corrupt). */
+static uint32_t ensure_record(int slot) {
+    if ((unsigned)slot >= CRAFT_SAVE_SLOT_COUNT) return 0;
+    if (s_record_slot == slot) return record_len();
+    s_record_slot = slot;
+    memset(s_record, 0xFF, SECTOR_SIZE);
     mkdir_once();
     FIL fp;
     if (f_open(&fp, slot_path(slot), FA_READ | FA_OPEN_EXISTING) != FR_OK) {
-        return;   /* file doesn't exist — slot reads as empty */
+        return 0;   /* file doesn't exist — slot reads as empty */
     }
     UINT br = 0;
-    f_read(&fp, s_cache[slot], SECTOR_SIZE, &br);
+    f_read(&fp, s_record, SECTOR_SIZE, &br);
     f_close(&fp);
-    s_cache_used[slot] = (cache_record_len(slot) > 0);
+    return record_len();
+}
+
+/* Lazy-fill slot's metadata (used flag, seq, thumbnail copy). */
+static void ensure_meta(int slot) {
+    if ((unsigned)slot >= CRAFT_SAVE_SLOT_COUNT) return;
+    if (s_meta_valid[slot]) return;
+    s_meta_valid[slot] = true;
+    uint32_t len = ensure_record(slot);
+    s_used[slot] = (len > 0);
+    s_seq[slot]  = len ? rd32(&s_record[4]) : 0;
+    if (len) memcpy(s_thumbs[slot], &s_record[THUMB_OFFSET], THUMB_BYTES);
 }
 
 static void invalidate_cache(int slot) {
     if ((unsigned)slot >= CRAFT_SAVE_SLOT_COUNT) return;
-    s_cache_valid[slot] = false;
-    s_cache_used[slot]  = false;
+    s_meta_valid[slot] = false;
+    s_used[slot]       = false;
+    if (s_record_slot == slot) s_record_slot = -1;
 }
 
 /* --- Public API ------------------------------------------------- */
 
 bool craft_save_flash_slot_used(int slot) {
     if ((unsigned)slot >= CRAFT_SAVE_SLOT_COUNT) return false;
-    ensure_loaded(slot);
-    return s_cache_used[slot];
+    ensure_meta(slot);
+    return s_used[slot];
 }
 
 size_t craft_save_flash_read_slot(int slot, const uint8_t **out_ptr) {
@@ -124,35 +141,31 @@ size_t craft_save_flash_read_slot(int slot, const uint8_t **out_ptr) {
         if (out_ptr) *out_ptr = NULL;
         return 0;
     }
-    ensure_loaded(slot);
-    uint32_t len = cache_record_len(slot);
+    uint32_t len = ensure_record(slot);
     if (len == 0) {
         if (out_ptr) *out_ptr = NULL;
         return 0;
     }
-    if (out_ptr) *out_ptr = &s_cache[slot][12];
+    if (out_ptr) *out_ptr = &s_record[12];
     return len;
 }
 
 const uint16_t *craft_save_flash_read_thumb(int slot) {
     if (!craft_save_flash_slot_used(slot)) return NULL;
-    return (const uint16_t *)&s_cache[slot][THUMB_OFFSET];
+    return (const uint16_t *)s_thumbs[slot];
 }
 
 uint32_t craft_save_flash_slot_seq(int slot) {
     if ((unsigned)slot >= CRAFT_SAVE_SLOT_COUNT) return 0;
-    ensure_loaded(slot);
-    if (cache_record_len(slot) == 0) return 0;
-    return rd32(&s_cache[slot][4]);
+    ensure_meta(slot);
+    return s_seq[slot];
 }
 
 uint32_t craft_save_flash_pick_next_seq(void) {
     uint32_t best = 0;
     for (int s = 0; s < CRAFT_SAVE_SLOT_COUNT; s++) {
-        ensure_loaded(s);
-        if (cache_record_len(s) == 0) continue;
-        uint32_t seq = rd32(&s_cache[s][4]);
-        if (seq > best) best = seq;
+        ensure_meta(s);
+        if (s_used[s] && s_seq[s] > best) best = s_seq[s];
     }
     return best + 1;
 }
@@ -164,8 +177,10 @@ bool craft_save_flash_write_slot(int slot, uint32_t seq,
     if (n > MAX_RECORD_BYTES) return false;
     if (seq == 0) seq = craft_save_flash_pick_next_seq();
 
-    /* Build the full 4 KB sector image in-cache, then write the file. */
-    uint8_t *page = s_cache[slot];
+    /* Build the full 4 KB sector image in the shared record cache,
+     * then write the file. */
+    uint8_t *page = s_record;
+    s_record_slot = slot;
     memset(page, 0xFF, SECTOR_SIZE);
     wr32(page + 0, CRAFT_SAVE_MAGIC_FLASH);
     wr32(page + 4, seq);
@@ -194,8 +209,12 @@ bool craft_save_flash_write_slot(int slot, uint32_t seq,
         invalidate_cache(slot);
         return false;
     }
-    s_cache_valid[slot] = true;
-    s_cache_used[slot]  = true;
+    /* Refresh the per-slot metadata + thumbnail from the just-written
+     * sector image. */
+    s_meta_valid[slot] = true;
+    s_used[slot]       = true;
+    s_seq[slot]        = seq;
+    memcpy(s_thumbs[slot], page + THUMB_OFFSET, THUMB_BYTES);
     return true;
 }
 

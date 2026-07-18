@@ -14,13 +14,12 @@
  * drains with craft_link_recv(). Sends go straight to the active role's
  * CDC FIFO.
  *
- * ThumbyCraft has no other USB consumer (no stdio_usb, no MSC), so
- * unlike Mote there is no ownership arbitration — the link simply owns
- * the controller whenever it is started.
+ * ThumbyCraft has no other USB consumer while it is running (no
+ * stdio_usb, no MSC — in ThumbyOne slot mode the lobby's MSC only runs
+ * before the slot takes the chip), so unlike Mote there is no ownership
+ * arbitration — the link simply owns the controller whenever started.
  */
 #include "craft_link.h"
-
-#ifndef THUMBYONE_SLOT_MODE
 
 #include "tusb.h"
 #include "class/cdc/cdc_host.h"
@@ -272,15 +271,3 @@ int craft_link_recv(void *buf, int max) {
     }
     return n;
 }
-
-#else /* THUMBYONE_SLOT_MODE — the lobby owns USB; link is unavailable. */
-
-void craft_link_start(void) {}
-void craft_link_stop(void) {}
-void craft_link_task(void) {}
-int  craft_link_status(void) { return CRAFT_LINK_OFF; }
-int  craft_link_send(const void *data, int len) { (void)data; (void)len; return 0; }
-int  craft_link_recv(void *buf, int max) { (void)buf; (void)max; return 0; }
-int  craft_link_active(void) { return 0; }
-
-#endif /* THUMBYONE_SLOT_MODE */

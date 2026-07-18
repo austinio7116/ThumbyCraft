@@ -154,7 +154,12 @@ static void edge_update(EdgeState *e, bool now, uint32_t t_ms,
 /* --- Drain menu requests into platform actions -------------------- */
 static void drain_requests(void) {
     if (craft_main_take_save_request()) {
-        static uint8_t buf[CRAFT_SAVE_MAX_BYTES];
+        /* Serialise through the chunk store's 4 KB staging page —
+         * craft_main_save's force-persist (which also uses it) runs
+         * strictly BEFORE the serialise fills it, and the write-slot
+         * call below consumes it before any further chunk op. Saves a
+         * dedicated 4 KB buffer the slot build can't afford. */
+        uint8_t *buf = craft_chunk_store_scratch4k();
         int slot = craft_main_save_slot();
 #if defined(CRAFT_NET_ENABLED) && CRAFT_NET_ENABLED
         /* Flash save freezes both cores per sector — warn the peer so
@@ -194,6 +199,11 @@ static void drain_requests(void) {
     (void)craft_main_take_new_world_request();   /* engine handles it */
 #ifdef THUMBYONE_SLOT_MODE
     if (craft_main_take_quit_to_lobby_request()) {
+#if defined(CRAFT_NET_ENABLED) && CRAFT_NET_ENABLED
+        /* Tell the friend we're leaving before the reboot kills the
+         * link mid-keepalive. */
+        craft_net_stop(true);
+#endif
         /* Wait for any in-flight LCD DMA before tearing down, then
          * hand off to the lobby. Does not return. */
         craft_lcd_wait_idle();

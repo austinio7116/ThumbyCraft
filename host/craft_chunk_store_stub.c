@@ -36,6 +36,11 @@ int craft_chunk_store_read_slot(int slot, int *cx, int *cz,
     return -1;
 }
 
+uint8_t *craft_chunk_store_scratch4k(void) {
+    static uint8_t page[4096];
+    return page;
+}
+
 void craft_chunk_store_erase_region(int region) { (void)region; }
 void craft_chunk_store_copy(int src_region, uint32_t src_nonce,
                             int dst_region, uint32_t dst_nonce) {

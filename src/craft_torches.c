@@ -90,6 +90,24 @@ int craft_torches_lookup_orient(int wx, int wy, int wz) {
     return e ? (int)e->orient : (int)FACE_PY;
 }
 
+int craft_torches_orient_iter(int cursor, int32_t *wx, int *wy, int32_t *wz,
+                              uint8_t *orient) {
+    for (int i = cursor; i < ORIENT_HASH_SIZE; i++) {
+        OrientEntry *e = &s_orient[i];
+        if (!(e->flags & 1)) continue;
+        *wx = e->wx; *wz = e->wz; *wy = e->wy; *orient = e->orient;
+        return i + 1;
+    }
+    return -1;
+}
+
+int craft_torches_orient_count(void) {
+    int n = 0;
+    for (int i = 0; i < ORIENT_HASH_SIZE; i++)
+        if (s_orient[i].flags & 1) n++;
+    return n;
+}
+
 /* --- Save persistence -------------------------------------------- */
 
 static void put_u16_le(uint8_t *p, uint16_t v) {

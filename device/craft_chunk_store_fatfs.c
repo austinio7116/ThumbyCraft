@@ -51,6 +51,8 @@ static uint32_t s_nonce;
  * to one chunk-op at a time per the engine's serial usage. */
 static uint8_t s_page[CS_SECTOR_SIZE] __attribute__((aligned(4)));
 
+uint8_t *craft_chunk_store_scratch4k(void) { return s_page; }
+
 /* 256-bit bloom-style filter for "does this region have a file for
  * (cx, cz)?" — set by directory scan on bind and by save(); checked
  * by load() to skip the ~2 ms f_open(FR_NO_FILE) round-trip on
@@ -73,6 +75,24 @@ static void exists_set(int cx, int cz) {
     s_exists_bm[h >> 3] |= (uint8_t)(1u << (h & 7));
 }
 static void exists_clear_all(void) { memset(s_exists_bm, 0, sizeof s_exists_bm); }
+
+/* Chunk-coordinate table for enumeration (the co-op world transfer).
+ * Built from the same directory scan bind() already does; save()
+ * appends new coords. There's no random access into a FAT directory,
+ * so this is what makes craft_chunk_store_read_slot O(1). i16 chunk
+ * coords cover ±524k world cells — far past reachable play. */
+#define COORD_TABLE_MAX 192
+static struct { int16_t cx, cz; } s_coords[COORD_TABLE_MAX];
+static int s_coord_n;
+
+static void coord_add(int cx, int cz) {
+    for (int i = 0; i < s_coord_n; i++)
+        if (s_coords[i].cx == cx && s_coords[i].cz == cz) return;
+    if (s_coord_n >= COORD_TABLE_MAX) return;   /* enumeration-only loss */
+    s_coords[s_coord_n].cx = (int16_t)cx;
+    s_coords[s_coord_n].cz = (int16_t)cz;
+    s_coord_n++;
+}
 
 /* Parse "<cx>_<cz>.cnk" → (cx, cz). Returns true on success. */
 static bool parse_chunk_name(const char *name, int *out_cx, int *out_cz) {
@@ -189,6 +209,7 @@ void craft_chunk_store_bind(int region, uint32_t nonce) {
      * f_open(FR_NO_FILE) cost for chunks we know aren't there.
      * One pass over the dir per bind — cheap. */
     exists_clear_all();
+    s_coord_n = 0;
     DIR d;
     if (f_opendir(&d, region_dir(region)) != FR_OK) return;
     FILINFO fi;
@@ -197,6 +218,7 @@ void craft_chunk_store_bind(int region, uint32_t nonce) {
         int cx, cz;
         if (parse_chunk_name(fi.fname, &cx, &cz)) {
             exists_set(cx, cz);
+            coord_add(cx, cz);
         }
     }
     f_closedir(&d);
@@ -256,6 +278,7 @@ bool craft_chunk_store_save(int chunk_x, int chunk_z,
     mkdir_region(s_region);
     build_sector(s_nonce, chunk_x, chunk_z, mods, n, s_page);
     exists_set(chunk_x, chunk_z);
+    coord_add(chunk_x, chunk_z);
 
     FIL fp;
     if (f_open(&fp, path, FA_WRITE | FA_CREATE_ALWAYS) != FR_OK) return false;
@@ -269,6 +292,31 @@ bool craft_chunk_store_save(int chunk_x, int chunk_z,
     FRESULT r = f_write(&fp, s_page, end, &bw);
     f_close(&fp);
     return r == FR_OK && bw == end;
+}
+
+int craft_chunk_store_slots(void) { return s_coord_n; }
+
+int craft_chunk_store_read_slot(int slot, int *cx, int *cz,
+                                ChunkMod *out, int max_entries) {
+    if (s_region < 0 || (unsigned)slot >= (unsigned)s_coord_n) return -1;
+    int scx = s_coords[slot].cx, scz = s_coords[slot].cz;
+    if (cx) *cx = scx;
+    if (cz) *cz = scz;
+    if (out) return craft_chunk_store_load(scx, scz, out, max_entries);
+    /* Measuring pass — validate the file and return its count without
+     * copying (uses the shared s_page like every other chunk op). */
+    char path[48];
+    chunk_path(path, sizeof path, s_region, scx, scz);
+    FIL fp;
+    if (f_open(&fp, path, FA_READ | FA_OPEN_EXISTING) != FR_OK) return -1;
+    UINT br = 0;
+    FRESULT r = f_read(&fp, s_page, CS_SECTOR_SIZE, &br);
+    f_close(&fp);
+    if (r != FR_OK || br < OFF_MODS) return -1;
+    if (br < CS_SECTOR_SIZE) memset(s_page + br, 0xFF, CS_SECTOR_SIZE - br);
+    int count = 0;
+    if (!validate_header(s_page, s_nonce, NULL, NULL, &count)) return -1;
+    return count;
 }
 
 void craft_chunk_store_erase_region(int region) {

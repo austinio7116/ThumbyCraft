@@ -31,17 +31,20 @@
 #define CFG_TUD_MIDI            0
 #define CFG_TUD_VENDOR          0
 
-/* CDC FIFO + endpoint buffer sizes. */
-#define CFG_TUD_CDC_RX_BUFSIZE  256
-#define CFG_TUD_CDC_TX_BUFSIZE  256
+/* CDC FIFO + endpoint buffer sizes. 128-byte FIFOs (Mote uses 256):
+ * link traffic is a few hundred bytes per frame at most, and in the
+ * ThumbyOne slot every byte of BSS counts. craft_net paces its sends
+ * to whatever the FIFO accepts, so smaller just means more calls. */
+#define CFG_TUD_CDC_RX_BUFSIZE  128
+#define CFG_TUD_CDC_TX_BUFSIZE  128
 #define CFG_TUD_CDC_EP_BUFSIZE  64
 
-/* Host role — CDC host class only, no hub, a single peer. Small FIFOs:
- * link traffic is a few hundred bytes per frame at most, and every KB
- * here comes out of the ~64 KB heap ThumbyCraft has left. */
+/* Host role — CDC host class only, no hub, a single peer. The
+ * enumeration buffer only ever holds the PEER's descriptor set
+ * (device + config + strings, well under 128 bytes each). */
 #define CFG_TUH_ENABLED             1
 #define CFG_TUH_MAX_SPEED           OPT_MODE_FULL_SPEED
-#define CFG_TUH_ENUMERATION_BUFSIZE 256
+#define CFG_TUH_ENUMERATION_BUFSIZE 128
 #define CFG_TUH_DEVICE_MAX          1
 #define CFG_TUH_HUB                 0
 #define CFG_TUH_CDC                 1

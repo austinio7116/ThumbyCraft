@@ -1058,6 +1058,12 @@ void craft_main_net_guest_prepare(uint32_t seed) {
     craft_world_reset_mods();
     craft_chests_init();
     craft_furnace_init();
+    /* Wipe the placeholder world's torch orientations — the host's
+     * arrive as part of the journal stream. */
+    {
+        uint8_t empty[2] = { 0, 0 };
+        craft_torches_orient_deserialise(empty, sizeof empty);
+    }
 }
 
 /* Journal fully ingested: regenerate the window from the host's seed
@@ -1094,6 +1100,10 @@ void craft_main_net_guest_abort(void) {
     craft_world_reset_mods();
     craft_chests_init();
     craft_furnace_init();
+    {
+        uint8_t empty[2] = { 0, 0 };
+        craft_torches_orient_deserialise(empty, sizeof empty);
+    }
     craft_water_init();
     craft_lava_init();
     craft_redstone_init();

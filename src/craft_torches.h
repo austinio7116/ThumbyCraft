@@ -85,6 +85,14 @@ int  craft_torches_lookup_orient(int wx, int wy, int wz);
  * 3=-Z). Used by the DDA wire renderer to cut the dust shape. */
 uint8_t craft_torches_wire_connect_at(int wx, int wy, int wz);
 
+/* Co-op: iterate occupied orient-hash entries (cursor 0 to start; feed
+ * the return value back in; -1 = done) + total count. Lets craft_net
+ * stream orientations entry-by-entry instead of buffering the whole
+ * serialised blob. */
+int craft_torches_orient_iter(int cursor, int32_t *wx, int *wy, int32_t *wz,
+                              uint8_t *orient);
+int craft_torches_orient_count(void);
+
 /* Forget orientation for a torch being removed. */
 void craft_torches_forget_orient(int wx, int wy, int wz);
 

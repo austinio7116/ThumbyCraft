@@ -106,15 +106,13 @@ set(CRAFT_DEVICE_SOURCES
     ${CRAFT_BAKED_C}
 )
 
-# 2-player co-op over the USB-C link — standalone only. Slot mode is
-# compiled without it (the ThumbyOne lobby owns the USB controller),
-# so the slot build's RAM/behaviour is completely unchanged.
-if (NOT THUMBYONE_SLOT_MODE)
-    list(APPEND CRAFT_DEVICE_SOURCES
-        ${SRC}/craft_net.c
-        ${DEVICE}/craft_link_usb.c
-    )
-endif()
+# 2-player co-op over the USB-C link — both shapes. In slot mode the
+# lobby's MSC only runs before the slot takes the chip, so the link
+# owns the USB controller exactly like standalone does.
+list(APPEND CRAFT_DEVICE_SOURCES
+    ${SRC}/craft_net.c
+    ${DEVICE}/craft_link_usb.c
+)
 
 # In slot mode, pull in FatFs sources + ThumbyOne's shared helpers
 # (FS mount, LED + backlight + settings for the brightness chord).
@@ -171,23 +169,21 @@ target_link_libraries(thumbycraft
 )
 if (THUMBYONE_SLOT_MODE)
     target_link_libraries(thumbycraft hardware_pio hardware_adc)
-else()
-    # USB link: TinyUSB device + host on the one native controller
-    # (role-flip discovery, see craft_link_usb.c / tusb_config.h).
-    target_link_libraries(thumbycraft
-        tinyusb_device
-        tinyusb_host
-        tinyusb_board
-    )
 endif()
+# USB link: TinyUSB device + host on the one native controller
+# (role-flip discovery, see craft_link_usb.c / tusb_config.h).
+target_link_libraries(thumbycraft
+    tinyusb_device
+    tinyusb_host
+    tinyusb_board
+)
 
 if (THUMBYONE_SLOT_MODE)
-    # Slot mode: FatFs caches + ~10 KB shared helpers eat into the
-    # SRAM budget that standalone gives to the heap. Cut heap to 8 KB —
-    # the engine itself barely uses heap; this leaves enough for
-    # multicore_lockout's allocation while keeping us under the
-    # 520 KB SRAM ceiling.
-    set(CRAFT_HEAP_SIZE 0x2000)
+    # Slot mode: FatFs caches + ~10 KB shared helpers + the co-op
+    # link's BSS all come out of the heap budget. 4 KB (Mote's runner
+    # proves 6 KB works with FatFs + the same link; the Craft engine
+    # itself allocates nothing at runtime).
+    set(CRAFT_HEAP_SIZE 0x1000)
 else()
     # 12 KB (was 64 KB). Two things eat the old headroom:
     #  - the engine grew ~40 KB of BSS since the standalone was last
@@ -208,8 +204,8 @@ target_compile_definitions(thumbycraft PRIVATE
     PICO_STACK_SIZE=0x1000
     PICO_CORE1_STACK_SIZE=0x1000
     CRAFT_TEXTURES_BAKED=1
+    CRAFT_NET_ENABLED=1
     $<$<BOOL:${THUMBYONE_SLOT_MODE}>:THUMBYONE_SLOT_MODE=1>
-    $<$<NOT:$<BOOL:${THUMBYONE_SLOT_MODE}>>:CRAFT_NET_ENABLED=1>
 )
 add_dependencies(thumbycraft generate_craft_textures)
 

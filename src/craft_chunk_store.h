@@ -80,4 +80,11 @@ int craft_chunk_store_slots(void);
 int craft_chunk_store_read_slot(int slot, int *cx, int *cz,
                                 ChunkMod *out, int max_entries);
 
+/* Borrow the backend's 4 KB sector staging page for short-lived,
+ * same-call work (the platform save path serialises the save blob
+ * through it — always AFTER the force-persist that uses it for chunk
+ * sectors, never concurrently). Contents are clobbered by any
+ * chunk-store call. */
+uint8_t *craft_chunk_store_scratch4k(void);
+
 #endif

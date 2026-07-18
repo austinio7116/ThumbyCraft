@@ -73,8 +73,11 @@ static struct {
     uint8_t held;
 } s_peer;
 
-/* ---- outbound ring ------------------------------------------------------ */
-static uint8_t  s_txr[2048];         /* power of two */
+/* ---- outbound ring ------------------------------------------------------ *
+ * 512 B (power of two). Throughput is bounded by how fast the peer
+ * drains the CDC FIFO per frame, not by ring depth — the world-transfer
+ * pump simply refills it every frame until the FIFO stops accepting. */
+static uint8_t  s_txr[512];
 static uint16_t s_txh, s_txt;
 static int tx_space(void) {
     return (int)sizeof s_txr - 1 - ((uint16_t)(s_txh - s_txt) & (sizeof s_txr - 1));
@@ -115,7 +118,7 @@ static int32_t get_i32(const uint8_t *p) { return (int32_t)get32(p); }
 static float   getf(const uint8_t *p) { uint32_t u = get32(p); float f; memcpy(&f, &u, 4); return f; }
 
 /* ---- edit queue (both directions, echo-suppressed) ----------------------- */
-#define EDITQ 192
+#define EDITQ 96
 typedef struct {
     int32_t wx, wz;
     uint8_t wy, blk, orient;         /* orient 0xFF = none */
@@ -145,11 +148,14 @@ static void editq_push(int wx, int wy, int wz, uint8_t blk) {
 /* Section stream framed inside 'm' messages: [type u8][len u16][payload]. */
 #define SEC_CHUNK   1   /* cx i16, cz i16, count u16, count × ChunkMod(4) */
 #define SEC_MODS    2   /* count u16, count × (wx i32, wz i32, wy u8, blk u8) */
-#define SEC_ORIENT  3   /* craft_torches orient blob */
+#define SEC_ORIENTS 3   /* count u16, count × (wx i32, wz i32, wy u8, face u8) */
 #define SEC_CHESTS  4   /* craft_chests 180-byte blob */
 #define SEC_END     5   /* len 0 */
 
-#define STAGING_MAX 2688     /* >= orient blob (2562) and chunk section (1366) */
+/* Sized by the largest section: a full chunk record (6 + 340×4 mods).
+ * Everything else streams in ≤64-entry sections. Every byte here is
+ * BSS the ThumbyOne slot pays for, so keep it tight. */
+#define STAGING_MAX 1376
 static uint8_t s_staging[STAGING_MAX];
 
 static uint32_t s_wtotal, s_wdone;   /* stream bytes (both directions) */
@@ -158,9 +164,10 @@ static uint32_t s_rxfnv;             /* guest: running FNV over received */
 static uint16_t s_wseq;              /* 'm' sequence */
 
 /* host tx cursor */
-static int s_txphase;                /* 0 store, 1 hash, 2 orient, 3 chests, 4 end, 5 done */
+static int s_txphase;                /* 0 store, 1 hash, 2 orients, 3 chests, 4 end, 5 done */
 static int s_txslot;                 /* store slot cursor */
 static int s_txmod;                  /* hash cursor */
+static int s_txorient;               /* orient hash cursor */
 static int s_txoff, s_txlen;         /* progress inside staged section */
 static uint8_t s_trailer_sent;       /* FNV trailer queued after the stream */
 static uint8_t s_peer_acked;
@@ -224,12 +231,24 @@ static int stage_next_section(void) {
             break;
         }
         case 2: {                                    /* torch orientations */
-            size_t bl = craft_torches_orient_serialise(o + 3, STAGING_MAX - 3);
-            s_txphase = 3;
-            if (bl > 0) {
-                o[0] = SEC_ORIENT; put16(o + 1, (int)bl);
-                return 3 + (int)bl;
+            int n = 0;
+            int32_t wx, wz; int wy; uint8_t face;
+            while (n < 64 &&
+                   (s_txorient = craft_torches_orient_iter(s_txorient, &wx, &wy,
+                                                           &wz, &face)) >= 0) {
+                uint8_t *e = o + 5 + n * 10;
+                put32(e, (uint32_t)wx); put32(e + 4, (uint32_t)wz);
+                e[8] = (uint8_t)wy; e[9] = face;
+                n++;
             }
+            if (n > 0) {
+                int len = 2 + n * 10;
+                o[0] = SEC_ORIENTS; put16(o + 1, len);
+                put16(o + 3, n);
+                if (s_txorient < 0) s_txphase = 3;
+                return 3 + len;
+            }
+            s_txphase = 3;
             break;
         }
         case 3: {                                    /* chest table */
@@ -264,8 +283,12 @@ static uint32_t transfer_total_bytes(void) {
         total += 3u + 2u + (uint32_t)n * 10u;
         mods -= n;
     }
-    size_t bl = craft_torches_orient_serialise(s_staging, STAGING_MAX);
-    if (bl > 0) total += 3u + (uint32_t)bl;
+    int orients = craft_torches_orient_count();
+    while (orients > 0) {
+        int n = orients > 64 ? 64 : orients;
+        total += 3u + 2u + (uint32_t)n * 10u;
+        orients -= n;
+    }
     total += 3u + CRAFT_CHESTS_BLOB_BYTES;           /* chests */
     total += 3u;                                     /* end */
     return total;
@@ -274,7 +297,7 @@ static uint32_t transfer_total_bytes(void) {
 static void world_tx_begin(void) {
     s_wtotal = transfer_total_bytes();
     s_wdone = 0; s_wseq = 0; s_wfnv = 2166136261u;
-    s_txphase = 0; s_txslot = 0; s_txmod = 0;
+    s_txphase = 0; s_txslot = 0; s_txmod = 0; s_txorient = 0;
     s_txoff = 0; s_txlen = 0;
     s_trailer_sent = 0;
     s_peer_acked = 0;
@@ -347,6 +370,7 @@ static void world_rx_section(void) {
     int type = s_rxhdr[0];
     int len  = s_rxgot;
     const uint8_t *p = s_staging;
+    s_applying = 1;             /* never re-broadcast ingested journal data */
     switch (type) {
     case SEC_CHUNK: {
         if (len < 6) break;
@@ -367,9 +391,16 @@ static void world_rx_section(void) {
         }
         break;
     }
-    case SEC_ORIENT:
-        craft_torches_orient_deserialise(p, (size_t)len);
+    case SEC_ORIENTS: {
+        if (len < 2) break;
+        int n = (int)(uint16_t)(p[0] | (p[1] << 8));
+        if (2 + n * 10 > len) break;
+        for (int i = 0; i < n; i++) {
+            const uint8_t *e = p + 2 + i * 10;
+            craft_torches_record_orient(get_i32(e), e[8], get_i32(e + 4), e[9]);
+        }
         break;
+    }
     case SEC_CHESTS:
         if (len == CRAFT_CHESTS_BLOB_BYTES) craft_chests_deserialise(p);
         break;
@@ -377,6 +408,7 @@ static void world_rx_section(void) {
         s_stream_end = 1;
         break;
     }
+    s_applying = 0;
 }
 
 static void world_rx_bytes(const uint8_t *d, int n) {
