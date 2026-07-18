@@ -420,7 +420,17 @@ static void light_flood_from(int sx, int sy, int sz) {
     if ((unsigned)sy >= CRAFT_WORLD_Y) return;
     if ((unsigned)sz >= CRAFT_WORLD_Z) return;
 
-    LightQNode q[LIGHT_BFS_MAX];
+    /* BFS queue — borrows craft_zbuf as scratch. The queue is 7 KB
+     * and used to live on the (4 KB!) stack, surviving only because
+     * the stack overflow landed in the barely-used heap directly
+     * below; the ThumbyOne slot's tighter heap removed that crumple
+     * zone and the first window-shift relight froze the device.
+     * The z-buffer is dead storage here: floods only ever run from
+     * the tick phase (edits, shifts, world loads) and every render
+     * phase repopulates the z-buffer from scratch afterwards. */
+    _Static_assert(LIGHT_BFS_MAX * sizeof(LightQNode) <=
+                   CRAFT_FB_W * CRAFT_FB_H, "BFS queue must fit zbuf");
+    LightQNode *q = (LightQNode *)craft_zbuf;
     int qh = 0, qt = 0;
 
     int s_idx = local_idx(sx, sy, sz);
