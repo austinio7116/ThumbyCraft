@@ -854,6 +854,21 @@ void craft_net_tick(const CraftInput *in, float dt) {
     rx_pump();
     if (s_ns == NS_OFF || s_ns == NS_FAILED) return;
 
+    /* Keepalive from the hello stage on — never let the pipe sit silent
+     * longer than 500 ms. In-game this backs the health check; during
+     * HELLO/SYNC it matters for the Studio internet bridge, whose splice
+     * ends a session on prolonged one-way silence (a guest receiving a
+     * big world transfer would otherwise send nothing for its whole
+     * duration). Costs 4 B/s on a cable — harmless. */
+    if (s_ns >= NS_HELLO) {
+        s_ka_t += dt;
+        if (s_ka_t >= 0.5f) {
+            s_ka_t = 0;
+            uint8_t m[2] = { NET_MAGIC, 'k' };
+            tx_send(m, 2);
+        }
+    }
+
     switch (s_ns) {
     case NS_WAIT_LINK:
         s_phase = "SEARCHING FOR FRIEND";
@@ -870,7 +885,10 @@ void craft_net_tick(const CraftInput *in, float dt) {
         s_hello_t -= dt;
         if (s_hello_t <= 0) { send_hello(); s_hello_t = 0.45f; }
         s_wait_t += dt;
-        if (s_wait_t > 20.0f) { net_fail("NO ANSWER FROM PEER"); break; }
+        /* 120 s: on a cable the peer answers within seconds, but through
+         * the Studio internet bridge this stage covers relay matchmaking
+         * (the friend may not have opened their side yet). B cancels. */
+        if (s_wait_t > 120.0f) { net_fail("NO ANSWER FROM PEER"); break; }
         if (s_got_hello) {
             s_ns = NS_SYNC;
             s_wait_t = 0;
@@ -883,6 +901,15 @@ void craft_net_tick(const CraftInput *in, float dt) {
             world_tx_pump();
             flush_edits();               /* live edits ride behind the stream */
             if (s_txphase >= 5 && s_txoff >= s_txlen) s_phase = "WAITING FOR FRIEND";
+        } else if (s_wtotal == 0) {
+            /* We heard the host, but the host may not have heard US: over
+             * the Studio internet bridge our pre-pairing hellos are eaten
+             * by the bridge's sniffing, and the host's queued hello lands
+             * the instant the relay pairs — so we'd go quiet before ever
+             * being heard. Keep offering the hello until the host's 'W'
+             * proves the handshake completed. Harmless on a cable. */
+            s_hello_t -= dt;
+            if (s_hello_t <= 0) { send_hello(); s_hello_t = 0.45f; }
         }
         /* Timeout on STALL, not total time — a big journal over the
          * cable can legitimately take minutes. Any forward progress
@@ -907,13 +934,6 @@ void craft_net_tick(const CraftInput *in, float dt) {
         if (s_state_t >= 1.0f / 15.0f) { s_state_t = 0; send_state(); }
         flush_edits();
         chest_watch();
-        /* keepalive: never let the pipe sit silent longer than 500 ms */
-        s_ka_t += dt;
-        if (s_ka_t >= 0.5f) {
-            s_ka_t = 0;
-            uint8_t m[2] = { NET_MAGIC, 'k' };
-            tx_send(m, 2);
-        }
         break;
     }
     default: break;
