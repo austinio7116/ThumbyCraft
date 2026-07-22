@@ -10,7 +10,7 @@
 # host/ CMakeLists, with the cross-toolchain overridden so this
 # always builds natively.
 #
-cmake_minimum_required(VERSION 3.16)
+cmake_minimum_required(VERSION 3.15)
 project(thumbycraft_baker C)
 set(CMAKE_C_STANDARD 11)
 
